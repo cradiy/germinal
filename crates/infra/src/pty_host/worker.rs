@@ -1,0 +1,448 @@
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+		mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+	},
+	thread,
+	time::{Duration, Instant},
+};
+
+use germinal_domain::{
+	rendering::render_target_id::RenderTargetId, shared::seq::Seq, workspace::pane_id::PaneId,
+};
+use germinal_ports::{
+	event::{
+		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event_dispatcher::RuntimeEventDispatcher,
+	},
+	pty_host::snapshot::TerminalSnapshotProvider,
+	rendering::{
+		frame_plan_builder::{BuildFramePlanTask, FramePlanBuilder},
+		frame_plan_presenter::FramePlanPresenter,
+		surface_snapshot::{RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider},
+	},
+};
+
+use crate::{
+	pty::portable_pty_bridge::PtyInputSender,
+	pty_host::alacritty_state_store::{AlacrittyTermSize, AlacrittyTermStateStore},
+	rendering::{
+		snapshot_frame_plan_builder::SnapshotFramePlanBuilder,
+		text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter,
+	},
+};
+
+const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
+const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
+const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
+const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+pub enum TerminalWorkerInput {
+	Bytes(Vec<u8>),
+	Resize(AlacrittyTermSize),
+	SetPtyInput(PtyInputSender),
+}
+
+pub struct TerminalWorker;
+
+impl TerminalWorker {
+	pub fn spawn(
+		proxy: RuntimeEventDispatcher,
+		pane_id: PaneId,
+		initial_size: AlacrittyTermSize,
+		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+		snapshot_wake_pending: Arc<AtomicBool>,
+	) -> SyncSender<TerminalWorkerInput> {
+		let (tx, rx) = mpsc::sync_channel::<TerminalWorkerInput>(TERMINAL_INPUT_CHANNEL_CAPACITY);
+
+		thread::spawn(move || {
+			let mut runtime = TerminalWorkerRuntime::new(
+				proxy,
+				pane_id,
+				initial_size,
+				surface_snapshot_tx,
+				snapshot_wake_pending,
+			);
+
+			runtime.run(rx);
+		});
+
+		tx
+	}
+}
+
+struct TerminalWorkerRuntime {
+	proxy: RuntimeEventDispatcher,
+
+	pane_id:   PaneId,
+	target_id: RenderTargetId,
+	seq:       u64,
+
+	term_store:         AlacrittyTermStateStore,
+	frame_plan_builder: SnapshotFramePlanBuilder<AlacrittyTermStateStore>,
+	surface_presenter:  TextSurfaceFramePlanPresenter,
+
+	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
+	snapshot_wake_pending: Arc<AtomicBool>,
+
+	pending_chunks:    Vec<Vec<u8>>,
+	pending_bytes_len: usize,
+
+	unpublished_seq: Option<Seq>,
+
+	perf: TerminalWorkerPerf,
+
+	pty_input_tx: Option<PtyInputSender>,
+}
+
+impl TerminalWorkerRuntime {
+	fn new(
+		proxy: RuntimeEventDispatcher,
+		pane_id: PaneId,
+		initial_size: AlacrittyTermSize,
+		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+		snapshot_wake_pending: Arc<AtomicBool>,
+	) -> Self {
+		let target_id = RenderTargetId::new(pane_id.value());
+		let term_store = AlacrittyTermStateStore::with_size(initial_size);
+		let frame_plan_builder = SnapshotFramePlanBuilder::new(term_store.clone());
+		let surface_presenter = TextSurfaceFramePlanPresenter::new();
+
+		Self {
+			proxy,
+
+			pane_id,
+			target_id,
+			seq: 0,
+
+			term_store,
+			frame_plan_builder,
+			surface_presenter,
+
+			surface_snapshot_tx,
+			snapshot_wake_pending,
+
+			pending_chunks: Vec::new(),
+			pending_bytes_len: 0,
+
+			unpublished_seq: None,
+
+			perf: TerminalWorkerPerf::new(),
+
+			pty_input_tx: None,
+		}
+	}
+
+	fn run(&mut self, rx: Receiver<TerminalWorkerInput>) {
+		while let Ok(first_input) = rx.recv() {
+			self.process_batch(first_input, &rx);
+
+			if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
+				self.flush_pending_input();
+			}
+
+			self.flush_pending_input();
+			self.publish_unpublished_snapshot();
+
+			self.perf.maybe_log();
+		}
+
+		self.flush_pending_input();
+		self.publish_unpublished_snapshot();
+		self.perf.maybe_force_log();
+	}
+
+	fn process_batch(
+		&mut self,
+		first_input: TerminalWorkerInput,
+		rx: &Receiver<TerminalWorkerInput>,
+	) {
+		self.collect_input(first_input);
+
+		for _ in 0..MAX_EVENTS_PER_WORKER_TICK {
+			if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
+				break;
+			}
+
+			match rx.try_recv() {
+				Ok(input) => {
+					self.collect_input(input);
+				}
+				Err(TryRecvError::Empty) => break,
+				Err(TryRecvError::Disconnected) => break,
+			}
+		}
+	}
+
+	fn collect_input(&mut self, input: TerminalWorkerInput) {
+		match input {
+			TerminalWorkerInput::Bytes(bytes) => {
+				self.perf.input_chunks += 1;
+				self.perf.input_bytes += bytes.len() as u64;
+
+				self.pending_bytes_len += bytes.len();
+				self.pending_chunks.push(bytes);
+			}
+			TerminalWorkerInput::Resize(size) => {
+				self.flush_pending_input();
+				self.unpublished_seq = Some(self.resize(size));
+			}
+			TerminalWorkerInput::SetPtyInput(tx) => {
+				self.pty_input_tx = Some(tx);
+			}
+		}
+	}
+
+	fn flush_pending_input(&mut self) {
+		if self.pending_chunks.is_empty() {
+			return;
+		}
+
+		let chunks = std::mem::take(&mut self.pending_chunks);
+		self.pending_bytes_len = 0;
+
+		self.unpublished_seq = Some(self.apply_byte_chunks(&chunks));
+	}
+
+	fn forward_pty_writes(&self, writes: Vec<Vec<u8>>) {
+		if writes.is_empty() {
+			return;
+		}
+
+		let Some(tx) = self.pty_input_tx.as_ref() else {
+			return;
+		};
+
+		for bytes in writes {
+			let _ = tx.send(crate::pty::portable_pty_bridge::PtyBridgeInput::Bytes(bytes));
+		}
+	}
+
+	fn apply_byte_chunks(&mut self, chunks: &[Vec<u8>]) -> Seq {
+		self.seq += 1;
+
+		let seq = Seq::new(self.seq);
+		let started_at = Instant::now();
+
+		for bytes in chunks {
+			self.term_store.apply_bytes(self.target_id, seq, bytes);
+
+			let pending_pty_writes = self.term_store.take_pending_pty_writes(self.target_id);
+			self.forward_pty_writes(pending_pty_writes);
+		}
+
+		let elapsed = started_at.elapsed();
+
+		self.perf.apply_batches += 1;
+		self.perf.apply_chunks += chunks.len() as u64;
+		self.perf.apply_time += elapsed;
+		self.perf.apply_max = self.perf.apply_max.max(elapsed);
+
+		seq
+	}
+
+	fn resize(&mut self, size: AlacrittyTermSize) -> Seq {
+		self.seq += 1;
+
+		let seq = Seq::new(self.seq);
+		let started_at = Instant::now();
+
+		self.term_store.resize(self.target_id, seq, size);
+
+		let elapsed = started_at.elapsed();
+
+		self.perf.resize_count += 1;
+		self.perf.resize_time += elapsed;
+		self.perf.resize_max = self.perf.resize_max.max(elapsed);
+
+		seq
+	}
+
+	fn publish_unpublished_snapshot(&mut self) {
+		let Some(seq) = self.unpublished_seq.take() else {
+			return;
+		};
+
+		let started_at = Instant::now();
+
+		let frame =
+			self.frame_plan_builder.build(BuildFramePlanTask { target_id: self.target_id, seq });
+
+		self.surface_presenter.present(&frame);
+		self.term_store.clear_damage_up_to(self.target_id, seq);
+
+		let snapshot = self
+			.surface_presenter
+			.surface_snapshot_of(self.target_id)
+			.expect("surface snapshot should exist");
+
+		let snapshot_sent = self.surface_snapshot_tx.send(snapshot).is_ok();
+		let wake_already_pending =
+			snapshot_sent && self.snapshot_wake_pending.swap(true, Ordering::AcqRel);
+
+		let elapsed = started_at.elapsed();
+
+		self.perf.publish_count += 1;
+		self.perf.publish_time += elapsed;
+		self.perf.publish_max = self.perf.publish_max.max(elapsed);
+
+		if !snapshot_sent {
+			return;
+		}
+
+		if wake_already_pending {
+			self.perf.coalesced_wakeups += 1;
+			return;
+		}
+
+		let _ = self
+			.proxy
+			.dispatch(RuntimeEvent::Pane(PaneRuntimeEvent::FrameReady { pane_id: self.pane_id, seq }));
+	}
+}
+
+struct TerminalWorkerPerf {
+	started_at:  Instant,
+	last_log_at: Instant,
+
+	input_chunks: u64,
+	input_bytes:  u64,
+
+	apply_batches: u64,
+	apply_chunks:  u64,
+	apply_time:    Duration,
+	apply_max:     Duration,
+
+	publish_count: u64,
+	publish_time:  Duration,
+	publish_max:   Duration,
+
+	resize_count: u64,
+	resize_time:  Duration,
+	resize_max:   Duration,
+
+	coalesced_wakeups: u64,
+}
+
+impl TerminalWorkerPerf {
+	fn new() -> Self {
+		let now = Instant::now();
+
+		Self {
+			started_at:  now,
+			last_log_at: now,
+
+			input_chunks: 0,
+			input_bytes:  0,
+
+			apply_batches: 0,
+			apply_chunks:  0,
+			apply_time:    Duration::ZERO,
+			apply_max:     Duration::ZERO,
+
+			publish_count: 0,
+			publish_time:  Duration::ZERO,
+			publish_max:   Duration::ZERO,
+
+			resize_count: 0,
+			resize_time:  Duration::ZERO,
+			resize_max:   Duration::ZERO,
+
+			coalesced_wakeups: 0,
+		}
+	}
+
+	fn maybe_log(&mut self) {
+		if self.last_log_at.elapsed() < PERF_LOG_INTERVAL {
+			return;
+		}
+
+		self.log_and_reset();
+	}
+
+	fn maybe_force_log(&mut self) {
+		if self.input_chunks == 0
+			&& self.apply_batches == 0
+			&& self.publish_count == 0
+			&& self.resize_count == 0
+		{
+			return;
+		}
+
+		self.log_and_reset();
+	}
+
+	fn log_and_reset(&mut self) {
+		let elapsed = self.last_log_at.elapsed();
+		let elapsed_secs = elapsed.as_secs_f64().max(0.001);
+
+		let mib = self.input_bytes as f64 / 1024.0 / 1024.0;
+		let mib_per_sec = mib / elapsed_secs;
+
+		eprintln!(
+			"[terminal-worker] input={} chunks / {:.2} MiB / {:.2} MiB/s, apply={} batches {} chunks \
+			 avg={} max={}, publish={} avg={} max={}, resize={} avg={} max={}, coalesced_wakeups={}, \
+			 uptime={}",
+			self.input_chunks,
+			mib,
+			mib_per_sec,
+			self.apply_batches,
+			self.apply_chunks,
+			fmt_avg(self.apply_time, self.apply_batches),
+			fmt_duration(self.apply_max),
+			self.publish_count,
+			fmt_avg(self.publish_time, self.publish_count),
+			fmt_duration(self.publish_max),
+			self.resize_count,
+			fmt_avg(self.resize_time, self.resize_count),
+			fmt_duration(self.resize_max),
+			self.coalesced_wakeups,
+			fmt_duration(self.started_at.elapsed()),
+		);
+
+		self.last_log_at = Instant::now();
+
+		self.input_chunks = 0;
+		self.input_bytes = 0;
+
+		self.apply_batches = 0;
+		self.apply_chunks = 0;
+		self.apply_time = Duration::ZERO;
+		self.apply_max = Duration::ZERO;
+
+		self.publish_count = 0;
+		self.publish_time = Duration::ZERO;
+		self.publish_max = Duration::ZERO;
+
+		self.resize_count = 0;
+		self.resize_time = Duration::ZERO;
+		self.resize_max = Duration::ZERO;
+
+		self.coalesced_wakeups = 0;
+	}
+}
+
+fn fmt_avg(total: Duration, count: u64) -> String {
+	if count == 0 {
+		return "-".to_string();
+	}
+
+	fmt_duration(total / count as u32)
+}
+
+fn fmt_duration(duration: Duration) -> String {
+	let micros = duration.as_micros();
+
+	if micros < 1_000 {
+		return format!("{micros}us");
+	}
+
+	let millis = duration.as_secs_f64() * 1_000.0;
+
+	if millis < 1_000.0 {
+		return format!("{millis:.2}ms");
+	}
+
+	format!("{:.2}s", duration.as_secs_f64())
+}
