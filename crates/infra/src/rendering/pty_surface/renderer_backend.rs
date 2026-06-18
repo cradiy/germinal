@@ -14,6 +14,7 @@ use germinal_ports::rendering::{
 	surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
 };
 
+const CURSOR_OUTLINE_THICKNESS_PX: u32 = 2;
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
 
 #[derive(Debug, Clone)]
@@ -83,7 +84,7 @@ impl RendererBackend for WgpuRendererBackend {
 		}
 
 		if let Some(cursor) = snapshot.cursor {
-			append_cursor_block_quad(&mut cursor_quads, cursor, config);
+			append_cursor_quads(&mut cursor_quads, cursor, config);
 		}
 
 		let mut quads = Vec::with_capacity(
@@ -95,7 +96,7 @@ impl RendererBackend for WgpuRendererBackend {
 		// 1. backgrounds
 		// 2. glyphs
 		// 3. underline overlays
-		// 4. cursor outline overlay
+		// 4. cursor overlay
 		quads.extend(background_quads);
 		quads.extend(glyph_quads);
 		quads.extend(underline_quads);
@@ -188,7 +189,7 @@ fn append_box_drawing_quads(
 	}
 }
 
-fn append_cursor_block_quad(
+fn append_cursor_quads(
 	quads: &mut Vec<WgpuQuadDrawItem>,
 	cursor: RenderSurfaceCursorSnapshot,
 	config: WgpuRendererConfig,
@@ -205,7 +206,16 @@ fn append_cursor_block_quad(
 		underline:  false,
 	};
 
-	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
+	if cursor.focused {
+		quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
+		return;
+	}
+
+	let thickness = CURSOR_OUTLINE_THICKNESS_PX.min(w).min(h).max(1);
+	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, thickness, style));
+	quads.push(WgpuQuadDrawItem::solid_rect(x, y + h.saturating_sub(thickness), w, thickness, style));
+	quads.push(WgpuQuadDrawItem::solid_rect(x, y, thickness, h, style));
+	quads.push(WgpuQuadDrawItem::solid_rect(x + w.saturating_sub(thickness), y, thickness, h, style));
 }
 
 fn box_drawing_connections(c: char) -> (bool, bool, bool, bool) {

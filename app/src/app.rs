@@ -5,7 +5,9 @@ use germinal_application::service::{
 	render_service::RenderServiceState, worker_service::WorkerServiceState,
 	workspace_service::WorkspaceServiceState,
 };
-use germinal_domain::pty_host::window_size::TerminalWindowSize;
+use germinal_domain::{
+	pty_host::window_size::TerminalWindowSize, rendering::render_target_id::RenderTargetId,
+};
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
@@ -75,6 +77,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		);
+		self.set_focused_render_target(RenderTargetId::new(focused_pane.value()));
 		self.prepare_render_backend();
 	}
 
@@ -120,6 +123,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
 					size_info.pty_size(),
 					size_info.grid_size(),
 				);
+			}
+			WindowEvent::Focused(focused) => {
+				self.set_window_focused(focused);
 			}
 			WindowEvent::RedrawRequested => {
 				self.present_workspace();

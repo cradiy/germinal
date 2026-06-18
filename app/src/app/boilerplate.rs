@@ -20,6 +20,7 @@ use germinal_domain::{
 		window_metrics::TerminalWindowMetrics,
 		window_size::TerminalWindowSize,
 	},
+	rendering::render_target_id::RenderTargetId,
 	workspace::pane_id::PaneId,
 };
 use germinal_infra::pty_host::worker::TerminalWorkerInput;
@@ -189,6 +190,14 @@ impl IRenderService for App {
 
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		RenderService::inj_ref_mut(self).resize_window_size_info(window_size)
+	}
+
+	fn set_window_focused(&mut self, focused: bool) {
+		RenderService::inj_ref_mut(self).set_window_focused(focused)
+	}
+
+	fn set_focused_render_target(&mut self, target_id: RenderTargetId) {
+		RenderService::inj_ref_mut(self).set_focused_render_target(target_id)
 	}
 
 	fn request_redraw(&mut self) { RenderService::inj_ref_mut(self).request_redraw() }

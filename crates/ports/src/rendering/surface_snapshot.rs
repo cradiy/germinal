@@ -25,8 +25,9 @@ pub struct RenderSurfaceRunSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderSurfaceCursorSnapshot {
-	pub x: u32,
-	pub y: u32,
+	pub x:       u32,
+	pub y:       u32,
+	pub focused: bool,
 }
 
 pub trait RenderSurfaceSnapshotProvider {

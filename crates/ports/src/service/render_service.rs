@@ -1,6 +1,9 @@
 use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 
-use germinal_domain::pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize};
+use germinal_domain::{
+	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
+	rendering::render_target_id::RenderTargetId,
+};
 
 use crate::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
@@ -11,6 +14,8 @@ pub trait IRenderService {
 	fn consume_latest_terminal_snapshot(&mut self);
 	fn current_terminal_size_info(&self) -> TerminalSizeInfo;
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;
+	fn set_window_focused(&mut self, focused: bool);
+	fn set_focused_render_target(&mut self, target_id: RenderTargetId);
 	fn request_redraw(&mut self);
 	fn flush_redraw_request(&mut self);
 	fn present_workspace(&mut self);

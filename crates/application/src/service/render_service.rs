@@ -4,7 +4,10 @@ use std::sync::{
 	mpsc::{self, Receiver, Sender, TryRecvError},
 };
 
-use germinal_domain::pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize};
+use germinal_domain::{
+	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
+	rendering::render_target_id::RenderTargetId,
+};
 use germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalWindowRuntime;
 use germinal_ports::{
 	rendering::surface_snapshot::RenderSurfaceSnapshot, service::render_service::IRenderService,
@@ -22,12 +25,15 @@ struct WindowRuntimeState {
 #[derive(kudi::DepInj)]
 #[target(RenderService)]
 pub struct RenderServiceState {
-	runtime:               Option<WindowRuntimeState>,
-	window_size:           TerminalWindowSize,
-	redraw_pending:        bool,
-	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
-	surface_snapshot_rx:   Receiver<RenderSurfaceSnapshot>,
-	snapshot_wake_pending: Arc<AtomicBool>,
+	runtime:                 Option<WindowRuntimeState>,
+	window_size:             TerminalWindowSize,
+	redraw_pending:          bool,
+	window_focused:          bool,
+	focused_render_target:   Option<RenderTargetId>,
+	latest_surface_snapshot: Option<RenderSurfaceSnapshot>,
+	surface_snapshot_tx:     Sender<RenderSurfaceSnapshot>,
+	surface_snapshot_rx:     Receiver<RenderSurfaceSnapshot>,
+	snapshot_wake_pending:   Arc<AtomicBool>,
 }
 
 impl RenderServiceState {
@@ -38,6 +44,9 @@ impl RenderServiceState {
 			runtime: None,
 			window_size: TerminalWindowSize::new(960, 540),
 			redraw_pending: false,
+			window_focused: true,
+			focused_render_target: None,
+			latest_surface_snapshot: None,
 			surface_snapshot_tx,
 			surface_snapshot_rx,
 			snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -113,10 +122,51 @@ impl RenderServiceState {
 	}
 
 	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
+		let snapshot = self.with_cursor_focus(snapshot);
 		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
 
-		runtime.runtime.set_surface_snapshot(snapshot);
+		runtime.runtime.set_surface_snapshot(snapshot.clone());
+		self.latest_surface_snapshot = Some(snapshot);
 		self.redraw_pending = true;
+	}
+
+	fn set_window_focused(&mut self, focused: bool) {
+		if self.window_focused == focused {
+			return;
+		}
+
+		self.window_focused = focused;
+		self.refresh_cursor_focus();
+	}
+
+	fn set_focused_render_target(&mut self, target_id: RenderTargetId) {
+		if self.focused_render_target == Some(target_id) {
+			return;
+		}
+
+		self.focused_render_target = Some(target_id);
+		self.refresh_cursor_focus();
+	}
+
+	fn refresh_cursor_focus(&mut self) {
+		let Some(snapshot) = self.latest_surface_snapshot.clone() else {
+			return;
+		};
+
+		let snapshot = self.with_cursor_focus(snapshot);
+		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
+		runtime.runtime.set_surface_snapshot(snapshot.clone());
+		self.latest_surface_snapshot = Some(snapshot);
+		self.redraw_pending = true;
+	}
+
+	fn with_cursor_focus(&self, mut snapshot: RenderSurfaceSnapshot) -> RenderSurfaceSnapshot {
+		if let Some(cursor) = snapshot.cursor.as_mut() {
+			cursor.focused =
+				self.window_focused && self.focused_render_target == Some(snapshot.target_id);
+		}
+
+		snapshot
 	}
 
 	fn request_redraw(&mut self) { self.redraw_pending = true; }
@@ -183,6 +233,16 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState>
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
 		state.resize_window_surface_size_info(window_size)
+	}
+
+	fn set_window_focused(&mut self, focused: bool) {
+		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+		state.set_window_focused(focused);
+	}
+
+	fn set_focused_render_target(&mut self, target_id: RenderTargetId) {
+		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+		state.set_focused_render_target(target_id);
 	}
 
 	fn request_redraw(&mut self) {

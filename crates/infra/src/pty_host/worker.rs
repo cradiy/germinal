@@ -283,7 +283,7 @@ impl TerminalWorkerRuntime {
 		snapshot.cursor = self
 			.term_store
 			.cursor_position_0_based(self.target_id)
-			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y });
+			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y, focused: true });
 
 		let snapshot_sent = self.surface_snapshot_tx.send(snapshot).is_ok();
 		let wake_already_pending =
