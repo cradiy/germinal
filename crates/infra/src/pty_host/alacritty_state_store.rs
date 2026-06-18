@@ -426,12 +426,19 @@ fn style_has_visible_content(style: TextStyleDto) -> bool {
 }
 
 fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextStyleDto {
+	let mut foreground = color_to_rgb(fg, colors);
+	let mut background = color_to_rgb(bg, colors);
+
+	if flags.contains(Flags::INVERSE) {
+		std::mem::swap(&mut foreground, &mut background);
+	}
+
 	TextStyleDto {
-		foreground: color_to_rgb(fg, colors),
-		background: color_to_rgb(bg, colors),
-		bold:       flags.contains(Flags::BOLD),
-		italic:     flags.contains(Flags::ITALIC),
-		underline:  flags.contains(Flags::UNDERLINE),
+		foreground,
+		background,
+		bold: flags.contains(Flags::BOLD),
+		italic: flags.contains(Flags::ITALIC),
+		underline: flags.contains(Flags::UNDERLINE),
 	}
 }
 
@@ -674,5 +681,20 @@ mod tests {
 
 		assert!(snapshot.dirty_rows.contains(&0));
 		assert!(snapshot.dirty_rows.contains(&1));
+	}
+
+	#[test]
+	fn inverse_text_swaps_default_foreground_and_background() {
+		let store = AlacrittyTermStateStore::new();
+		let target_id = RenderTargetId::new(1);
+
+		store.apply_bytes(target_id, Seq::new(1), b"\x1b[7mfoo\x1b[0m");
+
+		let snapshot = store.snapshot_of(target_id).expect("snapshot should exist");
+		let run =
+			snapshot.text_runs.iter().find(|run| run.text == "foo").expect("inverse run should exist");
+
+		assert_eq!(run.style.foreground, Some(RgbColorDto::new(0, 0, 0)));
+		assert_eq!(run.style.background, Some(RgbColorDto::new(229, 229, 229)));
 	}
 }
