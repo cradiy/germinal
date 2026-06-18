@@ -90,13 +90,16 @@ impl WgpuDrawIndexedStats {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
 	use super::*;
+	use crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex;
 
 	#[test]
 	fn builds_draw_indexed_plan_from_upload_bytes() {
 		let upload_bytes = WgpuBufferUploadBytes {
-			vertex_bytes: vec![0; 4 * 48],
-			index_bytes:  vec![0; 6 * std::mem::size_of::<u32>()],
+			vertex_data:  Arc::from(vec![WgpuGpuVertex::default(); 4]),
+			index_data:   Arc::from(vec![0_u32; 6]),
 			vertex_count: 4,
 			index_count:  6,
 		};
@@ -118,8 +121,8 @@ mod tests {
 	#[test]
 	fn returns_none_for_empty_upload_bytes() {
 		let upload_bytes = WgpuBufferUploadBytes {
-			vertex_bytes: Vec::new(),
-			index_bytes:  Vec::new(),
+			vertex_data:  Arc::from(Vec::<WgpuGpuVertex>::new()),
+			index_data:   Arc::from(Vec::<u32>::new()),
 			vertex_count: 0,
 			index_count:  0,
 		};

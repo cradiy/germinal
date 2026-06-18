@@ -297,7 +297,7 @@ mod tests {
 		assert!(frame.atlas_height_px() > 0);
 		assert_eq!(
 			frame.upload_byte_len(),
-			(frame.atlas_width_px() * frame.atlas_height_px()) as usize
+			(frame.atlas_width_px() * frame.atlas_height_px() * 4) as usize
 		);
 	}
 

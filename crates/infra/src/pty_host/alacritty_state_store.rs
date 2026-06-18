@@ -8,8 +8,8 @@ use std::{
 use alacritty_terminal::{
 	event::{Event, EventListener},
 	grid::Dimensions,
-	term::{Config, Term, TermDamage, cell::Flags},
-	vte::ansi::{Color, NamedColor, Processor, StdSyncHandler},
+	term::{Config, Term, TermDamage, cell::Flags, color::Colors},
+	vte::ansi::{Color, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_domain::{
 	pty_host::width::terminal_char_cell_width, rendering::render_target_id::RenderTargetId,
@@ -283,9 +283,10 @@ struct StyledCell {
 fn visible_lines_and_runs(
 	term: &Term<PtyWriteEventListener>,
 ) -> (Vec<TerminalLineSnapshot>, Vec<TerminalTextRunSnapshot>) {
+	let renderable = term.renderable_content();
 	let mut cells_by_row: BTreeMap<u32, Vec<StyledCell>> = BTreeMap::new();
 
-	for indexed in term.grid().display_iter() {
+	for indexed in renderable.display_iter {
 		let raw_row = indexed.point.line.0;
 		let raw_col = indexed.point.column.0;
 		let cell = indexed.cell;
@@ -303,7 +304,7 @@ fn visible_lines_and_runs(
 		cells_by_row.entry(row).or_default().push(StyledCell {
 			col,
 			c: cell.c,
-			style: style_of_cell(cell.fg, cell.bg, cell.flags),
+			style: style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors),
 		});
 	}
 
@@ -412,25 +413,29 @@ fn style_has_visible_content(style: TextStyleDto) -> bool {
 	style.background.is_some() || style.underline || style.bold || style.italic
 }
 
-fn style_of_cell(fg: Color, bg: Color, flags: Flags) -> TextStyleDto {
+fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextStyleDto {
 	TextStyleDto {
-		foreground: color_to_rgb(fg),
-		background: color_to_rgb(bg),
+		foreground: color_to_rgb(fg, colors),
+		background: color_to_rgb(bg, colors),
 		bold:       flags.contains(Flags::BOLD),
 		italic:     flags.contains(Flags::ITALIC),
 		underline:  flags.contains(Flags::UNDERLINE),
 	}
 }
 
-fn color_to_rgb(color: Color) -> Option<RgbColorDto> {
+fn color_to_rgb(color: Color, colors: &Colors) -> Option<RgbColorDto> {
 	match color {
-		Color::Spec(rgb) => Some(RgbColorDto::new(rgb.r, rgb.g, rgb.b)),
-		Color::Named(named) => named_color_to_rgb(named),
-		Color::Indexed(index) => indexed_color_to_rgb(index),
+		Color::Spec(rgb) => Some(rgb_to_dto(rgb)),
+		Color::Named(named) => named_color_to_rgb(named, colors),
+		Color::Indexed(index) => indexed_color_to_rgb(index, colors),
 	}
 }
 
-fn named_color_to_rgb(color: NamedColor) -> Option<RgbColorDto> {
+fn named_color_to_rgb(color: NamedColor, colors: &Colors) -> Option<RgbColorDto> {
+	if let Some(rgb) = colors[color] {
+		return Some(rgb_to_dto(rgb));
+	}
+
 	match color {
 		NamedColor::Black => Some(RgbColorDto::new(0, 0, 0)),
 		NamedColor::Red => Some(RgbColorDto::new(205, 49, 49)),
@@ -448,11 +453,17 @@ fn named_color_to_rgb(color: NamedColor) -> Option<RgbColorDto> {
 		NamedColor::BrightMagenta => Some(RgbColorDto::new(214, 112, 214)),
 		NamedColor::BrightCyan => Some(RgbColorDto::new(41, 184, 219)),
 		NamedColor::BrightWhite => Some(RgbColorDto::new(255, 255, 255)),
+		NamedColor::Foreground => Some(RgbColorDto::new(229, 229, 229)),
+		NamedColor::Background => Some(RgbColorDto::new(0, 0, 0)),
 		_ => None,
 	}
 }
 
-fn indexed_color_to_rgb(index: u8) -> Option<RgbColorDto> {
+fn indexed_color_to_rgb(index: u8, colors: &Colors) -> Option<RgbColorDto> {
+	if let Some(rgb) = colors[index as usize] {
+		return Some(rgb_to_dto(rgb));
+	}
+
 	match index {
 		0 => Some(RgbColorDto::new(0, 0, 0)),
 		1 => Some(RgbColorDto::new(205, 49, 49)),
@@ -491,6 +502,8 @@ fn indexed_color_to_rgb(index: u8) -> Option<RgbColorDto> {
 	}
 }
 
+fn rgb_to_dto(rgb: Rgb) -> RgbColorDto { RgbColorDto::new(rgb.r, rgb.g, rgb.b) }
+
 fn ansi_256_cube_component(level: u8) -> u8 {
 	match level {
 		0 => 0,
@@ -503,7 +516,20 @@ fn dirty_rows_of(damage: TermDamage<'_>, screen_lines: usize) -> Vec<u32> {
 	match damage {
 		TermDamage::Full => (0..screen_lines as u32).collect(),
 		TermDamage::Partial(lines) => {
-			let rows: BTreeSet<u32> = lines.map(|line| line.line as u32).collect();
+			let mut rows = BTreeSet::new();
+
+			for line in lines {
+				let row = line.line as u32;
+				rows.insert(row);
+
+				if row > 0 {
+					rows.insert(row - 1);
+				}
+
+				if row + 1 < screen_lines as u32 {
+					rows.insert(row + 1);
+				}
+			}
 
 			rows.into_iter().collect()
 		}
@@ -602,5 +628,39 @@ mod tests {
 			"dirty rows should stay inside resized screen bounds: {:?}",
 			snapshot.dirty_rows,
 		);
+	}
+
+	#[test]
+	fn resolves_default_background_to_black_run() {
+		let store = AlacrittyTermStateStore::new();
+		let target_id = RenderTargetId::new(1);
+
+		store.apply_bytes(target_id, Seq::new(1), b"\x1b[40m \x1b[0m");
+
+		let snapshot = store.snapshot_of(target_id).expect("snapshot should exist");
+		let run = snapshot
+			.text_runs
+			.iter()
+			.find(|run| run.y == 0 && run.x == 0)
+			.expect("background run should exist");
+
+		assert!(!run.text.is_empty());
+		assert!(run.text.chars().all(|c| c == ' '));
+		assert_eq!(run.style.background, Some(RgbColorDto::new(0, 0, 0)));
+	}
+
+	#[test]
+	fn expands_partial_damage_to_neighbor_rows() {
+		let store = AlacrittyTermStateStore::with_size(AlacrittyTermSize::new(4, 4));
+		let target_id = RenderTargetId::new(1);
+
+		let _ = store.snapshot_of(target_id);
+
+		store.apply_bytes(target_id, Seq::new(1), b"a");
+
+		let snapshot = store.snapshot_of(target_id).expect("snapshot should exist");
+
+		assert!(snapshot.dirty_rows.contains(&0));
+		assert!(snapshot.dirty_rows.contains(&1));
 	}
 }

@@ -1,4 +1,5 @@
 use std::{
+	env,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -37,6 +38,7 @@ const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
 const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
 
 pub enum TerminalWorkerInput {
 	Bytes(Vec<u8>),
@@ -303,8 +305,9 @@ impl TerminalWorkerRuntime {
 }
 
 struct TerminalWorkerPerf {
-	started_at:  Instant,
-	last_log_at: Instant,
+	logging_enabled: bool,
+	started_at:      Instant,
+	last_log_at:     Instant,
 
 	input_chunks: u64,
 	input_bytes:  u64,
@@ -330,8 +333,9 @@ impl TerminalWorkerPerf {
 		let now = Instant::now();
 
 		Self {
-			started_at:  now,
-			last_log_at: now,
+			logging_enabled: terminal_worker_perf_logging_enabled(),
+			started_at:      now,
+			last_log_at:     now,
 
 			input_chunks: 0,
 			input_bytes:  0,
@@ -354,6 +358,10 @@ impl TerminalWorkerPerf {
 	}
 
 	fn maybe_log(&mut self) {
+		if !self.logging_enabled {
+			return;
+		}
+
 		if self.last_log_at.elapsed() < PERF_LOG_INTERVAL {
 			return;
 		}
@@ -362,6 +370,10 @@ impl TerminalWorkerPerf {
 	}
 
 	fn maybe_force_log(&mut self) {
+		if !self.logging_enabled {
+			return;
+		}
+
 		if self.input_chunks == 0
 			&& self.apply_batches == 0
 			&& self.publish_count == 0
@@ -445,4 +457,10 @@ fn fmt_duration(duration: Duration) -> String {
 	}
 
 	format!("{:.2}s", duration.as_secs_f64())
+}
+
+fn terminal_worker_perf_logging_enabled() -> bool {
+	env::var_os(TERMINAL_WORKER_PERF_LOG_ENV).and_then(|value| value.into_string().ok()).is_some_and(
+		|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+	)
 }

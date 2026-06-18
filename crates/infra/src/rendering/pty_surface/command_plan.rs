@@ -133,6 +133,8 @@ pub struct WgpuTerminalCommandEncodeSummary {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
 	use super::*;
 	use crate::rendering::pty_surface::render_target_plan::WgpuTerminalRenderTargetPlan;
 
@@ -145,8 +147,10 @@ mod tests {
 			target_id,
 			seq,
 			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_bytes: vec![0; 4],
-				index_bytes:  vec![0; 4],
+				vertex_data:  Arc::from(vec![
+					crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
+				]),
+				index_data:   Arc::from(vec![0_u32]),
 				vertex_count: 4,
 				index_count:  42,
 			},
@@ -201,8 +205,10 @@ mod tests {
 			target_id,
 			seq,
 			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_bytes: Vec::new(),
-				index_bytes:  Vec::new(),
+				vertex_data:  Arc::from(
+					Vec::<crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex>::new(),
+				),
+				index_data:   Arc::from(Vec::<u32>::new()),
 				vertex_count: 0,
 				index_count:  0,
 			},
@@ -233,8 +239,10 @@ mod tests {
 			target_id,
 			seq,
 			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_bytes: vec![0; 4],
-				index_bytes:  vec![0; 4],
+				vertex_data:  Arc::from(vec![
+					crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
+				]),
+				index_data:   Arc::from(vec![0_u32]),
 				vertex_count: 4,
 				index_count:  6,
 			},

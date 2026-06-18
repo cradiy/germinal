@@ -61,6 +61,8 @@ impl RendererBackend for WgpuRendererBackend {
 
 					if is_builtin_box_drawing(c) {
 						append_box_drawing_quads(&mut glyph_quads, glyph, config);
+					} else if is_builtin_block_element(c) {
+						append_block_element_quads(&mut glyph_quads, glyph, config);
 					} else if c != ' ' {
 						glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
 					}
@@ -189,6 +191,228 @@ fn box_drawing_connections(c: char) -> (bool, bool, bool, bool) {
 		'┴' => (true, true, true, false),
 		'┼' => (true, true, true, true),
 		_ => (false, false, false, false),
+	}
+}
+
+fn is_builtin_block_element(c: char) -> bool {
+	matches!(
+		c,
+		'▀'
+			| '▄'
+			| '█'
+			| '▁'
+			| '▂'
+			| '▃'
+			| '▅'
+			| '▆'
+			| '▇'
+			| '▉'
+			| '▊'
+			| '▋'
+			| '▌'
+			| '▍'
+			| '▎'
+			| '▏'
+			| '▐'
+			| '▔'
+			| '▕'
+			| '▖'
+			| '▗'
+			| '▘'
+			| '▙'
+			| '▚'
+			| '▛'
+			| '▜'
+			| '▝'
+			| '▞'
+			| '▟'
+			| '🮂'
+			| '🮃'
+			| '🮄'
+			| '🮅'
+			| '🮆'
+			| '🮇'
+			| '🮈'
+			| '🮉'
+			| '🮊'
+			| '🮋'
+	)
+}
+
+fn append_block_element_quads(
+	quads: &mut Vec<WgpuQuadDrawItem>,
+	glyph: WgpuGlyphDrawItem,
+	config: WgpuRendererConfig,
+) {
+	let x = glyph.pixel_x(config);
+	let y = glyph.pixel_y(config);
+	let w = glyph.pixel_width(config);
+	let h = config.cell_height_px;
+
+	match glyph.c {
+		'█' => quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, glyph.style)),
+		'▀' => quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h.div_ceil(2), glyph.style)),
+		'▄' => {
+			let fill_h = h.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x,
+				y + h.saturating_sub(fill_h),
+				w,
+				fill_h,
+				glyph.style,
+			));
+		}
+		'▐' => {
+			let fill_w = w.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(fill_w),
+				y,
+				fill_w,
+				h,
+				glyph.style,
+			));
+		}
+		'▔' => quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h.div_ceil(8), glyph.style)),
+		'▕' => {
+			let fill_w = w.div_ceil(8);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(fill_w),
+				y,
+				fill_w,
+				h,
+				glyph.style,
+			));
+		}
+		'▖' => {
+			let fill_w = w.div_ceil(2);
+			let fill_h = h.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x,
+				y + h.saturating_sub(fill_h),
+				fill_w,
+				fill_h,
+				glyph.style,
+			));
+		}
+		'▗' => {
+			let fill_w = w.div_ceil(2);
+			let fill_h = h.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(fill_w),
+				y + h.saturating_sub(fill_h),
+				fill_w,
+				fill_h,
+				glyph.style,
+			));
+		}
+		'▘' => {
+			let fill_w = w.div_ceil(2);
+			let fill_h = h.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, fill_w, fill_h, glyph.style));
+		}
+		'▝' => {
+			let fill_w = w.div_ceil(2);
+			let fill_h = h.div_ceil(2);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(fill_w),
+				y,
+				fill_w,
+				fill_h,
+				glyph.style,
+			));
+		}
+		'▚' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▘', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▗', ..glyph }, config);
+		}
+		'▞' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▝', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▖', ..glyph }, config);
+		}
+		'▙' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▘', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▖', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▗', ..glyph }, config);
+		}
+		'▛' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▘', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▖', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▝', ..glyph }, config);
+		}
+		'▜' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▘', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▝', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▗', ..glyph }, config);
+		}
+		'▟' => {
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▝', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▖', ..glyph }, config);
+			append_block_element_quads(quads, WgpuGlyphDrawItem { c: '▗', ..glyph }, config);
+		}
+		'🮂' | '🮃' | '🮄' | '🮅' | '🮆' => {
+			let eighths = match glyph.c {
+				'🮂' => 2,
+				'🮃' => 3,
+				'🮄' => 5,
+				'🮅' => 6,
+				'🮆' => 7,
+				_ => unreachable!(),
+			};
+			let fill_h = (h * eighths).div_ceil(8);
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, fill_h, glyph.style));
+		}
+		'🮇' | '🮈' | '🮉' | '🮊' | '🮋' => {
+			let eighths = match glyph.c {
+				'🮇' => 2,
+				'🮈' => 3,
+				'🮉' => 5,
+				'🮊' => 6,
+				'🮋' => 7,
+				_ => unreachable!(),
+			};
+			let fill_w = (w * eighths).div_ceil(8);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(fill_w),
+				y,
+				fill_w,
+				h,
+				glyph.style,
+			));
+		}
+		'▁' | '▂' | '▃' | '▅' | '▆' | '▇' => {
+			let eighths = match glyph.c {
+				'▁' => 1,
+				'▂' => 2,
+				'▃' => 3,
+				'▅' => 5,
+				'▆' => 6,
+				'▇' => 7,
+				_ => unreachable!(),
+			};
+			let fill_h = (h * eighths).div_ceil(8);
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x,
+				y + h.saturating_sub(fill_h),
+				w,
+				fill_h,
+				glyph.style,
+			));
+		}
+		'▉' | '▊' | '▋' | '▌' | '▍' | '▎' | '▏' => {
+			let eighths = match glyph.c {
+				'▉' => 7,
+				'▊' => 6,
+				'▋' => 5,
+				'▌' => 4,
+				'▍' => 3,
+				'▎' => 2,
+				'▏' => 1,
+				_ => unreachable!(),
+			};
+			let fill_w = (w * eighths).div_ceil(8);
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, fill_w, h, glyph.style));
+		}
+		_ => {}
 	}
 }
 
@@ -630,5 +854,74 @@ mod tests {
 		assert_eq!(state.quads()[3].kind, WgpuQuadKind::Glyph { c: 'b' });
 		assert_eq!(state.quads()[4].kind, WgpuQuadKind::Underline);
 		assert_eq!(state.quads()[5].kind, WgpuQuadKind::Underline);
+	}
+
+	#[test]
+	fn renders_block_elements_as_crisp_rects_instead_of_font_glyphs() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+			cell_width_px:    8,
+			cell_height_px:   16,
+			content_origin_x: 0,
+			content_origin_y: 0,
+		});
+
+		let style = TextStyleDto {
+			foreground: Some(RgbColorDto::new(255, 255, 255)),
+			background: None,
+			bold:       false,
+			italic:     false,
+			underline:  false,
+		};
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id:  RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows:       vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "▄".to_string(), style }],
+			}],
+		});
+
+		let state = backend.state();
+
+		assert!(state.glyph_quads().is_empty());
+
+		let block_quads = state.underline_quads();
+		assert_eq!(block_quads.len(), 1);
+		assert_eq!(block_quads[0].x_px, 0);
+		assert_eq!(block_quads[0].y_px, 8);
+		assert_eq!(block_quads[0].width_px, 8);
+		assert_eq!(block_quads[0].height_px, 8);
+	}
+
+	#[test]
+	fn renders_upper_quarter_legacy_block_as_top_aligned_rect() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+			cell_width_px:    8,
+			cell_height_px:   16,
+			content_origin_x: 0,
+			content_origin_y: 0,
+		});
+
+		let style = TextStyleDto::plain();
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id:  RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows:       vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "🮂".to_string(), style }],
+			}],
+		});
+
+		let state = backend.state();
+		assert!(state.glyph_quads().is_empty());
+
+		let block_quads = state.underline_quads();
+		assert_eq!(block_quads.len(), 1);
+		assert_eq!(block_quads[0].x_px, 0);
+		assert_eq!(block_quads[0].y_px, 0);
+		assert_eq!(block_quads[0].width_px, 8);
+		assert_eq!(block_quads[0].height_px, 4);
 	}
 }
