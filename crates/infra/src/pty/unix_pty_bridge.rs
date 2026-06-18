@@ -132,11 +132,19 @@ async fn read_pty_to_terminal_worker_async(
 				}
 			}
 			Err(error) => {
+				if is_pty_hangup_read_error(&error) {
+					break;
+				}
+
 				eprintln!("pty read error: {error}");
 				break;
 			}
 		}
 	}
+}
+
+fn is_pty_hangup_read_error(error: &std::io::Error) -> bool {
+	error.raw_os_error() == Some(libc::EIO)
 }
 
 fn pty_eof_bytes(raw_fd: i32) -> Option<Vec<u8>> {
