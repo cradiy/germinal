@@ -3,7 +3,10 @@ use std::time::{Duration, Instant};
 use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 use crate::rendering::pty_surface::{
-	frame_renderer::{WgpuTerminalFrameRenderResult, WgpuTerminalFrameRenderer},
+	frame_renderer::{
+		WgpuTerminalFrameRenderResult, WgpuTerminalFrameRenderer, WgpuTerminalGpuContext,
+		WgpuTerminalRenderView,
+	},
 	pipeline_factory::WgpuTerminalPipeline,
 	render_target_plan::WgpuTerminalRenderTargetPlan,
 	renderer_backend::WgpuRendererConfig,
@@ -21,18 +24,12 @@ impl WgpuTerminalSurfaceFramePresenter {
 
 	pub fn present_surface_frame(
 		&self,
-		surface: &wgpu::Surface<'_>,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
-		render_target_plan: WgpuTerminalRenderTargetPlan,
-		pipeline: &WgpuTerminalPipeline,
-		surface_snapshot: &RenderSurfaceSnapshot,
-		renderer_config: WgpuRendererConfig,
+		input: WgpuTerminalSurfacePresentInput<'_, '_>,
 	) -> Result<WgpuTerminalSurfaceFramePresentResult, WgpuTerminalSurfaceFramePresentError> {
 		let total_started_at = Instant::now();
 
 		let acquire_started_at = Instant::now();
-		let surface_texture = match surface.get_current_texture() {
+		let surface_texture = match input.surface.get_current_texture() {
 			wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
 			wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
 			wgpu::CurrentSurfaceTexture::Timeout => {
@@ -58,26 +55,28 @@ impl WgpuTerminalSurfaceFramePresenter {
 		let create_texture_view = create_view_started_at.elapsed();
 
 		let create_encoder_started_at = Instant::now();
-		let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-			label: Some("germinal.terminal.command_encoder"),
-		});
+		let mut command_encoder =
+			input.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+				label: Some("germinal.terminal.command_encoder"),
+			});
 		let create_command_encoder = create_encoder_started_at.elapsed();
 
 		let render_to_view_started_at = Instant::now();
 		let render_result = self.frame_renderer.render_to_view(
-			device,
-			queue,
-			&mut command_encoder,
-			&target_view,
-			render_target_plan,
-			pipeline,
-			surface_snapshot,
-			renderer_config,
+			WgpuTerminalGpuContext { device: input.device, queue: input.queue },
+			WgpuTerminalRenderView {
+				command_encoder:    &mut command_encoder,
+				target_view:        &target_view,
+				render_target_plan: input.render_target_plan,
+				pipeline:           input.pipeline,
+				surface_snapshot:   input.surface_snapshot,
+				renderer_config:    input.renderer_config,
+			},
 		);
 		let render_to_view = render_to_view_started_at.elapsed();
 
 		let submit_started_at = Instant::now();
-		queue.submit(Some(command_encoder.finish()));
+		input.queue.submit(Some(command_encoder.finish()));
 		let submit = submit_started_at.elapsed();
 
 		let present_started_at = Instant::now();
@@ -100,6 +99,16 @@ impl WgpuTerminalSurfaceFramePresenter {
 			},
 		})
 	}
+}
+
+pub struct WgpuTerminalSurfacePresentInput<'a, 'window> {
+	pub surface:            &'a wgpu::Surface<'window>,
+	pub device:             &'a wgpu::Device,
+	pub queue:              &'a wgpu::Queue,
+	pub render_target_plan: WgpuTerminalRenderTargetPlan,
+	pub pipeline:           &'a WgpuTerminalPipeline,
+	pub surface_snapshot:   &'a RenderSurfaceSnapshot,
+	pub renderer_config:    WgpuRendererConfig,
 }
 
 impl Default for WgpuTerminalSurfaceFramePresenter {

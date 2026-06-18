@@ -126,7 +126,7 @@ impl WgpuTerminalFrameBuilder {
 
 		let draw_plan_started_at = Instant::now();
 		let draw_plan = WgpuDrawIndexedPlan::from_upload_bytes(&upload_bytes);
-		let render_pass_plan = draw_plan.clone().map(WgpuTerminalRenderPassPlan::new);
+		let render_pass_plan = draw_plan.map(WgpuTerminalRenderPassPlan::new);
 		let draw_plan_time = draw_plan_started_at.elapsed();
 
 		let renderer_lines_started_at = Instant::now();

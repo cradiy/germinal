@@ -118,10 +118,11 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 		{
 			let cache = self.cache.borrow();
 
-			if let Some(entry) = cache.as_ref() {
-				if entry.key.source == cache_key.source && entry.key.contains_all_chars(&cache_key.chars) {
-					return (entry.atlas.clone(), true);
-				}
+			if let Some(entry) = cache.as_ref()
+				&& entry.key.source == cache_key.source
+				&& entry.key.contains_all_chars(&cache_key.chars)
+			{
+				return (entry.atlas.clone(), true);
 			}
 		}
 

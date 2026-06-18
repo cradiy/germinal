@@ -46,75 +46,34 @@ impl WgpuTerminalFrameUploadPlan {
 
 	pub fn viewport_byte_len(&self) -> usize { self.viewport_upload.byte_len() }
 
-	pub fn upload(
-		&self,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
-		viewport_bind_group_layout: &wgpu::BindGroupLayout,
-		viewport_binding: u32,
-		glyph_atlas_bind_group_layout: &wgpu::BindGroupLayout,
-		prepared: &WgpuTerminalPreparedFrame,
-	) -> WgpuTerminalUploadedFrame {
-		self.upload_inner(
-			device,
-			queue,
-			viewport_bind_group_layout,
-			viewport_binding,
-			glyph_atlas_bind_group_layout,
-			prepared,
-			None,
-		)
-	}
-
-	pub fn upload_with_glyph_atlas_gpu_cache(
-		&self,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
-		viewport_bind_group_layout: &wgpu::BindGroupLayout,
-		viewport_binding: u32,
-		glyph_atlas_bind_group_layout: &wgpu::BindGroupLayout,
-		prepared: &WgpuTerminalPreparedFrame,
-		glyph_atlas_gpu_cache: &WgpuTerminalGlyphAtlasGpuCache,
-	) -> WgpuTerminalUploadedFrame {
-		self.upload_inner(
-			device,
-			queue,
-			viewport_bind_group_layout,
-			viewport_binding,
-			glyph_atlas_bind_group_layout,
-			prepared,
-			Some(glyph_atlas_gpu_cache),
-		)
-	}
-
-	#[allow(clippy::too_many_arguments)]
-	fn upload_inner(
-		&self,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
-		viewport_bind_group_layout: &wgpu::BindGroupLayout,
-		viewport_binding: u32,
-		glyph_atlas_bind_group_layout: &wgpu::BindGroupLayout,
-		prepared: &WgpuTerminalPreparedFrame,
-		glyph_atlas_gpu_cache: Option<&WgpuTerminalGlyphAtlasGpuCache>,
-	) -> WgpuTerminalUploadedFrame {
+	pub fn upload(&self, context: WgpuTerminalUploadContext<'_>) -> WgpuTerminalUploadedFrame {
 		let buffer_uploader = WgpuBufferUploader::new();
 
-		let uploaded_buffers = buffer_uploader.upload_bytes(device, &self.vertex_upload);
+		let uploaded_buffers = buffer_uploader.upload_bytes(context.device, &self.vertex_upload);
 
 		let viewport_factory = WgpuViewportBindGroupFactory::new();
 
 		let viewport_bind_group = viewport_factory.create(
-			device,
-			viewport_bind_group_layout,
-			viewport_binding,
-			prepared.viewport,
+			context.device,
+			context.viewport_bind_group_layout,
+			context.viewport_binding,
+			context.prepared.viewport,
 		);
 
-		let glyph_atlas_gpu = if let Some(cache) = glyph_atlas_gpu_cache {
-			cache.get_or_upload(device, queue, glyph_atlas_bind_group_layout, &prepared.glyph_atlas_frame)
+		let glyph_atlas_gpu = if let Some(cache) = context.glyph_atlas_gpu_cache {
+			cache.get_or_upload(
+				context.device,
+				context.queue,
+				context.glyph_atlas_bind_group_layout,
+				&context.prepared.glyph_atlas_frame,
+			)
 		} else {
-			upload_glyph_atlas_without_cache(device, queue, glyph_atlas_bind_group_layout, prepared)
+			upload_glyph_atlas_without_cache(
+				context.device,
+				context.queue,
+				context.glyph_atlas_bind_group_layout,
+				context.prepared,
+			)
 		};
 
 		WgpuTerminalUploadedFrame {
@@ -128,6 +87,17 @@ impl WgpuTerminalFrameUploadPlan {
 			render_pass_plan: self.render_pass_plan.clone(),
 		}
 	}
+}
+
+#[derive(Clone, Copy)]
+pub struct WgpuTerminalUploadContext<'a> {
+	pub device:                        &'a wgpu::Device,
+	pub queue:                         &'a wgpu::Queue,
+	pub viewport_bind_group_layout:    &'a wgpu::BindGroupLayout,
+	pub viewport_binding:              u32,
+	pub glyph_atlas_bind_group_layout: &'a wgpu::BindGroupLayout,
+	pub prepared:                      &'a WgpuTerminalPreparedFrame,
+	pub glyph_atlas_gpu_cache:         Option<&'a WgpuTerminalGlyphAtlasGpuCache>,
 }
 
 pub struct WgpuTerminalUploadedFrame {

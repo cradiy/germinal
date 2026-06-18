@@ -223,10 +223,10 @@ fn named_key_bytes(key: &WindowInputKey) -> Option<Vec<u8>> {
 }
 
 fn text_bytes(key: &WindowInputKey, text: Option<&str>) -> Option<Vec<u8>> {
-	if let Some(text) = text {
-		if !text.is_empty() {
-			return Some(text.as_bytes().to_vec());
-		}
+	if let Some(text) = text
+		&& !text.is_empty()
+	{
+		return Some(text.as_bytes().to_vec());
 	}
 
 	match key {

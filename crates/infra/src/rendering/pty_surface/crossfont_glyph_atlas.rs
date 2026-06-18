@@ -1,7 +1,7 @@
 use std::{
 	cell::RefCell,
 	collections::{BTreeSet, HashMap},
-	sync::Arc,
+	rc::Rc,
 };
 
 use crossfont::{
@@ -45,7 +45,7 @@ pub struct WgpuCrossfontGlyphAtlasBuilder {
 	columns:        u32,
 	cell_width_px:  Option<u32>,
 	cell_height_px: Option<u32>,
-	backend:        Arc<RefCell<Option<WgpuCrossfontGlyphBackend>>>,
+	backend:        Rc<RefCell<Option<WgpuCrossfontGlyphBackend>>>,
 }
 
 impl std::fmt::Debug for WgpuCrossfontGlyphAtlasBuilder {
@@ -76,7 +76,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 			columns: 16,
 			cell_width_px: None,
 			cell_height_px: None,
-			backend: Arc::new(RefCell::new(Some(backend))),
+			backend: Rc::new(RefCell::new(Some(backend))),
 		})
 	}
 
@@ -335,7 +335,7 @@ fn build_atlas_from_rasterized_glyphs(
 
 	let cell_stride_width = max_bitmap_width + padding_px;
 	let cell_stride_height = max_bitmap_height + padding_px;
-	let row_count = ((glyphs.len() as u32) + columns - 1) / columns;
+	let row_count = (glyphs.len() as u32).div_ceil(columns);
 
 	let atlas_width = padding_px + columns * cell_stride_width;
 	let atlas_height = padding_px + row_count * cell_stride_height;

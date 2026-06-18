@@ -67,7 +67,7 @@ impl GShellServiceState {
 	pub fn gnative_service_state(&self) -> &GNativeServiceState { &self.gnative_service_state }
 
 	fn ensure_pane_gshell_state(&self, pane_id: PaneId) {
-		self.shells.borrow_mut().entry(pane_id).or_insert_with(GShell::new);
+		self.shells.borrow_mut().entry(pane_id).or_default();
 	}
 
 	fn mode_of(&self, pane_id: PaneId) -> GShellMode {

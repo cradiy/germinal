@@ -8,7 +8,9 @@ use crate::rendering::pty_surface::{
 	frame_builder::{
 		WgpuTerminalFrameBuilder, WgpuTerminalPreparedFrame, WgpuTerminalPreparedFrameTimings,
 	},
-	frame_upload_plan::{WgpuTerminalFrameUploadPlan, WgpuTerminalUploadedFrame},
+	frame_upload_plan::{
+		WgpuTerminalFrameUploadPlan, WgpuTerminalUploadContext, WgpuTerminalUploadedFrame,
+	},
 	glyph_atlas_gpu_cache::WgpuTerminalGlyphAtlasGpuCache,
 	pipeline_factory::WgpuTerminalPipeline,
 	render_target_plan::WgpuTerminalRenderTargetPlan,
@@ -71,21 +73,20 @@ impl WgpuTerminalFrameRenderer {
 
 	pub fn upload(
 		&self,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
+		gpu: WgpuTerminalGpuContext<'_>,
 		pipeline: &WgpuTerminalPipeline,
 		prepared: &WgpuTerminalPreparedFrame,
 		upload_plan: &WgpuTerminalFrameUploadPlan,
 	) -> WgpuTerminalUploadedFrame {
-		upload_plan.upload_with_glyph_atlas_gpu_cache(
-			device,
-			queue,
-			&pipeline.viewport_bind_group_layout,
-			pipeline.spec.shader.viewport_binding,
-			&pipeline.glyph_atlas_bind_group_layout,
+		upload_plan.upload(WgpuTerminalUploadContext {
+			device: gpu.device,
+			queue: gpu.queue,
+			viewport_bind_group_layout: &pipeline.viewport_bind_group_layout,
+			viewport_binding: pipeline.spec.shader.viewport_binding,
+			glyph_atlas_bind_group_layout: &pipeline.glyph_atlas_bind_group_layout,
 			prepared,
-			&self.glyph_atlas_gpu_cache,
-		)
+			glyph_atlas_gpu_cache: Some(&self.glyph_atlas_gpu_cache),
+		})
 	}
 
 	pub fn encode_uploaded_frame(
@@ -107,21 +108,15 @@ impl WgpuTerminalFrameRenderer {
 
 	pub fn render_to_view(
 		&self,
-		device: &wgpu::Device,
-		queue: &wgpu::Queue,
-		command_encoder: &mut wgpu::CommandEncoder,
-		target_view: &wgpu::TextureView,
-		render_target_plan: WgpuTerminalRenderTargetPlan,
-		pipeline: &WgpuTerminalPipeline,
-		surface_snapshot: &RenderSurfaceSnapshot,
-		renderer_config: WgpuRendererConfig,
+		gpu: WgpuTerminalGpuContext<'_>,
+		view: WgpuTerminalRenderView<'_>,
 	) -> WgpuTerminalFrameRenderResult {
 		let total_started_at = Instant::now();
 
-		if render_target_plan.is_empty() {
+		if view.render_target_plan.is_empty() {
 			return WgpuTerminalFrameRenderResult {
-				target_id:                 surface_snapshot.target_id,
-				seq:                       surface_snapshot.latest_seq,
+				target_id:                 view.surface_snapshot.target_id,
+				seq:                       view.surface_snapshot.latest_seq,
 				prepared:                  false,
 				uploaded:                  false,
 				encoded:                   false,
@@ -142,8 +137,11 @@ impl WgpuTerminalFrameRenderer {
 		}
 
 		let prepare_started_at = Instant::now();
-		let prepared =
-			self.prepare_with_renderer_config(surface_snapshot, render_target_plan, renderer_config);
+		let prepared = self.prepare_with_renderer_config(
+			view.surface_snapshot,
+			view.render_target_plan,
+			view.renderer_config,
+		);
 		let prepare_time = prepare_started_at.elapsed();
 		let prepared_frame_timings = prepared.timings;
 
@@ -178,7 +176,7 @@ impl WgpuTerminalFrameRenderer {
 		}
 
 		let upload_started_at = Instant::now();
-		let uploaded_frame = self.upload(device, queue, pipeline, &prepared, &upload_plan);
+		let uploaded_frame = self.upload(gpu, view.pipeline, &prepared, &upload_plan);
 		let upload_time = upload_started_at.elapsed();
 
 		let glyph_atlas_uploaded = uploaded_frame.has_glyph_atlas_bind_group();
@@ -187,10 +185,10 @@ impl WgpuTerminalFrameRenderer {
 
 		let encode_started_at = Instant::now();
 		let encode_result = self.encode_uploaded_frame(
-			command_encoder,
-			target_view,
-			render_target_plan,
-			pipeline,
+			view.command_encoder,
+			view.target_view,
+			view.render_target_plan,
+			view.pipeline,
 			&uploaded_frame,
 		);
 		let encode_time = encode_started_at.elapsed();
@@ -220,6 +218,21 @@ impl WgpuTerminalFrameRenderer {
 			},
 		}
 	}
+}
+
+#[derive(Clone, Copy)]
+pub struct WgpuTerminalGpuContext<'a> {
+	pub device: &'a wgpu::Device,
+	pub queue:  &'a wgpu::Queue,
+}
+
+pub struct WgpuTerminalRenderView<'a> {
+	pub command_encoder:    &'a mut wgpu::CommandEncoder,
+	pub target_view:        &'a wgpu::TextureView,
+	pub render_target_plan: WgpuTerminalRenderTargetPlan,
+	pub pipeline:           &'a WgpuTerminalPipeline,
+	pub surface_snapshot:   &'a RenderSurfaceSnapshot,
+	pub renderer_config:    WgpuRendererConfig,
 }
 
 impl Default for WgpuTerminalFrameRenderer {

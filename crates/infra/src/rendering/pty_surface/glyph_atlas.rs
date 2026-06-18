@@ -108,7 +108,7 @@ impl WgpuDebugGlyphAtlasBuilder {
 		let cell_width = self.glyph_width_px + self.padding_px;
 		let cell_height = self.glyph_height_px + self.padding_px;
 
-		let row_count = ((chars.len() as u32) + self.columns - 1) / self.columns;
+		let row_count = (chars.len() as u32).div_ceil(self.columns);
 
 		let atlas_width = self.padding_px + self.columns * cell_width;
 		let atlas_height = self.padding_px + row_count * cell_height;

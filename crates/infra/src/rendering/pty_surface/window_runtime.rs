@@ -18,6 +18,7 @@ use crate::rendering::pty_surface::{
 	renderer_backend::WgpuRendererConfig,
 	surface_frame_presenter::{
 		WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
+		WgpuTerminalSurfacePresentInput,
 	},
 };
 
@@ -155,15 +156,15 @@ impl WgpuTerminalWindowRuntime {
 		let render_target_plan = WgpuTerminalRenderTargetPlan::from_size_info(size_info);
 		let renderer_config = WgpuRendererConfig::from(size_info);
 
-		match self.presenter.present_surface_frame(
-			&self.surface,
-			&self.device,
-			&self.queue,
+		match self.presenter.present_surface_frame(WgpuTerminalSurfacePresentInput {
+			surface: &self.surface,
+			device: &self.device,
+			queue: &self.queue,
 			render_target_plan,
-			&self.pipeline,
-			&self.surface_snapshot,
+			pipeline: &self.pipeline,
+			surface_snapshot: &self.surface_snapshot,
 			renderer_config,
-		) {
+		}) {
 			Ok(_) => {}
 			Err(error) => {
 				self.handle_present_error(error);

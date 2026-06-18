@@ -48,9 +48,9 @@ impl WgpuTerminalFrameEncoder {
 		)
 	}
 
-	pub fn encode_render_pass<'pass, 'resource>(
+	pub fn encode_render_pass<'resource>(
 		&self,
-		render_pass: &'pass mut wgpu::RenderPass<'resource>,
+		render_pass: &mut wgpu::RenderPass<'resource>,
 		pipeline: &'resource WgpuTerminalPipeline,
 		uploaded_frame: &'resource WgpuTerminalUploadedFrame,
 	) -> WgpuTerminalFrameEncodeResult {

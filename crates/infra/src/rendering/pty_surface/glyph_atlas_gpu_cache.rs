@@ -36,14 +36,14 @@ impl WgpuTerminalGlyphAtlasGpuCache {
 		{
 			let cache = self.inner.borrow();
 
-			if let Some(entry) = cache.as_ref() {
-				if entry.key == key {
-					return WgpuTerminalGlyphAtlasGpuCacheResult {
-						texture:    Some(Arc::clone(&entry.texture)),
-						bind_group: Some(Arc::clone(&entry.bind_group)),
-						cache_hit:  true,
-					};
-				}
+			if let Some(entry) = cache.as_ref()
+				&& entry.key == key
+			{
+				return WgpuTerminalGlyphAtlasGpuCacheResult {
+					texture:    Some(Arc::clone(&entry.texture)),
+					bind_group: Some(Arc::clone(&entry.bind_group)),
+					cache_hit:  true,
+				};
 			}
 		}
 
