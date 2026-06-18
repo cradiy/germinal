@@ -9,9 +9,12 @@ use germinal_domain::{
 	shared::seq::Seq,
 };
 use germinal_ports::rendering::{
-	frame_plan_builder::TextStyleDto, renderer_backend::RendererBackend,
-	surface_snapshot::RenderSurfaceSnapshot,
+	frame_plan_builder::{RgbColorDto, TextStyleDto},
+	renderer_backend::RendererBackend,
+	surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
 };
+
+const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
 
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
@@ -35,6 +38,7 @@ impl RendererBackend for WgpuRendererBackend {
 		let mut background_quads = Vec::new();
 		let mut glyph_quads = Vec::new();
 		let mut underline_quads = Vec::new();
+		let mut cursor_quads = Vec::new();
 
 		for row in &snapshot.rows {
 			let mut draw_row = WgpuDrawRow { y: row.y, glyphs: Vec::new() };
@@ -78,17 +82,24 @@ impl RendererBackend for WgpuRendererBackend {
 			draw_rows.insert(row.y, draw_row);
 		}
 
-		let mut quads =
-			Vec::with_capacity(background_quads.len() + glyph_quads.len() + underline_quads.len());
+		if let Some(cursor) = snapshot.cursor {
+			append_cursor_block_quad(&mut cursor_quads, cursor, config);
+		}
+
+		let mut quads = Vec::with_capacity(
+			background_quads.len() + glyph_quads.len() + underline_quads.len() + cursor_quads.len(),
+		);
 
 		// Keep draw order renderer-friendly:
 		//
 		// 1. backgrounds
 		// 2. glyphs
 		// 3. underline overlays
+		// 4. cursor outline overlay
 		quads.extend(background_quads);
 		quads.extend(glyph_quads);
 		quads.extend(underline_quads);
+		quads.extend(cursor_quads);
 
 		let mut inner = self.inner.borrow_mut();
 
@@ -175,6 +186,26 @@ fn append_box_drawing_quads(
 			glyph.style,
 		));
 	}
+}
+
+fn append_cursor_block_quad(
+	quads: &mut Vec<WgpuQuadDrawItem>,
+	cursor: RenderSurfaceCursorSnapshot,
+	config: WgpuRendererConfig,
+) {
+	let x = config.content_origin_x + cursor.x * config.cell_width_px;
+	let y = config.content_origin_y + cursor.y * config.cell_height_px;
+	let w = config.cell_width_px.max(1);
+	let h = config.cell_height_px.max(1);
+	let style = TextStyleDto {
+		foreground: Some(CURSOR_COLOR),
+		background: None,
+		bold:       false,
+		italic:     false,
+		underline:  false,
+	};
+
+	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
 }
 
 fn box_drawing_connections(c: char) -> (bool, bool, bool, bool) {

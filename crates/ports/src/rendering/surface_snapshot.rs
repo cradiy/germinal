@@ -7,6 +7,7 @@ pub struct RenderSurfaceSnapshot {
 	pub target_id:  RenderTargetId,
 	pub latest_seq: Seq,
 	pub rows:       Vec<RenderSurfaceRowSnapshot>,
+	pub cursor:     Option<RenderSurfaceCursorSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,12 @@ pub struct RenderSurfaceRunSnapshot {
 	pub x:     u32,
 	pub text:  String,
 	pub style: TextStyleDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderSurfaceCursorSnapshot {
+	pub x: u32,
+	pub y: u32,
 }
 
 pub trait RenderSurfaceSnapshotProvider {

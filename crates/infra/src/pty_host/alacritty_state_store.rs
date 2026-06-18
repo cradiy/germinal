@@ -175,6 +175,18 @@ impl AlacrittyTermStateStore {
 
 		Some((point.line.0 as usize + 1, point.column.0 + 1))
 	}
+
+	pub fn cursor_position_0_based(&self, render_target_id: RenderTargetId) -> Option<(u32, u32)> {
+		let inner = self.inner.borrow();
+
+		let state = inner.get(&render_target_id)?;
+		let point = state.term.grid().cursor.point;
+
+		let row = u32::try_from(point.line.0).ok()?;
+		let col = u32::try_from(point.column.0).ok()?;
+
+		Some((col, row))
+	}
 }
 
 impl Default for AlacrittyTermStateStore {

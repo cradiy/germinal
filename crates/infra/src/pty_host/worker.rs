@@ -21,7 +21,9 @@ use germinal_ports::{
 	rendering::{
 		frame_plan_builder::{BuildFramePlanTask, FramePlanBuilder},
 		frame_plan_presenter::FramePlanPresenter,
-		surface_snapshot::{RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider},
+		surface_snapshot::{
+			RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
+		},
 	},
 };
 
@@ -274,10 +276,14 @@ impl TerminalWorkerRuntime {
 		self.surface_presenter.present(&frame);
 		self.term_store.clear_damage_up_to(self.target_id, seq);
 
-		let snapshot = self
+		let mut snapshot = self
 			.surface_presenter
 			.surface_snapshot_of(self.target_id)
 			.expect("surface snapshot should exist");
+		snapshot.cursor = self
+			.term_store
+			.cursor_position_0_based(self.target_id)
+			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y });
 
 		let snapshot_sent = self.surface_snapshot_tx.send(snapshot).is_ok();
 		let wake_already_pending =

@@ -88,6 +88,7 @@ impl WgpuTerminalWindowRuntime {
 			target_id:  germinal_domain::rendering::render_target_id::RenderTargetId::new(0),
 			latest_seq: germinal_domain::shared::seq::Seq::ZERO,
 			rows:       Vec::new(),
+			cursor:     None,
 		};
 
 		Ok(Self {

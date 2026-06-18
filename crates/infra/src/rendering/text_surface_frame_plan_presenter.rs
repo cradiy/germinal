@@ -85,7 +85,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
 			})
 			.collect();
 
-		Some(RenderSurfaceSnapshot { target_id, latest_seq: surface.latest_seq, rows })
+		Some(RenderSurfaceSnapshot { target_id, latest_seq: surface.latest_seq, rows, cursor: None })
 	}
 }
 
