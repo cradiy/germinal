@@ -60,7 +60,7 @@ impl WgpuTerminalGlyphAtlasTextureFactory {
 			width_px:  atlas.width_px,
 			height_px: atlas.height_px,
 			pixels:    rgba_pixels_from_atlas(atlas),
-			format:    wgpu::TextureFormat::Rgba8Unorm,
+			format:    wgpu::TextureFormat::Rgba8UnormSrgb,
 		})
 	}
 
@@ -171,7 +171,7 @@ pub struct WgpuTerminalGlyphAtlasTextureSpec {
 impl WgpuTerminalGlyphAtlasTextureSpec {
 	pub fn new() -> Self {
 		Self {
-			format:             wgpu::TextureFormat::Rgba8Unorm,
+			format:             wgpu::TextureFormat::Rgba8UnormSrgb,
 			dimension:          wgpu::TextureDimension::D2,
 			mip_level_count:    1,
 			sample_count:       1,
@@ -201,7 +201,7 @@ mod tests {
 
 		assert_eq!(upload_bytes.width_px, atlas.width_px);
 		assert_eq!(upload_bytes.height_px, atlas.height_px);
-		assert_eq!(upload_bytes.format, wgpu::TextureFormat::Rgba8Unorm);
+		assert_eq!(upload_bytes.format, wgpu::TextureFormat::Rgba8UnormSrgb);
 		assert_eq!(upload_bytes.byte_len(), (atlas.width_px * atlas.height_px * 4) as usize);
 		assert_eq!(upload_bytes.expected_byte_len(), (atlas.width_px * atlas.height_px * 4) as usize);
 		assert_eq!(upload_bytes.bytes_per_row(), atlas.width_px * 4);
@@ -223,7 +223,7 @@ mod tests {
 	fn texture_spec_matches_rgba_atlas() {
 		let spec = WgpuTerminalGlyphAtlasTextureSpec::new();
 
-		assert_eq!(spec.format, wgpu::TextureFormat::Rgba8Unorm);
+		assert_eq!(spec.format, wgpu::TextureFormat::Rgba8UnormSrgb);
 		assert_eq!(spec.dimension, wgpu::TextureDimension::D2);
 		assert_eq!(spec.mip_level_count, 1);
 		assert_eq!(spec.sample_count, 1);

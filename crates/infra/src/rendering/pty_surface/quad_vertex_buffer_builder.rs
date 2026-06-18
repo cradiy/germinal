@@ -203,11 +203,17 @@ fn color_or(color: Option<RgbColorDto>, fallback: WgpuVertexColor) -> WgpuVertex
 
 fn normalize_color(color: WgpuVertexColor) -> [f32; 4] {
 	[
-		color.red as f32 / 255.0,
-		color.green as f32 / 255.0,
-		color.blue as f32 / 255.0,
+		srgb_u8_to_linear_f32(color.red),
+		srgb_u8_to_linear_f32(color.green),
+		srgb_u8_to_linear_f32(color.blue),
 		color.alpha as f32 / 255.0,
 	]
+}
+
+fn srgb_u8_to_linear_f32(component: u8) -> f32 {
+	let srgb = component as f32 / 255.0;
+
+	if srgb <= 0.04045 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
 }
 
 fn bytes_of_slice<T>(items: &[T]) -> &[u8] {
@@ -287,5 +293,22 @@ mod tests {
 		assert_eq!(layout.attributes.len(), 5);
 		assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x2);
 		assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
+	}
+
+	#[test]
+	fn converts_srgb_vertex_colors_to_linear_rgb() {
+		let vertex = WgpuGpuVertex::from_vertex(WgpuVertex {
+			x_px:  0.0,
+			y_px:  0.0,
+			u:     0.0,
+			v:     0.0,
+			color: WgpuVertexColor::new(128, 64, 255, 128),
+			kind:  WgpuVertexKind::Background,
+		});
+
+		assert!((vertex.color[0] - 0.215_860_53).abs() < 0.000_001);
+		assert!((vertex.color[1] - 0.051_269_468).abs() < 0.000_001);
+		assert!((vertex.color[2] - 1.0).abs() < 0.000_001);
+		assert!((vertex.color[3] - (128.0 / 255.0)).abs() < 0.000_001);
 	}
 }
