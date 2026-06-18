@@ -3,6 +3,7 @@ pub mod content_size;
 pub mod font_config;
 pub mod font_family;
 pub mod font_size;
+pub mod font_weight;
 pub mod glyph_render_config;
 pub mod profile;
 pub mod render_viewport;

@@ -1,11 +1,41 @@
 use std::collections::{BTreeSet, HashMap};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WgpuTerminalGlyphKey {
+	c:    char,
+	bold: bool,
+}
+
+impl WgpuTerminalGlyphKey {
+	const BOLD_BIT: u32 = 1 << 21;
+	const CODEPOINT_MASK: u32 = Self::BOLD_BIT - 1;
+
+	pub const fn new(c: char, bold: bool) -> Self { Self { c, bold } }
+
+	pub const fn plain(c: char) -> Self { Self::new(c, false) }
+
+	pub const fn c(self) -> char { self.c }
+
+	pub const fn bold(self) -> bool { self.bold }
+
+	pub const fn packed_id(self) -> u32 {
+		(self.c as u32 & Self::CODEPOINT_MASK) | if self.bold { Self::BOLD_BIT } else { 0 }
+	}
+
+	pub fn from_packed_id(packed_id: u32) -> Option<Self> {
+		let c = char::from_u32(packed_id & Self::CODEPOINT_MASK)?;
+		let bold = (packed_id & Self::BOLD_BIT) != 0;
+
+		Some(Self::new(c, bold))
+	}
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgpuTerminalGlyphAtlas {
 	pub width_px:  u32,
 	pub height_px: u32,
 	pub pixels:    Vec<u8>,
-	pub entries:   HashMap<char, WgpuTerminalGlyphAtlasEntry>,
+	pub entries:   HashMap<WgpuTerminalGlyphKey, WgpuTerminalGlyphAtlasEntry>,
 }
 
 impl WgpuTerminalGlyphAtlas {
@@ -13,9 +43,17 @@ impl WgpuTerminalGlyphAtlas {
 		Self { width_px: 0, height_px: 0, pixels: Vec::new(), entries: HashMap::new() }
 	}
 
-	pub fn entry(&self, c: char) -> Option<&WgpuTerminalGlyphAtlasEntry> { self.entries.get(&c) }
+	pub fn entry(&self, c: char) -> Option<&WgpuTerminalGlyphAtlasEntry> {
+		self.entry_for_key(WgpuTerminalGlyphKey::plain(c))
+	}
 
-	pub fn has_glyph(&self, c: char) -> bool { self.entries.contains_key(&c) }
+	pub fn entry_for_key(&self, key: WgpuTerminalGlyphKey) -> Option<&WgpuTerminalGlyphAtlasEntry> {
+		self.entries.get(&key)
+	}
+
+	pub fn has_glyph(&self, c: char) -> bool { self.has_glyph_key(WgpuTerminalGlyphKey::plain(c)) }
+
+	pub fn has_glyph_key(&self, key: WgpuTerminalGlyphKey) -> bool { self.entries.contains_key(&key) }
 
 	pub fn pixel_count(&self) -> usize { self.pixels.len() }
 
@@ -81,22 +119,27 @@ impl WgpuDebugGlyphAtlasBuilder {
 		I: IntoIterator<Item = S>,
 		S: AsRef<str>,
 	{
-		let mut chars = BTreeSet::new();
+		let mut glyphs = BTreeSet::new();
 
 		for text in texts {
 			for c in text.as_ref().chars() {
-				chars.insert(c);
+				glyphs.insert(WgpuTerminalGlyphKey::plain(c));
 			}
 		}
 
-		self.build_for_chars(chars)
+		self.build_for_glyphs(glyphs)
 	}
 
 	pub fn build_for_chars<I>(&self, chars: I) -> WgpuTerminalGlyphAtlas
 	where I: IntoIterator<Item = char> {
-		let chars: Vec<char> = chars.into_iter().collect();
+		self.build_for_glyphs(chars.into_iter().map(WgpuTerminalGlyphKey::plain))
+	}
 
-		if chars.is_empty() {
+	pub fn build_for_glyphs<I>(&self, glyphs: I) -> WgpuTerminalGlyphAtlas
+	where I: IntoIterator<Item = WgpuTerminalGlyphKey> {
+		let glyphs: Vec<WgpuTerminalGlyphKey> = glyphs.into_iter().collect();
+
+		if glyphs.is_empty() {
 			return WgpuTerminalGlyphAtlas {
 				width_px:  0,
 				height_px: 0,
@@ -108,7 +151,7 @@ impl WgpuDebugGlyphAtlasBuilder {
 		let cell_width = self.glyph_width_px + self.padding_px;
 		let cell_height = self.glyph_height_px + self.padding_px;
 
-		let row_count = (chars.len() as u32).div_ceil(self.columns);
+		let row_count = (glyphs.len() as u32).div_ceil(self.columns);
 
 		let atlas_width = self.padding_px + self.columns * cell_width;
 		let atlas_height = self.padding_px + row_count * cell_height;
@@ -116,7 +159,7 @@ impl WgpuDebugGlyphAtlasBuilder {
 		let mut pixels = vec![0u8; (atlas_width * atlas_height) as usize];
 		let mut entries = HashMap::new();
 
-		for (index, c) in chars.into_iter().enumerate() {
+		for (index, glyph) in glyphs.into_iter().enumerate() {
 			let index = index as u32;
 			let col = index % self.columns;
 			let row = index / self.columns;
@@ -124,7 +167,7 @@ impl WgpuDebugGlyphAtlasBuilder {
 			let x = self.padding_px + col * cell_width;
 			let y = self.padding_px + row * cell_height;
 
-			self.write_glyph_pixels(c, x, y, atlas_width, &mut pixels);
+			self.write_glyph_pixels(glyph.c(), x, y, atlas_width, &mut pixels);
 
 			let uv = WgpuTerminalGlyphUvRect {
 				min_u: x as f32 / atlas_width as f32,
@@ -133,8 +176,8 @@ impl WgpuDebugGlyphAtlasBuilder {
 				max_v: (y + self.glyph_height_px) as f32 / atlas_height as f32,
 			};
 
-			entries.insert(c, WgpuTerminalGlyphAtlasEntry {
-				codepoint: c as u32,
+			entries.insert(glyph, WgpuTerminalGlyphAtlasEntry {
+				codepoint: glyph.packed_id(),
 				x_px: x,
 				y_px: y,
 				width_px: self.glyph_width_px,

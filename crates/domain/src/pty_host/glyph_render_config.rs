@@ -1,6 +1,6 @@
 use crate::pty_host::{
-	cell_size::TerminalCellSize, font_config::TerminalFontConfig, scale_factor::TerminalScaleFactor,
-	size_info::TerminalSizeInfo,
+	cell_size::TerminalCellSize, font_config::TerminalFontConfig, font_weight::TerminalFontWeight,
+	scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,4 +34,6 @@ impl TerminalGlyphRenderConfig {
 	pub const fn font_family_name(self) -> &'static str { self.font_config.family().name() }
 
 	pub fn font_size_px(self) -> f32 { self.font_size_px }
+
+	pub const fn bold_font_weight(self) -> TerminalFontWeight { self.font_config.bold_weight() }
 }

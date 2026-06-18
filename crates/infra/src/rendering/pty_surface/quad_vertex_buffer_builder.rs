@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use germinal_ports::rendering::frame_plan_builder::RgbColorDto;
 
-use crate::rendering::pty_surface::renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind};
+use crate::rendering::pty_surface::{
+	glyph_atlas::WgpuTerminalGlyphKey,
+	renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind},
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct WgpuQuadVertexBufferBuilder;
@@ -149,7 +152,7 @@ impl WgpuVertexColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuVertexKind {
 	Background,
-	Glyph { c: char },
+	Glyph { c: char, bold: bool },
 	Underline,
 }
 
@@ -173,7 +176,7 @@ fn gpu_vertices_of_quad(quad: WgpuQuadDrawItem) -> [WgpuGpuVertex; 4] {
 fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 	match kind {
 		WgpuQuadKind::Background => WgpuVertexKind::Background,
-		WgpuQuadKind::Glyph { c } => WgpuVertexKind::Glyph { c },
+		WgpuQuadKind::Glyph { c, bold } => WgpuVertexKind::Glyph { c, bold },
 		WgpuQuadKind::Underline => WgpuVertexKind::Underline,
 	}
 }
@@ -181,7 +184,9 @@ fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
 	match kind {
 		WgpuVertexKind::Background => (WGPU_VERTEX_KIND_BACKGROUND, 0),
-		WgpuVertexKind::Glyph { c } => (WGPU_VERTEX_KIND_GLYPH, c as u32),
+		WgpuVertexKind::Glyph { c, bold } => {
+			(WGPU_VERTEX_KIND_GLYPH, WgpuTerminalGlyphKey::new(c, bold).packed_id())
+		}
 		WgpuVertexKind::Underline => (WGPU_VERTEX_KIND_UNDERLINE, 0),
 	}
 }

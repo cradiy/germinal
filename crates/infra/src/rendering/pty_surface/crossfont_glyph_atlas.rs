@@ -10,7 +10,8 @@ use crossfont::{
 use germinal_domain::pty_host::width::terminal_char_cell_width;
 
 use crate::rendering::pty_surface::glyph_atlas::{
-	WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphUvRect,
+	WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
+	WgpuTerminalGlyphUvRect,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,7 @@ impl WgpuCrossfontCellMetrics {
 pub struct WgpuCrossfontGlyphAtlasBuilder {
 	font_family:    String,
 	font_size_px:   f32,
+	bold_weight:    WgpuTerminalFontWeight,
 	padding_px:     u32,
 	columns:        u32,
 	cell_width_px:  Option<u32>,
@@ -53,6 +55,7 @@ impl std::fmt::Debug for WgpuCrossfontGlyphAtlasBuilder {
 		f.debug_struct("WgpuCrossfontGlyphAtlasBuilder")
 			.field("font_family", &self.font_family)
 			.field("font_size_px", &self.font_size_px)
+			.field("bold_weight", &self.bold_weight)
 			.field("padding_px", &self.padding_px)
 			.field("columns", &self.columns)
 			.field("cell_width_px", &self.cell_width_px)
@@ -67,11 +70,16 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 		font_size_px: f32,
 	) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
 		let font_family = font_family.into();
-		let backend = WgpuCrossfontGlyphBackend::new(font_family.clone(), font_size_px)?;
+		let backend = WgpuCrossfontGlyphBackend::new(
+			font_family.clone(),
+			font_size_px,
+			WgpuTerminalFontWeight::default_bold(),
+		)?;
 
 		Ok(Self {
 			font_family,
 			font_size_px,
+			bold_weight: WgpuTerminalFontWeight::default_bold(),
 			padding_px: 1,
 			columns: 16,
 			cell_width_px: None,
@@ -82,6 +90,18 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 
 	pub fn with_padding_px(mut self, padding_px: u32) -> Self {
 		self.padding_px = padding_px;
+		self
+	}
+
+	pub fn with_bold_font_weight(mut self, bold_weight: WgpuTerminalFontWeight) -> Self {
+		self.bold_weight = bold_weight;
+
+		if let Ok(backend) =
+			WgpuCrossfontGlyphBackend::new(self.font_family.clone(), self.font_size_px, bold_weight)
+		{
+			*self.backend.borrow_mut() = Some(backend);
+		}
+
 		self
 	}
 
@@ -100,7 +120,11 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 		font_family: impl Into<String>,
 		font_size_px: f32,
 	) -> Result<WgpuCrossfontCellMetrics, WgpuCrossfontGlyphAtlasError> {
-		let backend = WgpuCrossfontGlyphBackend::new(font_family.into(), font_size_px)?;
+		let backend = WgpuCrossfontGlyphBackend::new(
+			font_family.into(),
+			font_size_px,
+			WgpuTerminalFontWeight::default_bold(),
+		)?;
 
 		Ok(WgpuCrossfontCellMetrics::new(
 			backend.base_cell_width_px().max(1),
@@ -126,24 +150,30 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 		I: IntoIterator<Item = S>,
 		S: AsRef<str>,
 	{
-		let mut chars = BTreeSet::new();
+		let mut glyphs = BTreeSet::new();
 
 		for text in texts {
 			for c in text.as_ref().chars() {
 				if terminal_char_cell_width(c) > 0 {
-					chars.insert(c);
+					glyphs.insert(WgpuTerminalGlyphKey::plain(c));
 				}
 			}
 		}
 
-		self.build_for_chars(chars)
+		self.build_for_glyphs(glyphs)
 	}
 
 	pub fn build_for_chars<I>(&self, chars: I) -> WgpuTerminalGlyphAtlas
 	where I: IntoIterator<Item = char> {
-		let chars: Vec<char> = chars.into_iter().filter(|c| terminal_char_cell_width(*c) > 0).collect();
+		self.build_for_glyphs(chars.into_iter().map(WgpuTerminalGlyphKey::plain))
+	}
 
-		if chars.is_empty() {
+	pub fn build_for_glyphs<I>(&self, glyphs: I) -> WgpuTerminalGlyphAtlas
+	where I: IntoIterator<Item = WgpuTerminalGlyphKey> {
+		let glyphs: Vec<WgpuTerminalGlyphKey> =
+			glyphs.into_iter().filter(|glyph| terminal_char_cell_width(glyph.c()) > 0).collect();
+
+		if glyphs.is_empty() {
 			return WgpuTerminalGlyphAtlas::empty();
 		}
 
@@ -158,7 +188,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 		let baseline_y_px = backend.baseline_y_px();
 
 		let glyphs: Vec<RasterizedTerminalGlyph> =
-			chars.into_iter().map(|c| backend.rasterize_terminal_glyph(c)).collect();
+			glyphs.into_iter().map(|glyph| backend.rasterize_terminal_glyph(glyph)).collect();
 
 		build_atlas_from_rasterized_glyphs(
 			glyphs,
@@ -171,22 +201,40 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuTerminalFontWeight {
+	Normal,
+	Medium,
+	Semibold,
+	Bold,
+}
+
+impl WgpuTerminalFontWeight {
+	pub const fn default_bold() -> Self { Self::Semibold }
+}
+
 struct WgpuCrossfontGlyphBackend {
 	rasterizer:         Rasterizer,
-	font_key:           FontKey,
+	normal_font_key:    FontKey,
+	bold_font_key:      Option<FontKey>,
 	emoji_font_key:     Option<FontKey>,
 	size:               Size,
 	average_advance_px: u32,
 	line_height_px:     u32,
 	baseline_y_px:      i32,
-	glyph_cache:        HashMap<char, RasterizedTerminalGlyph>,
+	glyph_cache:        HashMap<WgpuTerminalGlyphKey, RasterizedTerminalGlyph>,
 }
 
 impl WgpuCrossfontGlyphBackend {
-	fn new(font_family: String, font_size_px: f32) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
+	fn new(
+		font_family: String,
+		font_size_px: f32,
+		bold_weight: WgpuTerminalFontWeight,
+	) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
 		let mut rasterizer = Rasterizer::new()
 			.map_err(|err| WgpuCrossfontGlyphAtlasError::Rasterizer(format!("{err:?}")))?;
 		let size = Size::new(font_size_px);
+		let bold_family = font_family.clone();
 		let font_desc = FontDesc::new(font_family, Style::Description {
 			slant:  Slant::Normal,
 			weight: Weight::Normal,
@@ -194,6 +242,8 @@ impl WgpuCrossfontGlyphBackend {
 		let font_key = rasterizer
 			.load_font(&font_desc, size)
 			.map_err(|err| WgpuCrossfontGlyphAtlasError::Rasterizer(format!("{err:?}")))?;
+		let bold_font_key =
+			load_font_for_terminal_weight(&mut rasterizer, &bold_family, size, bold_weight);
 		let emoji_font_key = load_optional_font(&mut rasterizer, "Noto Color Emoji", size);
 
 		// Match Alacritty's GlyphCache::load_font_metrics: load one glyph
@@ -223,7 +273,8 @@ impl WgpuCrossfontGlyphBackend {
 
 		Ok(Self {
 			rasterizer,
-			font_key,
+			normal_font_key: font_key,
+			bold_font_key,
 			emoji_font_key,
 			size,
 			average_advance_px,
@@ -239,26 +290,32 @@ impl WgpuCrossfontGlyphBackend {
 
 	fn baseline_y_px(&self) -> i32 { self.baseline_y_px }
 
-	fn rasterize_terminal_glyph(&mut self, c: char) -> RasterizedTerminalGlyph {
-		if let Some(glyph) = self.glyph_cache.get(&c) {
+	fn rasterize_terminal_glyph(
+		&mut self,
+		glyph_key: WgpuTerminalGlyphKey,
+	) -> RasterizedTerminalGlyph {
+		if let Some(glyph) = self.glyph_cache.get(&glyph_key) {
 			return glyph.clone();
 		}
 
+		let c = glyph_key.c();
 		let font_key = if is_emoji_presentation_candidate(c) {
-			self.emoji_font_key.unwrap_or(self.font_key)
+			self.emoji_font_key.unwrap_or(self.normal_font_key)
+		} else if glyph_key.bold() {
+			self.bold_font_key.unwrap_or(self.normal_font_key)
 		} else {
-			self.font_key
+			self.normal_font_key
 		};
 
-		let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, c);
-		self.glyph_cache.insert(c, glyph.clone());
+		let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
+		self.glyph_cache.insert(glyph_key, glyph.clone());
 		glyph
 	}
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct RasterizedTerminalGlyph {
-	c:          char,
+	key:        WgpuTerminalGlyphKey,
 	cell_width: u32,
 	width_px:   u32,
 	height_px:  u32,
@@ -273,14 +330,15 @@ fn rasterize_terminal_glyph(
 	rasterizer: &mut Rasterizer,
 	font_key: FontKey,
 	size: Size,
-	c: char,
+	key: WgpuTerminalGlyphKey,
 ) -> RasterizedTerminalGlyph {
+	let c = key.c();
 	let cell_width = terminal_char_cell_width(c).max(1);
 	let glyph_key = GlyphKey { character: c, font_key, size };
 
 	let Ok(glyph) = rasterizer.get_glyph(glyph_key) else {
 		return RasterizedTerminalGlyph {
-			c,
+			key,
 			cell_width,
 			width_px: 1,
 			height_px: 1,
@@ -298,7 +356,7 @@ fn rasterize_terminal_glyph(
 	let pixels = glyph_rgba_pixels(&glyph.buffer, width_px, height_px, is_color);
 
 	RasterizedTerminalGlyph {
-		c,
+		key,
 		cell_width,
 		width_px,
 		height_px,
@@ -365,8 +423,8 @@ fn build_atlas_from_rasterized_glyphs(
 		let (draw_offset_x_px, draw_offset_y_px) =
 			terminal_glyph_draw_offset(&glyph, base_cell_width, base_cell_height, baseline_y_px);
 
-		entries.insert(glyph.c, WgpuTerminalGlyphAtlasEntry {
-			codepoint: glyph.c as u32,
+		entries.insert(glyph.key, WgpuTerminalGlyphAtlasEntry {
+			codepoint: glyph.key.packed_id(),
 			x_px: cell_x,
 			y_px: cell_y,
 			width_px: bitmap_width,
@@ -514,10 +572,78 @@ fn is_color_glyph_buffer(buffer: &BitmapBuffer, c: char) -> bool {
 }
 
 fn load_optional_font(rasterizer: &mut Rasterizer, family: &str, size: Size) -> Option<FontKey> {
-	let font_desc = FontDesc::new(family.to_owned(), Style::Description {
-		slant:  Slant::Normal,
-		weight: Weight::Normal,
-	});
+	load_font_with_weight(rasterizer, family, size, Weight::Normal)
+}
+
+fn load_font_with_weight(
+	rasterizer: &mut Rasterizer,
+	family: &str,
+	size: Size,
+	weight: Weight,
+) -> Option<FontKey> {
+	let font_desc =
+		FontDesc::new(family.to_owned(), Style::Description { slant: Slant::Normal, weight });
+
+	rasterizer.load_font(&font_desc, size).ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn load_font_for_terminal_weight(
+	rasterizer: &mut Rasterizer,
+	family: &str,
+	size: Size,
+	weight: WgpuTerminalFontWeight,
+) -> Option<FontKey> {
+	let style_names: &[&str] = match weight {
+		WgpuTerminalFontWeight::Normal => &["Regular", "Book"],
+		WgpuTerminalFontWeight::Medium => &["Medium"],
+		WgpuTerminalFontWeight::Semibold => &["Semibold", "SemiBold", "DemiBold", "Demi Bold"],
+		WgpuTerminalFontWeight::Bold => &["Bold"],
+	};
+
+	for style_name in style_names {
+		if let Some(font_key) = load_font_with_style_name(rasterizer, family, size, style_name) {
+			return Some(font_key);
+		}
+	}
+
+	match weight {
+		WgpuTerminalFontWeight::Normal => {
+			load_font_with_weight(rasterizer, family, size, Weight::Normal)
+		}
+		WgpuTerminalFontWeight::Medium => {
+			load_font_with_weight(rasterizer, family, size, Weight::Normal)
+		}
+		WgpuTerminalFontWeight::Semibold | WgpuTerminalFontWeight::Bold => {
+			load_font_with_weight(rasterizer, family, size, Weight::Bold)
+		}
+	}
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn load_font_for_terminal_weight(
+	rasterizer: &mut Rasterizer,
+	family: &str,
+	size: Size,
+	weight: WgpuTerminalFontWeight,
+) -> Option<FontKey> {
+	match weight {
+		WgpuTerminalFontWeight::Normal | WgpuTerminalFontWeight::Medium => {
+			load_font_with_weight(rasterizer, family, size, Weight::Normal)
+		}
+		WgpuTerminalFontWeight::Semibold | WgpuTerminalFontWeight::Bold => {
+			load_font_with_weight(rasterizer, family, size, Weight::Bold)
+		}
+	}
+}
+
+fn load_font_with_style_name(
+	rasterizer: &mut Rasterizer,
+	family: &str,
+	size: Size,
+	style_name: &str,
+) -> Option<FontKey> {
+	let font_desc = FontDesc::new(family.to_owned(), Style::Specific(style_name.to_owned()));
 
 	rasterizer.load_font(&font_desc, size).ok()
 }

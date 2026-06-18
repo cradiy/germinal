@@ -3,6 +3,7 @@ use crate::pty_host::{
 	font_config::TerminalFontConfig,
 	font_family::TerminalFontFamily,
 	font_size::TerminalFontSize,
+	font_weight::TerminalFontWeight,
 	glyph_render_config::TerminalGlyphRenderConfig,
 	scale_factor::TerminalScaleFactor,
 	size_info::{TerminalSizeConfig, TerminalSizeInfo},
@@ -34,10 +35,16 @@ impl TerminalProfile {
 
 	pub const fn font_size(self) -> TerminalFontSize { self.font_config.size() }
 
+	pub const fn bold_font_weight(self) -> TerminalFontWeight { self.font_config.bold_weight() }
+
 	pub const fn size_config(self) -> TerminalSizeConfig { self.size_config }
 
 	pub fn with_cell_size(self, cell_size: TerminalCellSize) -> Self {
 		Self { size_config: self.size_config.with_cell_size(cell_size), ..self }
+	}
+
+	pub fn with_bold_font_weight(self, bold_weight: TerminalFontWeight) -> Self {
+		Self { font_config: self.font_config.with_bold_weight(bold_weight), ..self }
 	}
 
 	pub fn size_info(

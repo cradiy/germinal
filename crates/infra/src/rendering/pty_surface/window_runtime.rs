@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use germinal_domain::pty_host::{
-	cell_size::TerminalCellSize, profile::TerminalProfile, scale_factor::TerminalScaleFactor,
-	size_info::TerminalSizeInfo, window_metrics::TerminalWindowMetrics,
-	window_size::TerminalWindowSize,
+	cell_size::TerminalCellSize, font_weight::TerminalFontWeight, profile::TerminalProfile,
+	scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
+	window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
 };
 use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
 use winit::window::{Window, WindowId};
 
 use crate::rendering::pty_surface::{
-	crossfont_glyph_atlas::WgpuCrossfontGlyphAtlasBuilder,
+	crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuTerminalFontWeight},
 	frame_builder::WgpuTerminalFrameBuilder,
 	frame_renderer::WgpuTerminalFrameRenderer,
 	pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
@@ -200,11 +200,21 @@ fn build_terminal_frame_builder(
 		glyph_config.font_size_px(),
 	)
 	.map_err(|error| format!("crossfont font load failed: {error:?}"))?
+	.with_bold_font_weight(wgpu_font_weight_from_terminal(glyph_config.bold_font_weight()))
 	.with_padding_px(2)
 	.with_columns(16)
 	.with_cell_size_px(terminal_cell_size.width_px(), terminal_cell_size.height_px());
 
 	Ok(base.with_crossfont_glyph_atlas_builder(crossfont_builder))
+}
+
+fn wgpu_font_weight_from_terminal(weight: TerminalFontWeight) -> WgpuTerminalFontWeight {
+	match weight {
+		TerminalFontWeight::Normal => WgpuTerminalFontWeight::Normal,
+		TerminalFontWeight::Medium => WgpuTerminalFontWeight::Medium,
+		TerminalFontWeight::Semibold => WgpuTerminalFontWeight::Semibold,
+		TerminalFontWeight::Bold => WgpuTerminalFontWeight::Bold,
+	}
 }
 
 fn terminal_profile_from_alacritty_crossfont_metrics(

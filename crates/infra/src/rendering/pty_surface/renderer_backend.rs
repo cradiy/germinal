@@ -568,7 +568,7 @@ pub struct WgpuQuadDrawItem {
 impl WgpuQuadDrawItem {
 	pub fn glyph(glyph: WgpuGlyphDrawItem, config: WgpuRendererConfig) -> Self {
 		Self {
-			kind:      WgpuQuadKind::Glyph { c: glyph.c },
+			kind:      WgpuQuadKind::Glyph { c: glyph.c, bold: glyph.style.bold },
 			x_px:      glyph.pixel_x(config),
 			y_px:      glyph.pixel_y(config),
 			width_px:  glyph.pixel_width(config),
@@ -634,7 +634,7 @@ impl WgpuQuadDrawItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuQuadKind {
 	Background,
-	Glyph { c: char },
+	Glyph { c: char, bold: bool },
 	Underline,
 }
 

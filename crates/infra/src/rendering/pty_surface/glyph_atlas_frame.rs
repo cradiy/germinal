@@ -5,7 +5,7 @@ use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 use crate::rendering::pty_surface::{
 	crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError},
-	glyph_atlas::{WgpuDebugGlyphAtlasBuilder, WgpuTerminalGlyphAtlas},
+	glyph_atlas::{WgpuDebugGlyphAtlasBuilder, WgpuTerminalGlyphAtlas, WgpuTerminalGlyphKey},
 	glyph_atlas_texture::{WgpuTerminalGlyphAtlasTextureFactory, WgpuTerminalGlyphAtlasUploadBytes},
 };
 
@@ -89,10 +89,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 		let run_count = texts.len();
 		let char_count = texts.iter().map(|text| text.chars().count()).sum();
 
-		let chars = collect_chars(texts.iter().copied());
+		let glyphs = collect_glyphs(surface_snapshot);
 		let cache_key = WgpuTerminalGlyphAtlasCacheKey {
 			source: self.source.kind(),
-			chars:  chars.iter().copied().collect(),
+			glyphs: glyphs.iter().copied().collect(),
 		};
 
 		let (atlas, cache_hit) = self.cached_or_build_atlas(&cache_key);
@@ -120,7 +120,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
 			if let Some(entry) = cache.as_ref()
 				&& entry.key.source == cache_key.source
-				&& entry.key.contains_all_chars(&cache_key.chars)
+				&& entry.key.contains_all_glyphs(&cache_key.glyphs)
 			{
 				return (entry.atlas.clone(), true);
 			}
@@ -140,7 +140,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 			}
 		};
 
-		let atlas = self.source.build_for_chars(merged_key.chars.iter().copied());
+		let atlas = self.source.build_for_glyphs(merged_key.glyphs.iter().copied());
 
 		{
 			let mut cache = self.cache.borrow_mut();
@@ -178,6 +178,14 @@ impl WgpuTerminalGlyphAtlasSource {
 		}
 	}
 
+	pub fn build_for_glyphs<I>(&self, glyphs: I) -> WgpuTerminalGlyphAtlas
+	where I: IntoIterator<Item = WgpuTerminalGlyphKey> {
+		match self {
+			Self::Debug5x7(builder) => builder.build_for_glyphs(glyphs),
+			Self::Crossfont(builder) => builder.build_for_glyphs(glyphs),
+		}
+	}
+
 	pub fn build_for_texts<I, S>(&self, texts: I) -> WgpuTerminalGlyphAtlas
 	where
 		I: IntoIterator<Item = S>,
@@ -199,25 +207,25 @@ pub enum WgpuTerminalGlyphAtlasSourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WgpuTerminalGlyphAtlasCacheKey {
 	source: WgpuTerminalGlyphAtlasSourceKind,
-	chars:  Vec<char>,
+	glyphs: Vec<WgpuTerminalGlyphKey>,
 }
 
 impl WgpuTerminalGlyphAtlasCacheKey {
-	fn contains_all_chars(&self, chars: &[char]) -> bool {
-		chars.iter().all(|c| self.chars.binary_search(c).is_ok())
+	fn contains_all_glyphs(&self, glyphs: &[WgpuTerminalGlyphKey]) -> bool {
+		glyphs.iter().all(|glyph| self.glyphs.binary_search(glyph).is_ok())
 	}
 
 	fn merged_with(&self, other: &Self) -> Self {
-		let mut chars = self.chars.clone();
+		let mut glyphs = self.glyphs.clone();
 
-		for c in &other.chars {
-			match chars.binary_search(c) {
+		for glyph in &other.glyphs {
+			match glyphs.binary_search(glyph) {
 				Ok(_) => {}
-				Err(index) => chars.insert(index, *c),
+				Err(index) => glyphs.insert(index, *glyph),
 			}
 		}
 
-		Self { source: self.source, chars }
+		Self { source: self.source, glyphs }
 	}
 }
 
@@ -227,20 +235,18 @@ struct WgpuTerminalGlyphAtlasCacheEntry {
 	atlas: WgpuTerminalGlyphAtlas,
 }
 
-fn collect_chars<I, S>(texts: I) -> BTreeSet<char>
-where
-	I: IntoIterator<Item = S>,
-	S: AsRef<str>,
-{
-	let mut chars = BTreeSet::new();
+fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerminalGlyphKey> {
+	let mut glyphs = BTreeSet::new();
 
-	for text in texts {
-		for c in text.as_ref().chars() {
-			chars.insert(c);
+	for row in &surface_snapshot.rows {
+		for run in &row.runs {
+			for c in run.text.chars() {
+				glyphs.insert(WgpuTerminalGlyphKey::new(c, run.style.bold));
+			}
 		}
 	}
 
-	chars
+	glyphs
 }
 
 #[cfg(test)]
