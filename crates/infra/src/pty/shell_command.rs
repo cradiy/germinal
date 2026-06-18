@@ -10,12 +10,9 @@ impl ShellCommand {
 
 #[cfg(windows)]
 pub fn default_shell_command() -> ShellCommand {
-	let program = std::env::var("COMSPEC")
-		.ok()
-		.filter(|shell| !shell.trim().is_empty())
-		.unwrap_or_else(|| "powershell".to_string());
+	let program = "powershell.exe".to_string();
 
-	ShellCommand::new(program, Vec::new())
+	ShellCommand::new(program, vec!["-NoLogo".to_string()])
 }
 
 #[cfg(unix)]
