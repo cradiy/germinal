@@ -97,7 +97,12 @@ impl WgpuTerminalWindowRuntime {
 		)?;
 		let size_info = terminal_size_info(profile, width, height, window.scale_factor());
 
-		let frame_builder = build_terminal_frame_builder(profile, size_info, window.scale_factor())?;
+		let frame_builder = build_terminal_frame_builder(
+			profile,
+			size_info,
+			window.scale_factor(),
+			device.limits().max_texture_dimension_2d,
+		)?;
 		let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);
 		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer);
 
@@ -208,6 +213,7 @@ fn build_terminal_frame_builder(
 	profile: TerminalProfile,
 	size_info: TerminalSizeInfo,
 	scale_factor: f64,
+	max_texture_dimension_2d: u32,
 ) -> Result<WgpuTerminalFrameBuilder, String> {
 	let base = WgpuTerminalFrameBuilder::new(WgpuRendererConfig::from(size_info));
 
@@ -221,6 +227,7 @@ fn build_terminal_frame_builder(
 	.with_bold_font_weight(wgpu_font_weight_from_terminal(glyph_config.bold_font_weight()))
 	.with_padding_px(2)
 	.with_columns(16)
+	.with_max_texture_dimension_2d(max_texture_dimension_2d)
 	.with_cell_size_px(terminal_cell_size.width_px(), terminal_cell_size.height_px());
 
 	Ok(base.with_crossfont_glyph_atlas_builder(crossfont_builder))

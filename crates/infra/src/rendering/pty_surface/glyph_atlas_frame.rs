@@ -122,32 +122,19 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
 			if let Some(entry) = cache.as_ref()
 				&& entry.key.source == cache_key.source
-				&& entry.key.contains_all_glyphs(&cache_key.glyphs)
+				&& entry.key == *cache_key
 			{
 				return (entry.atlas.clone(), true);
 			}
 		}
 
-		let merged_key = {
-			let cache = self.cache.borrow();
-
-			if let Some(entry) = cache.as_ref() {
-				if entry.key.source == cache_key.source {
-					entry.key.merged_with(cache_key)
-				} else {
-					cache_key.clone()
-				}
-			} else {
-				cache_key.clone()
-			}
-		};
-
-		let atlas = self.source.build_for_glyphs(merged_key.glyphs.iter().copied());
+		let atlas = self.source.build_for_glyphs(cache_key.glyphs.iter().copied());
 
 		{
 			let mut cache = self.cache.borrow_mut();
 
-			*cache = Some(WgpuTerminalGlyphAtlasCacheEntry { key: merged_key, atlas: atlas.clone() });
+			*cache =
+				Some(WgpuTerminalGlyphAtlasCacheEntry { key: cache_key.clone(), atlas: atlas.clone() });
 		}
 
 		(atlas, false)
@@ -210,25 +197,6 @@ pub enum WgpuTerminalGlyphAtlasSourceKind {
 struct WgpuTerminalGlyphAtlasCacheKey {
 	source: WgpuTerminalGlyphAtlasSourceKind,
 	glyphs: Vec<WgpuTerminalGlyphKey>,
-}
-
-impl WgpuTerminalGlyphAtlasCacheKey {
-	fn contains_all_glyphs(&self, glyphs: &[WgpuTerminalGlyphKey]) -> bool {
-		glyphs.iter().all(|glyph| self.glyphs.binary_search(glyph).is_ok())
-	}
-
-	fn merged_with(&self, other: &Self) -> Self {
-		let mut glyphs = self.glyphs.clone();
-
-		for glyph in &other.glyphs {
-			match glyphs.binary_search(glyph) {
-				Ok(_) => {}
-				Err(index) => glyphs.insert(index, *glyph),
-			}
-		}
-
-		Self { source: self.source, glyphs }
-	}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +346,49 @@ mod tests {
 
 		assert!(!first.cache_hit);
 		assert!(!second.cache_hit);
+	}
+
+	#[test]
+	fn changed_chars_replace_cache_instead_of_growing_union() {
+		let target_id = RenderTargetId::new(1);
+
+		let red_snapshot = RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x:     0,
+					text:  "red".to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			cursor: None,
+		};
+
+		let blue_snapshot = RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(2),
+			rows: vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x:     0,
+					text:  "blue".to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			cursor: None,
+		};
+
+		let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
+
+		let _ = builder.build(&red_snapshot);
+		let blue = builder.build(&blue_snapshot);
+
+		assert!(!blue.cache_hit);
+		assert!(blue.atlas.has_glyph('b'));
+		assert!(blue.atlas.has_glyph('l'));
+		assert!(!blue.atlas.has_glyph('r'));
 	}
 
 	#[test]

@@ -40,14 +40,15 @@ impl WgpuCrossfontCellMetrics {
 
 #[derive(Clone)]
 pub struct WgpuCrossfontGlyphAtlasBuilder {
-	font_family:    String,
-	font_size_px:   f32,
-	bold_weight:    WgpuTerminalFontWeight,
-	padding_px:     u32,
-	columns:        u32,
-	cell_width_px:  Option<u32>,
-	cell_height_px: Option<u32>,
-	backend:        Rc<RefCell<Option<WgpuCrossfontGlyphBackend>>>,
+	font_family:              String,
+	font_size_px:             f32,
+	bold_weight:              WgpuTerminalFontWeight,
+	padding_px:               u32,
+	columns:                  u32,
+	max_texture_dimension_2d: u32,
+	cell_width_px:            Option<u32>,
+	cell_height_px:           Option<u32>,
+	backend:                  Rc<RefCell<Option<WgpuCrossfontGlyphBackend>>>,
 }
 
 impl std::fmt::Debug for WgpuCrossfontGlyphAtlasBuilder {
@@ -58,6 +59,7 @@ impl std::fmt::Debug for WgpuCrossfontGlyphAtlasBuilder {
 			.field("bold_weight", &self.bold_weight)
 			.field("padding_px", &self.padding_px)
 			.field("columns", &self.columns)
+			.field("max_texture_dimension_2d", &self.max_texture_dimension_2d)
 			.field("cell_width_px", &self.cell_width_px)
 			.field("cell_height_px", &self.cell_height_px)
 			.finish()
@@ -82,6 +84,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 			bold_weight: WgpuTerminalFontWeight::default_bold(),
 			padding_px: 1,
 			columns: 16,
+			max_texture_dimension_2d: u32::MAX,
 			cell_width_px: None,
 			cell_height_px: None,
 			backend: Rc::new(RefCell::new(Some(backend))),
@@ -107,6 +110,11 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 
 	pub fn with_columns(mut self, columns: u32) -> Self {
 		self.columns = columns.max(1);
+		self
+	}
+
+	pub fn with_max_texture_dimension_2d(mut self, max_texture_dimension_2d: u32) -> Self {
+		self.max_texture_dimension_2d = max_texture_dimension_2d.max(1);
 		self
 	}
 
@@ -197,6 +205,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 			baseline_y_px,
 			self.padding_px,
 			self.columns,
+			self.max_texture_dimension_2d,
 		)
 	}
 }
@@ -375,6 +384,7 @@ fn build_atlas_from_rasterized_glyphs(
 	baseline_y_px: i32,
 	padding_px: u32,
 	columns: u32,
+	max_texture_dimension_2d: u32,
 ) -> WgpuTerminalGlyphAtlas {
 	if glyphs.is_empty() {
 		return WgpuTerminalGlyphAtlas::empty();
@@ -393,18 +403,25 @@ fn build_atlas_from_rasterized_glyphs(
 
 	let cell_stride_width = max_bitmap_width + padding_px;
 	let cell_stride_height = max_bitmap_height + padding_px;
-	let row_count = (glyphs.len() as u32).div_ceil(columns);
+	let layout = GlyphAtlasGridLayout::new(
+		glyphs.len() as u32,
+		columns,
+		cell_stride_width,
+		cell_stride_height,
+		padding_px,
+		max_texture_dimension_2d,
+	);
 
-	let atlas_width = padding_px + columns * cell_stride_width;
-	let atlas_height = padding_px + row_count * cell_stride_height;
+	let atlas_width = layout.atlas_width;
+	let atlas_height = layout.atlas_height;
 
 	let mut pixels = vec![0u8; (atlas_width * atlas_height * 4) as usize];
 	let mut entries = HashMap::new();
 
 	for (index, glyph) in glyphs.into_iter().enumerate() {
 		let index = index as u32;
-		let col = index % columns;
-		let row = index / columns;
+		let col = index % layout.columns;
+		let row = index / layout.columns;
 
 		let cell_x = padding_px + col * cell_stride_width;
 		let cell_y = padding_px + row * cell_stride_height;
@@ -440,6 +457,40 @@ fn build_atlas_from_rasterized_glyphs(
 	}
 
 	WgpuTerminalGlyphAtlas { width_px: atlas_width, height_px: atlas_height, pixels, entries }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GlyphAtlasGridLayout {
+	columns:      u32,
+	row_count:    u32,
+	atlas_width:  u32,
+	atlas_height: u32,
+}
+
+impl GlyphAtlasGridLayout {
+	fn new(
+		glyph_count: u32,
+		preferred_columns: u32,
+		cell_stride_width: u32,
+		cell_stride_height: u32,
+		padding_px: u32,
+		max_texture_dimension_2d: u32,
+	) -> Self {
+		let glyph_count = glyph_count.max(1);
+		let preferred_columns = preferred_columns.max(1).min(glyph_count);
+		let usable_dimension = max_texture_dimension_2d.max(padding_px.saturating_add(1));
+		let usable_width = usable_dimension.saturating_sub(padding_px).max(1);
+		let usable_height = usable_dimension.saturating_sub(padding_px).max(1);
+		let max_columns = (usable_width / cell_stride_width).max(1).min(glyph_count);
+		let max_rows = (usable_height / cell_stride_height).max(1);
+		let min_columns_needed = glyph_count.div_ceil(max_rows).max(1);
+		let columns = preferred_columns.max(min_columns_needed).min(max_columns).max(1);
+		let row_count = glyph_count.div_ceil(columns);
+		let atlas_width = padding_px.saturating_add(columns.saturating_mul(cell_stride_width));
+		let atlas_height = padding_px.saturating_add(row_count.saturating_mul(cell_stride_height));
+
+		Self { columns, row_count, atlas_width, atlas_height }
+	}
 }
 
 fn glyph_rgba_pixels(
@@ -655,4 +706,26 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 	// grapheme-level VS16 parser we only route the dedicated emoji planes to the
 	// color emoji font.
 	matches!(c as u32, 0x1F000..=0x1FAFF)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::GlyphAtlasGridLayout;
+
+	#[test]
+	fn grows_columns_to_stay_within_texture_height_limit() {
+		let layout = GlyphAtlasGridLayout::new(4600, 16, 20, 30, 2, 8192);
+
+		assert!(layout.columns > 16);
+		assert!(layout.atlas_width <= 8192);
+		assert!(layout.atlas_height <= 8192);
+	}
+
+	#[test]
+	fn caps_columns_when_width_limit_is_tighter_than_preference() {
+		let layout = GlyphAtlasGridLayout::new(1000, 16, 700, 10, 2, 8192);
+
+		assert_eq!(layout.columns, 11);
+		assert!(layout.atlas_width <= 8192);
+	}
 }
