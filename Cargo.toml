@@ -20,6 +20,7 @@ germinal-domain = { path = "crates/domain" }
 germinal-ports = { path = "crates/ports" }
 germinal-application = { path = "crates/application" }
 germinal-infra = { path = "crates/infra" }
+smol_str = "0.2"
 
 [profile.product]
 inherits = "release"

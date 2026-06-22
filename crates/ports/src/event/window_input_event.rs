@@ -1,3 +1,5 @@
+use smol_str::SmolStr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowInputElementState {
 	Pressed,
@@ -36,7 +38,7 @@ pub enum WindowInputNamedKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowInputKey {
 	Named(WindowInputNamedKey),
-	Character(String),
+	Character(SmolStr),
 	Unidentified,
 }
 
@@ -46,7 +48,7 @@ pub enum WindowInputEvent {
 	Key {
 		state:       WindowInputElementState,
 		logical_key: WindowInputKey,
-		text:        Option<String>,
+		text:        Option<SmolStr>,
 	},
 	Ime(String),
 	Paste(String),

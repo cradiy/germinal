@@ -139,19 +139,21 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				});
 			}
 			WindowEvent::KeyboardInput { event, .. } => {
+				let winit::event::KeyEvent { state, logical_key, text, .. } = event;
+
 				self.route_input_to_gshell(GShellInput {
 					pane_id: self.workspace_service_state.focused_pane(),
 					event:   GShellInputEvent::Window(WindowInputEvent::Key {
-						state:       winit_element_state_to_port(event.state),
-						logical_key: winit_key_to_port(&event.logical_key),
-						text:        event.text.as_ref().map(|text| text.to_string()),
+						state: winit_element_state_to_port(state),
+						logical_key: winit_key_to_port(logical_key),
+						text,
 					}),
 				});
 			}
 			WindowEvent::Ime(Ime::Commit(text)) => {
 				self.route_input_to_gshell(GShellInput {
 					pane_id: self.workspace_service_state.focused_pane(),
-					event:   GShellInputEvent::Window(WindowInputEvent::Ime(text.to_string())),
+					event:   GShellInputEvent::Window(WindowInputEvent::Ime(text)),
 				});
 			}
 			_ => {}
@@ -168,7 +170,7 @@ fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
 	}
 }
 
-fn winit_key_to_port(key: &Key) -> WindowInputKey {
+fn winit_key_to_port(key: Key) -> WindowInputKey {
 	match key {
 		Key::Named(named) => match named {
 			NamedKey::Enter => WindowInputKey::Named(WindowInputNamedKey::Enter),
@@ -184,7 +186,7 @@ fn winit_key_to_port(key: &Key) -> WindowInputKey {
 			NamedKey::Delete => WindowInputKey::Named(WindowInputNamedKey::Delete),
 			_ => WindowInputKey::Unidentified,
 		},
-		Key::Character(text) => WindowInputKey::Character(text.to_string()),
+		Key::Character(text) => WindowInputKey::Character(text),
 		_ => WindowInputKey::Unidentified,
 	}
 }

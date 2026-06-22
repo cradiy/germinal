@@ -907,6 +907,7 @@ name = "germinal-ports"
 version = "0.0.1"
 dependencies = [
  "germinal-domain",
+ "smol_str",
 ]
 
 [[package]]
