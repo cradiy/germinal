@@ -8,7 +8,7 @@ use std::{
 use alacritty_terminal::{
 	event::{Event, EventListener},
 	grid::Dimensions,
-	term::{Config, Term, TermDamage, cell::Flags, color::Colors},
+	term::{Config, Term, TermDamage, TermMode, cell::Flags, color::Colors},
 	vte::ansi::{Color, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_ports::{
@@ -173,6 +173,9 @@ impl AlacrittyTerminalRepository {
 		let inner = self.inner.borrow();
 
 		let state = inner.get(&render_target_id)?;
+		if !state.term.mode().contains(TermMode::SHOW_CURSOR) {
+			return None;
+		}
 
 		let point = state.term.grid().cursor.point;
 
@@ -183,6 +186,9 @@ impl AlacrittyTerminalRepository {
 		let inner = self.inner.borrow();
 
 		let state = inner.get(&render_target_id)?;
+		if !state.term.mode().contains(TermMode::SHOW_CURSOR) {
+			return None;
+		}
 		let point = state.term.grid().cursor.point;
 
 		let row = u32::try_from(point.line.0).ok()?;
