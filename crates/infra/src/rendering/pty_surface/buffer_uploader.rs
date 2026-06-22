@@ -113,7 +113,7 @@ mod tests {
 		let quad_builder = WgpuQuadVertexBufferBuilder::new();
 
 		let vertex_buffer = quad_builder.build(&[WgpuQuadDrawItem {
-			kind: WgpuQuadKind::Glyph { c: 'r' },
+			kind: WgpuQuadKind::Glyph { c: 'r', bold: true },
 			x_px: 10,
 			y_px: 20,
 			width_px: 8,

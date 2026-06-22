@@ -714,6 +714,7 @@ mod tests {
 				y:    2,
 				runs: vec![RenderSurfaceRunSnapshot { x: 4, text: "red".to_string(), style: red }],
 			}],
+			cursor: None,
 		});
 
 		let state = backend.state();
@@ -743,7 +744,7 @@ mod tests {
 		let glyph_quads = state.glyph_quads();
 
 		assert_eq!(glyph_quads.len(), 3);
-		assert_eq!(glyph_quads[0].kind, WgpuQuadKind::Glyph { c: 'r' });
+		assert_eq!(glyph_quads[0].kind, WgpuQuadKind::Glyph { c: 'r', bold: true });
 		assert_eq!(glyph_quads[0].x_px, 36);
 		assert_eq!(glyph_quads[0].y_px, 36);
 		assert_eq!(glyph_quads[0].width_px, 9);
@@ -775,6 +776,7 @@ mod tests {
 					style: underline,
 				}],
 			}],
+			cursor: None,
 		});
 
 		let state = backend.state();
@@ -814,6 +816,7 @@ mod tests {
 					},
 				],
 			}],
+			cursor: None,
 		});
 
 		let state = backend.state();
@@ -848,6 +851,7 @@ mod tests {
 				y:    3,
 				runs: vec![RenderSurfaceRunSnapshot { x: 2, text: "ab".to_string(), style }],
 			}],
+			cursor: None,
 		});
 
 		let state = backend.state();
@@ -870,7 +874,7 @@ mod tests {
 		});
 
 		assert_eq!(glyph_quads[0], WgpuQuadDrawItem {
-			kind: WgpuQuadKind::Glyph { c: 'a' },
+			kind: WgpuQuadKind::Glyph { c: 'a', bold: true },
 			x_px: 20,
 			y_px: 60,
 			width_px: 10,
@@ -891,8 +895,8 @@ mod tests {
 
 		assert_eq!(state.quads()[0].kind, WgpuQuadKind::Background);
 		assert_eq!(state.quads()[1].kind, WgpuQuadKind::Background);
-		assert_eq!(state.quads()[2].kind, WgpuQuadKind::Glyph { c: 'a' });
-		assert_eq!(state.quads()[3].kind, WgpuQuadKind::Glyph { c: 'b' });
+		assert_eq!(state.quads()[2].kind, WgpuQuadKind::Glyph { c: 'a', bold: true });
+		assert_eq!(state.quads()[3].kind, WgpuQuadKind::Glyph { c: 'b', bold: true });
 		assert_eq!(state.quads()[4].kind, WgpuQuadKind::Underline);
 		assert_eq!(state.quads()[5].kind, WgpuQuadKind::Underline);
 	}
@@ -921,6 +925,7 @@ mod tests {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "▄".to_string(), style }],
 			}],
+			cursor:     None,
 		});
 
 		let state = backend.state();
@@ -953,6 +958,7 @@ mod tests {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "🮂".to_string(), style }],
 			}],
+			cursor:     None,
 		});
 
 		let state = backend.state();

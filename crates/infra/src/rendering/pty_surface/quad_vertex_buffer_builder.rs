@@ -238,7 +238,7 @@ mod tests {
 		let builder = WgpuQuadVertexBufferBuilder::new();
 
 		let buffer = builder.build(&[WgpuQuadDrawItem {
-			kind:      WgpuQuadKind::Glyph { c: 'a' },
+			kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
 			x_px:      10,
 			y_px:      20,
 			width_px:  8,
@@ -266,7 +266,7 @@ mod tests {
 
 		let buffer = builder.build(&[
 			WgpuQuadDrawItem {
-				kind:      WgpuQuadKind::Glyph { c: 'a' },
+				kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
 				x_px:      0,
 				y_px:      0,
 				width_px:  8,
@@ -274,7 +274,7 @@ mod tests {
 				style:     TextStyleDto::plain(),
 			},
 			WgpuQuadDrawItem {
-				kind:      WgpuQuadKind::Glyph { c: 'b' },
+				kind:      WgpuQuadKind::Glyph { c: 'b', bold: false },
 				x_px:      8,
 				y_px:      0,
 				width_px:  8,
