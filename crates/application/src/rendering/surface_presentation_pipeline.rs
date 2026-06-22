@@ -158,6 +158,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			cursor: None,
 		});
 
 		let pipeline =

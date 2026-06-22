@@ -1,25 +1,24 @@
 [package]
-name = "germinal-infra"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+name                 = "germinal-infra"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
 repository.workspace = true
-authors.workspace = true
+authors.workspace    = true
 
 [dependencies]
-germinal-ports.workspace = true
+germinal-ports.workspace  = true
 germinal-domain.workspace = true
 
-alacritty_terminal = "0.26"
-wgpu = "29.0"
-crossfont = "0.9"
-unicode-width = "0.2"
-winit = "0.30"
-pollster = "0.4"
-portable-pty = "0.9"
+alacritty_terminal.workspace = true
+wgpu.workspace               = true
+crossfont.workspace          = true
+unicode-width.workspace      = true
+winit.workspace              = true
+pollster.workspace           = true
+portable-pty.workspace       = true
 
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["term", "process", "fs"] }
-libc = "0.2"
-compio = { version = "0.19", features = ["runtime", "io", "fs"] }
+nix    = { workspace = true, features = ["term", "process", "fs"] }
+compio = { workspace = true, features = ["runtime", "io", "fs", "io-uring"] }

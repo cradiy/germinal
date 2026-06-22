@@ -9,25 +9,41 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
-edition = "2024"
-license = "MIT"
+version    = "0.0.1"
+edition    = "2024"
+license    = "MIT"
 repository = "https://github.com/zooeywm/germinal"
-authors = ["zooeywm <zooeywm@gmail.com>"]
+authors    = ["zooeywm <zooeywm@gmail.com>"]
 
 [workspace.dependencies]
-germinal-domain = { path = "crates/domain" }
-germinal-ports = { path = "crates/ports" }
+germinal-domain      = { path = "crates/domain" }
+germinal-ports       = { path = "crates/ports" }
 germinal-application = { path = "crates/application" }
-germinal-infra = { path = "crates/infra" }
-smol_str = "0.2"
+germinal-infra       = { path = "crates/infra" }
+
+# util
+smol_str      = "0.2"
+unicode-width = "0.2"
+
+# application
+kudi = "0.1"
+
+# infra
+alacritty_terminal = "0.26"
+wgpu               = "29.0"
+crossfont          = "0.9"
+winit              = "0.30"
+pollster           = "0.4"
+portable-pty       = "0.9"
+nix                = { version = "0.31", default-features = false }
+compio             = { version = "0.19", default-features = false }
 
 [profile.product]
-inherits = "release"
-opt-level = 3
-debug = false
-strip = "none"
-lto = true
+inherits      = "release"
+opt-level     = 3
+debug         = false
+strip         = "none"
+lto           = true
 codegen-units = 1
-incremental = false
-panic = "abort"
+incremental   = false
+panic         = "abort"

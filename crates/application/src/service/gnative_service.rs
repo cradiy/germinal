@@ -14,7 +14,7 @@ impl Default for GNativeServiceState {
 }
 
 impl<Deps> IGNativeService for GNativeService<Deps>
-where Deps: AsRef<GNativeServiceState> + IWorkerService
+where Deps: IWorkerService
 {
 	fn ensure_pane_gnative(&self, _pane_id: PaneId) { self.prj_ref().start_worker_pool(); }
 }

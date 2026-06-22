@@ -1,5 +1,5 @@
 use std::{
-	os::fd::{FromRawFd, OwnedFd},
+	os::fd::{BorrowedFd, OwnedFd},
 	sync::mpsc::SyncSender,
 	thread,
 };
@@ -10,19 +10,24 @@ use compio::{
 	runtime::{ResumeUnwind, fd::AsyncFd, spawn},
 };
 use germinal_domain::workspace::pane_id::PaneId;
-use germinal_ports::event::{
-	runtime_event::{PaneRuntimeEvent, RuntimeEvent},
-	runtime_event_dispatcher::RuntimeEventDispatcher,
+use germinal_ports::{
+	event::{
+		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event_dispatcher::RuntimeEventDispatcher,
+	},
+	pty_host::{
+		pty_input::{PtyInput, PtyInputReceiver, PtyInputSender},
+		worker_input::TerminalWorkerInput,
+	},
 };
-use nix::unistd::dup;
+use nix::{
+	errno::Errno,
+	sys::termios::{SpecialCharacterIndices, tcgetattr},
+	unistd::dup,
+};
 use portable_pty::{CommandBuilder, native_pty_system};
 
-use crate::{
-	pty::portable_pty_bridge::{
-		PtyBridgeConfig, PtyBridgeInput, PtyInputReceiver, PtyInputSender, to_portable_pty_size,
-	},
-	pty_host::worker::TerminalWorkerInput,
-};
+use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
 
 pub(crate) fn spawn_compio_bridge_thread(
 	proxy: RuntimeEventDispatcher,
@@ -68,13 +73,15 @@ async fn run_compio_bridge(
 
 	let master = pair.master;
 	let master_fd = master.as_raw_fd().expect("unix pty master must expose a raw fd");
-	let reader_fd = dup(master_fd).expect("failed to dup pty reader fd");
-	let writer_fd = dup(master_fd).expect("failed to dup pty writer fd");
+	let reader_fd =
+		dup(unsafe { BorrowedFd::borrow_raw(master_fd) }).expect("failed to dup pty reader fd");
+	let writer_fd =
+		dup(unsafe { BorrowedFd::borrow_raw(master_fd) }).expect("failed to dup pty writer fd");
 
-	let mut reader = AsyncFd::<OwnedFd>::new(unsafe { OwnedFd::from_raw_fd(reader_fd) })
-		.expect("failed to attach pty reader to compio");
-	let mut writer = AsyncFd::<OwnedFd>::new(unsafe { OwnedFd::from_raw_fd(writer_fd) })
-		.expect("failed to attach pty writer to compio");
+	let mut reader =
+		AsyncFd::<OwnedFd>::new(reader_fd).expect("failed to attach pty reader to compio");
+	let mut writer =
+		AsyncFd::<OwnedFd>::new(writer_fd).expect("failed to attach pty writer to compio");
 
 	let read_task = spawn(async move {
 		read_pty_to_terminal_worker_async(&mut reader, &terminal_worker_tx).await;
@@ -84,7 +91,7 @@ async fn run_compio_bridge(
 	let input_task = spawn(async move {
 		while let Some(input) = input_rx.recv().await {
 			match input {
-				PtyBridgeInput::Bytes(bytes) => {
+				PtyInput::Bytes(bytes) => {
 					let BufResult(result, _) = writer.write_all(bytes).await;
 					if result.is_err() {
 						break;
@@ -94,7 +101,7 @@ async fn run_compio_bridge(
 						break;
 					}
 				}
-				PtyBridgeInput::Resize(size) => {
+				PtyInput::Resize(size) => {
 					if master.resize(to_portable_pty_size(size)).is_err() {
 						break;
 					}
@@ -144,17 +151,15 @@ async fn read_pty_to_terminal_worker_async(
 }
 
 fn is_pty_hangup_read_error(error: &std::io::Error) -> bool {
-	error.raw_os_error() == Some(libc::EIO)
+	error.raw_os_error() == Some(Errno::EIO as i32)
 }
 
 fn pty_eof_bytes(raw_fd: i32) -> Option<Vec<u8>> {
-	let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
-	if unsafe { libc::tcgetattr(raw_fd, termios.as_mut_ptr()) } != 0 {
-		return None;
-	}
+	let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-	let termios = unsafe { termios.assume_init() };
-	let eof = termios.c_cc[libc::VEOF];
+	let termios = tcgetattr(fd).ok()?;
+	let eof = termios.control_chars[SpecialCharacterIndices::VEOF as usize];
+
 	if eof == 0 {
 		return None;
 	}

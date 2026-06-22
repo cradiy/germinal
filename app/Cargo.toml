@@ -1,14 +1,14 @@
 [package]
-name = "germinal"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+name                 = "germinal"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
 repository.workspace = true
-authors.workspace = true
+authors.workspace    = true
 
 [dependencies]
 germinal-application.workspace = true
-germinal-domain.workspace = true
-germinal-infra.workspace = true
-germinal-ports.workspace = true
-winit = "0.30"
+germinal-domain.workspace      = true
+germinal-infra.workspace       = true
+germinal-ports.workspace       = true
+winit.workspace                = true

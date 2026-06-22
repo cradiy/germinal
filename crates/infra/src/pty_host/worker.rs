@@ -10,14 +10,20 @@ use std::{
 };
 
 use germinal_domain::{
-	rendering::render_target_id::RenderTargetId, shared::seq::Seq, workspace::pane_id::PaneId,
+	pty_host::terminal_size::TerminalGridSize, rendering::render_target_id::RenderTargetId,
+	shared::seq::Seq, workspace::pane_id::PaneId,
 };
 use germinal_ports::{
 	event::{
 		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 	},
-	pty_host::snapshot::TerminalSnapshotProvider,
+	pty_host::{
+		pty_input::{PtyInput, PtyInputSender},
+		snapshot::TerminalSnapshotProvider,
+		worker_backend::ITerminalWorkerBackend,
+		worker_input::TerminalWorkerInput,
+	},
 	rendering::{
 		frame_plan_builder::{BuildFramePlanTask, FramePlanBuilder},
 		frame_plan_presenter::FramePlanPresenter,
@@ -28,7 +34,6 @@ use germinal_ports::{
 };
 
 use crate::{
-	pty::portable_pty_bridge::PtyInputSender,
 	pty_host::alacritty_state_store::{AlacrittyTermSize, AlacrittyTermStateStore},
 	rendering::{
 		snapshot_frame_plan_builder::SnapshotFramePlanBuilder,
@@ -42,19 +47,13 @@ const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
 
-pub enum TerminalWorkerInput {
-	Bytes(Vec<u8>),
-	Resize(AlacrittyTermSize),
-	SetPtyInput(PtyInputSender),
-}
-
 pub struct TerminalWorker;
 
 impl TerminalWorker {
 	pub fn spawn(
 		proxy: RuntimeEventDispatcher,
 		pane_id: PaneId,
-		initial_size: AlacrittyTermSize,
+		initial_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> SyncSender<TerminalWorkerInput> {
@@ -64,7 +63,7 @@ impl TerminalWorker {
 			let mut runtime = TerminalWorkerRuntime::new(
 				proxy,
 				pane_id,
-				initial_size,
+				to_alacritty_term_size(initial_size),
 				surface_snapshot_tx,
 				snapshot_wake_pending,
 			);
@@ -190,7 +189,7 @@ impl TerminalWorkerRuntime {
 			}
 			TerminalWorkerInput::Resize(size) => {
 				self.flush_pending_input();
-				self.unpublished_seq = Some(self.resize(size));
+				self.unpublished_seq = Some(self.resize(to_alacritty_term_size(size)));
 			}
 			TerminalWorkerInput::SetPtyInput(tx) => {
 				self.pty_input_tx = Some(tx);
@@ -219,7 +218,7 @@ impl TerminalWorkerRuntime {
 		};
 
 		for bytes in writes {
-			let _ = tx.send(crate::pty::portable_pty_bridge::PtyBridgeInput::Bytes(bytes));
+			let _ = tx.send(PtyInput::Bytes(bytes));
 		}
 	}
 
@@ -469,4 +468,28 @@ fn terminal_worker_perf_logging_enabled() -> bool {
 	env::var_os(TERMINAL_WORKER_PERF_LOG_ENV).and_then(|value| value.into_string().ok()).is_some_and(
 		|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
 	)
+}
+
+fn to_alacritty_term_size(size: TerminalGridSize) -> AlacrittyTermSize {
+	AlacrittyTermSize::new(size.columns(), size.rows())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlatformTerminalWorkerBackend;
+
+impl PlatformTerminalWorkerBackend {
+	pub fn new() -> Self { Self }
+}
+
+impl ITerminalWorkerBackend for PlatformTerminalWorkerBackend {
+	fn spawn_terminal_worker(
+		&self,
+		pane_id: PaneId,
+		initial_size: TerminalGridSize,
+		proxy: RuntimeEventDispatcher,
+		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+		snapshot_wake_pending: Arc<AtomicBool>,
+	) -> SyncSender<TerminalWorkerInput> {
+		TerminalWorker::spawn(proxy, pane_id, initial_size, surface_snapshot_tx, snapshot_wake_pending)
+	}
 }

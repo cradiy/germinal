@@ -8,25 +8,17 @@ use germinal_domain::{
 	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
 	rendering::render_target_id::RenderTargetId,
 };
-use germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalWindowRuntime;
 use germinal_ports::{
-	rendering::surface_snapshot::RenderSurfaceSnapshot, service::render_service::IRenderService,
+	rendering::{
+		surface_snapshot::RenderSurfaceSnapshot,
+		window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
+	},
+	service::render_service::IRenderService,
 };
-use winit::{
-	dpi::LogicalSize,
-	event_loop::ActiveEventLoop,
-	window::{Window, WindowId},
-};
-
-struct WindowRuntimeState {
-	runtime: WgpuTerminalWindowRuntime,
-}
 
 #[derive(kudi::DepInj)]
 #[target(RenderService)]
 pub struct RenderServiceState {
-	runtime:                 Option<WindowRuntimeState>,
-	window_size:             TerminalWindowSize,
 	redraw_pending:          bool,
 	window_focused:          bool,
 	focused_render_target:   Option<RenderTargetId>,
@@ -41,8 +33,6 @@ impl RenderServiceState {
 		let (surface_snapshot_tx, surface_snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
 
 		Self {
-			runtime: None,
-			window_size: TerminalWindowSize::new(960, 540),
 			redraw_pending: false,
 			window_focused: true,
 			focused_render_target: None,
@@ -51,40 +41,6 @@ impl RenderServiceState {
 			surface_snapshot_rx,
 			snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
 		}
-	}
-
-	pub fn ensure_window_runtime(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
-		if self.runtime.is_some() {
-			return Ok(());
-		}
-
-		let window = Arc::new(
-			event_loop
-				.create_window(
-					Window::default_attributes()
-						.with_title("Germinal")
-						.with_inner_size(LogicalSize::new(960.0, 540.0)),
-				)
-				.map_err(|error| error.to_string())?,
-		);
-
-		window.set_ime_allowed(true);
-
-		let runtime = pollster::block_on(WgpuTerminalWindowRuntime::new(window))?;
-		let size = runtime.window_size();
-		self.window_size = TerminalWindowSize::new(size.width.max(1), size.height.max(1));
-		self.runtime = Some(WindowRuntimeState { runtime });
-
-		Ok(())
-	}
-
-	pub fn current_window_id(&self) -> WindowId {
-		self
-			.runtime
-			.as_ref()
-			.expect("window runtime must be initialized before use")
-			.runtime
-			.window_id()
 	}
 
 	fn take_latest_surface_snapshot(&self) -> Option<RenderSurfaceSnapshot> {
@@ -103,61 +59,22 @@ impl RenderServiceState {
 		latest_snapshot
 	}
 
-	fn current_terminal_size_info(&self) -> TerminalSizeInfo {
-		let runtime = self.runtime.as_ref().expect("window runtime must be initialized before use");
-		runtime.runtime.terminal_size_info()
-	}
-
-	fn resize_window_surface_size_info(
-		&mut self,
-		window_size: TerminalWindowSize,
-	) -> TerminalSizeInfo {
-		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
-
-		let size_info = runtime.runtime.resize_surface_size_info(window_size);
-		self.window_size = size_info.window_size();
-		self.redraw_pending = true;
-
-		size_info
-	}
-
-	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
-		let snapshot = self.with_cursor_focus(snapshot);
-		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
-
-		runtime.runtime.set_surface_snapshot(snapshot.clone());
-		self.latest_surface_snapshot = Some(snapshot);
-		self.redraw_pending = true;
-	}
-
-	fn set_window_focused(&mut self, focused: bool) {
+	fn set_window_focused(&mut self, focused: bool) -> bool {
 		if self.window_focused == focused {
-			return;
+			return false;
 		}
 
 		self.window_focused = focused;
-		self.refresh_cursor_focus();
+		true
 	}
 
-	fn set_focused_render_target(&mut self, target_id: RenderTargetId) {
+	fn set_focused_render_target(&mut self, target_id: RenderTargetId) -> bool {
 		if self.focused_render_target == Some(target_id) {
-			return;
+			return false;
 		}
 
 		self.focused_render_target = Some(target_id);
-		self.refresh_cursor_focus();
-	}
-
-	fn refresh_cursor_focus(&mut self) {
-		let Some(snapshot) = self.latest_surface_snapshot.clone() else {
-			return;
-		};
-
-		let snapshot = self.with_cursor_focus(snapshot);
-		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
-		runtime.runtime.set_surface_snapshot(snapshot.clone());
-		self.latest_surface_snapshot = Some(snapshot);
-		self.redraw_pending = true;
+		true
 	}
 
 	fn with_cursor_focus(&self, mut snapshot: RenderSurfaceSnapshot) -> RenderSurfaceSnapshot {
@@ -170,23 +87,6 @@ impl RenderServiceState {
 	}
 
 	fn request_redraw(&mut self) { self.redraw_pending = true; }
-
-	fn flush_redraw_request(&mut self) {
-		let should_request = self.redraw_pending;
-		self.redraw_pending = false;
-
-		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
-
-		let should_request = should_request || runtime.runtime.take_redraw_request();
-		if should_request {
-			runtime.runtime.request_window_redraw();
-		}
-	}
-
-	fn render_window(&mut self) {
-		let runtime = self.runtime.as_mut().expect("window runtime must be initialized before use");
-		runtime.runtime.render();
-	}
 }
 
 impl Default for RenderServiceState {
@@ -194,7 +94,7 @@ impl Default for RenderServiceState {
 }
 
 impl<Deps> IRenderService for RenderService<Deps>
-where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState>
+where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRuntimeStore
 {
 	fn prepare_render_backend(&mut self) {
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
@@ -221,28 +121,66 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState>
 			return;
 		};
 
+		let snapshot = {
+			let state: &RenderServiceState = self.prj_ref().as_ref();
+			state.with_cursor_focus(snapshot)
+		};
+
+		self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use")
+			.set_surface_snapshot(snapshot.clone());
+
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.set_surface_snapshot(snapshot);
+		state.latest_surface_snapshot = Some(snapshot);
+		state.redraw_pending = true;
 	}
 
 	fn current_terminal_size_info(&self) -> TerminalSizeInfo {
-		let state: &RenderServiceState = self.prj_ref().as_ref();
-		state.current_terminal_size_info()
+		self
+			.prj_ref()
+			.window_runtime()
+			.expect("window runtime must be initialized before use")
+			.terminal_size_info()
 	}
 
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
-		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.resize_window_surface_size_info(window_size)
+		let size_info = self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use")
+			.resize_surface_size_info(window_size);
+
+		self.prj_ref_mut().as_mut().redraw_pending = true;
+
+		size_info
 	}
 
 	fn set_window_focused(&mut self, focused: bool) {
-		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.set_window_focused(focused);
+		let changed = {
+			let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+			state.set_window_focused(focused)
+		};
+
+		if !changed {
+			return;
+		}
+
+		refresh_cursor_focus(self.prj_ref_mut());
 	}
 
 	fn set_focused_render_target(&mut self, target_id: RenderTargetId) {
-		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.set_focused_render_target(target_id);
+		let changed = {
+			let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+			state.set_focused_render_target(target_id)
+		};
+
+		if !changed {
+			return;
+		}
+
+		refresh_cursor_focus(self.prj_ref_mut());
 	}
 
 	fn request_redraw(&mut self) {
@@ -251,12 +189,53 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState>
 	}
 
 	fn flush_redraw_request(&mut self) {
-		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.flush_redraw_request();
+		let should_request = {
+			let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+			let should_request = state.redraw_pending;
+			state.redraw_pending = false;
+			should_request
+		};
+
+		let runtime = self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use");
+
+		let should_request = should_request || runtime.take_redraw_request();
+		if should_request {
+			runtime.request_window_redraw();
+		}
 	}
 
 	fn present_workspace(&mut self) {
-		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.render_window();
+		self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use")
+			.render();
 	}
+}
+
+fn refresh_cursor_focus<Deps>(deps: &mut Deps)
+where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRuntimeStore {
+	let Some(snapshot) = ({
+		let state: &RenderServiceState = deps.as_ref();
+		state.latest_surface_snapshot.clone()
+	}) else {
+		return;
+	};
+
+	let snapshot = {
+		let state: &RenderServiceState = deps.as_ref();
+		state.with_cursor_focus(snapshot)
+	};
+
+	deps
+		.window_runtime_mut()
+		.expect("window runtime must be initialized before use")
+		.set_surface_snapshot(snapshot.clone());
+
+	let state: &mut RenderServiceState = deps.as_mut();
+	state.latest_surface_snapshot = Some(snapshot);
+	state.redraw_pending = true;
 }

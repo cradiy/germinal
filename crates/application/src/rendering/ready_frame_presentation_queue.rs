@@ -222,6 +222,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			cursor: None,
 		});
 
 		let presentation_pipeline =

@@ -1,8 +1,5 @@
 use germinal_domain::workspace::pane_id::PaneId;
-use germinal_ports::event::{
-	runtime_event::RuntimeEvent, runtime_event_dispatcher::RuntimeEventDispatcher,
-};
-use winit::event_loop::EventLoopProxy;
+use germinal_ports::event::runtime_event_dispatcher::RuntimeEventDispatcher;
 
 #[derive(kudi::DepInj)]
 #[target(WorkspaceService)]
@@ -12,11 +9,7 @@ pub struct WorkspaceServiceState {
 }
 
 impl WorkspaceServiceState {
-	pub fn new(proxy: EventLoopProxy<RuntimeEvent>) -> Self {
-		let runtime_event_proxy = RuntimeEventDispatcher::new(move |event| {
-			proxy.send_event(event).map_err(|error| error.to_string())
-		});
-
+	pub fn new(runtime_event_proxy: RuntimeEventDispatcher) -> Self {
 		Self { focused_pane: PaneId::new(0), runtime_event_proxy }
 	}
 

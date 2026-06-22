@@ -8,10 +8,18 @@ use germinal_application::service::{
 use germinal_domain::{
 	pty_host::window_size::TerminalWindowSize, rendering::render_target_id::RenderTargetId,
 };
+use germinal_infra::{
+	pty::PlatformPtyBackend,
+	pty_host::worker::PlatformTerminalWorkerBackend,
+	rendering::pty_surface::window_runtime::{
+		WgpuTerminalWindowRuntime, WgpuTerminalWindowRuntimeFactory,
+	},
+};
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
@@ -33,21 +41,62 @@ pub struct App {
 	worker_service_state:    WorkerServiceState,
 	render_service_state:    RenderServiceState,
 	layout_service_state:    LayoutServiceState,
+	pty_backend:             PlatformPtyBackend,
+	terminal_worker_backend: PlatformTerminalWorkerBackend,
+	render_runtime_factory:  WgpuTerminalWindowRuntimeFactory,
+	render_runtime:          Option<WgpuTerminalWindowRuntime>,
+	render_window_id:        Option<WindowId>,
 }
 
 impl App {
 	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Self {
+		let runtime_event_dispatcher = RuntimeEventDispatcher::new(move |event| {
+			runtime_event_proxy.send_event(event).map_err(|error| error.to_string())
+		});
+
 		Self {
-			workspace_service_state: WorkspaceServiceState::new(runtime_event_proxy),
+			workspace_service_state: WorkspaceServiceState::new(runtime_event_dispatcher),
 			gshell_service_state:    GShellServiceState::new(),
 			worker_service_state:    WorkerServiceState::new(),
 			render_service_state:    RenderServiceState::new(),
 			layout_service_state:    LayoutServiceState::default(),
+			pty_backend:             PlatformPtyBackend::new(),
+			terminal_worker_backend: PlatformTerminalWorkerBackend::new(),
+			render_runtime_factory:  WgpuTerminalWindowRuntimeFactory::new(),
+			render_runtime:          None,
+			render_window_id:        None,
 		}
 	}
 
 	pub fn run(&mut self, event_loop: EventLoop<RuntimeEvent>) -> Result<(), String> {
 		event_loop.run_app(self).map_err(|error| error.to_string())
+	}
+
+	fn ensure_window_runtime(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+		if self.render_runtime.is_some() {
+			return Ok(());
+		}
+
+		let window = std::sync::Arc::new(
+			event_loop
+				.create_window(
+					winit::window::Window::default_attributes()
+						.with_title("Germinal")
+						.with_inner_size(winit::dpi::LogicalSize::new(960.0, 540.0)),
+				)
+				.map_err(|error| error.to_string())?,
+		);
+		let window_id = window.id();
+		window.set_ime_allowed(true);
+
+		let runtime = self.render_runtime_factory.create_window_runtime(window)?;
+		self.render_runtime = Some(runtime);
+		self.render_window_id = Some(window_id);
+		Ok(())
+	}
+
+	fn current_window_id(&self) -> WindowId {
+		self.render_window_id.expect("window runtime must be initialized before use")
 	}
 }
 
@@ -58,7 +107,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 			(state.runtime_event_proxy(), state.focused_pane())
 		};
 
-		if self.render_service_state.ensure_window_runtime(event_loop).is_err() {
+		if self.ensure_window_runtime(event_loop).is_err() {
 			event_loop.exit();
 			return;
 		}
@@ -105,7 +154,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 		window_id: WindowId,
 		event: WindowEvent,
 	) {
-		let current_window_id = self.render_service_state.current_window_id();
+		let current_window_id = self.current_window_id();
 
 		if window_id != current_window_id {
 			return;

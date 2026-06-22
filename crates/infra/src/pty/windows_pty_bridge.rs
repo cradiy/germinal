@@ -5,18 +5,19 @@ use std::{
 };
 
 use germinal_domain::{pty_host::terminal_size::TerminalPtySize, workspace::pane_id::PaneId};
-use germinal_ports::event::{
-	runtime_event::{PaneRuntimeEvent, RuntimeEvent},
-	runtime_event_dispatcher::RuntimeEventDispatcher,
+use germinal_ports::{
+	event::{
+		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event_dispatcher::RuntimeEventDispatcher,
+	},
+	pty_host::{
+		pty_input::{PtyInput, PtyInputReceiver},
+		worker_input::TerminalWorkerInput,
+	},
 };
 use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
 
-use crate::{
-	pty::portable_pty_bridge::{
-		PtyBridgeConfig, PtyBridgeInput, PtyInputReceiver, to_portable_pty_size,
-	},
-	pty_host::worker::TerminalWorkerInput,
-};
+use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
 
 pub(crate) fn spawn_blocking_bridge_thread(
 	proxy: RuntimeEventDispatcher,
@@ -48,14 +49,14 @@ pub(crate) fn spawn_blocking_bridge_thread(
 		let _input_thread = thread::spawn(move || {
 			while let Some(input) = input_rx.recv_blocking() {
 				match input {
-					PtyBridgeInput::Bytes(bytes) => {
+					PtyInput::Bytes(bytes) => {
 						if writer.write_all(&bytes).is_err() {
 							break;
 						}
 
 						let _ = writer.flush();
 					}
-					PtyBridgeInput::Resize(size) => {
+					PtyInput::Resize(size) => {
 						let _ = master.resize(to_portable_pty_size(size));
 					}
 				}

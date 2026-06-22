@@ -12,13 +12,6 @@ use germinal_domain::{
 	pty_host::terminal_size::{TerminalGridSize, TerminalPtySize},
 	workspace::pane_id::PaneId,
 };
-use germinal_infra::{
-	pty::{
-		PlatformPtyBackend,
-		portable_pty_bridge::{PtyBridgeInput, PtyInputSender},
-	},
-	pty_host::worker::TerminalWorkerInput,
-};
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
@@ -27,6 +20,11 @@ use germinal_ports::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
 		},
+	},
+	pty_host::{
+		pty_backend::{IPtyBackend, IPtyBackendProvider},
+		pty_input::{PtyInput, PtyInputSender},
+		worker_input::TerminalWorkerInput,
 	},
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 	service::{pty_service::IPtyService, worker_service::IWorkerService},
@@ -41,7 +39,6 @@ struct PtyPaneRuntime {
 #[derive(kudi::DepInj)]
 #[target(PtyService)]
 pub struct PtyServiceState {
-	backend:       PlatformPtyBackend,
 	pane_runtimes: RefCell<HashMap<PaneId, PtyPaneRuntime>>,
 	modifiers:     RefCell<WindowInputModifiers>,
 }
@@ -49,7 +46,6 @@ pub struct PtyServiceState {
 impl PtyServiceState {
 	pub fn new() -> Self {
 		Self {
-			backend:       PlatformPtyBackend::new(),
 			pane_runtimes: RefCell::new(HashMap::new()),
 			modifiers:     RefCell::new(WindowInputModifiers::new(false, false)),
 		}
@@ -61,8 +57,9 @@ impl Default for PtyServiceState {
 }
 
 impl<Deps> IPtyService for PtyService<Deps>
-where Deps:
-		AsRef<PtyServiceState> + IWorkerService<TerminalWorkerSender = SyncSender<TerminalWorkerInput>>
+where Deps: AsRef<PtyServiceState>
+		+ IPtyBackendProvider
+		+ IWorkerService<TerminalWorkerSender = SyncSender<TerminalWorkerInput>>
 {
 	fn ensure_pane_pty(
 		&self,
@@ -88,8 +85,12 @@ where Deps:
 			return;
 		};
 
-		let pty_input_sender =
-			state.backend.spawn(proxy, pane_id, pty_size, terminal_worker_sender.clone());
+		let pty_input_sender = self.prj_ref().pty_backend().spawn_pty(
+			proxy,
+			pane_id,
+			pty_size,
+			terminal_worker_sender.clone(),
+		);
 
 		let _ = terminal_worker_sender.send(TerminalWorkerInput::SetPtyInput(pty_input_sender.clone()));
 
@@ -141,20 +142,9 @@ where Deps:
 			return;
 		};
 
-		let _ = runtime.pty_input_sender.send(PtyBridgeInput::Resize(pty_size));
-		let _ = runtime
-			.terminal_worker_sender
-			.send(TerminalWorkerInput::Resize(to_alacritty_term_size(term_size)));
+		let _ = runtime.pty_input_sender.send(PtyInput::Resize(pty_size));
+		let _ = runtime.terminal_worker_sender.send(TerminalWorkerInput::Resize(term_size));
 	}
-}
-
-fn to_alacritty_term_size(
-	size: TerminalGridSize,
-) -> germinal_infra::pty_host::alacritty_state_store::AlacrittyTermSize {
-	germinal_infra::pty_host::alacritty_state_store::AlacrittyTermSize::new(
-		size.columns(),
-		size.rows(),
-	)
 }
 
 fn send_pane_bytes(state: &PtyServiceState, pane_id: PaneId, bytes: Vec<u8>) {
@@ -162,7 +152,7 @@ fn send_pane_bytes(state: &PtyServiceState, pane_id: PaneId, bytes: Vec<u8>) {
 		return;
 	};
 
-	let _ = runtime.pty_input_sender.send(PtyBridgeInput::Bytes(bytes));
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
 fn translate_ime_commit(text: &str) -> Option<Vec<u8>> {

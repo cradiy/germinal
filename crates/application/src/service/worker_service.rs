@@ -5,13 +5,14 @@ use std::sync::{
 };
 
 use germinal_domain::{pty_host::terminal_size::TerminalGridSize, workspace::pane_id::PaneId};
-use germinal_infra::pty_host::{
-	alacritty_state_store::AlacrittyTermSize,
-	worker::{TerminalWorker, TerminalWorkerInput},
-};
 use germinal_ports::{
 	event::runtime_event_dispatcher::RuntimeEventDispatcher,
-	rendering::surface_snapshot::RenderSurfaceSnapshot, service::worker_service::IWorkerService,
+	pty_host::{
+		worker_backend::{ITerminalWorkerBackend, ITerminalWorkerBackendProvider},
+		worker_input::TerminalWorkerInput,
+	},
+	rendering::surface_snapshot::RenderSurfaceSnapshot,
+	service::worker_service::IWorkerService,
 };
 
 #[derive(kudi::DepInj)]
@@ -27,7 +28,7 @@ impl Default for WorkerServiceState {
 }
 
 impl<Deps> IWorkerService for WorkerService<Deps>
-where Deps: AsRef<WorkerServiceState>
+where Deps: AsRef<WorkerServiceState> + ITerminalWorkerBackendProvider
 {
 	type TerminalWorkerSender = SyncSender<TerminalWorkerInput>;
 
@@ -43,10 +44,10 @@ where Deps: AsRef<WorkerServiceState>
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<SyncSender<TerminalWorkerInput>> {
-		Some(TerminalWorker::spawn(
-			proxy,
+		Some(self.prj_ref().terminal_worker_backend().spawn_terminal_worker(
 			pane_id,
-			AlacrittyTermSize::new(initial_size.columns(), initial_size.rows()),
+			initial_size,
+			proxy,
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		))

@@ -5,7 +5,9 @@ use germinal_domain::pty_host::{
 	scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
 	window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
 };
-use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
+use germinal_ports::rendering::{
+	surface_snapshot::RenderSurfaceSnapshot, window_runtime::ITerminalWindowRuntime,
+};
 use winit::window::{Window, WindowId};
 
 use crate::rendering::pty_surface::{
@@ -35,6 +37,20 @@ pub struct WgpuTerminalWindowRuntime {
 	size_info:        TerminalSizeInfo,
 	profile:          TerminalProfile,
 	needs_redraw:     bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WgpuTerminalWindowRuntimeFactory;
+
+impl WgpuTerminalWindowRuntimeFactory {
+	pub fn new() -> Self { Self }
+
+	pub fn create_window_runtime(
+		&self,
+		window: Arc<Window>,
+	) -> Result<WgpuTerminalWindowRuntime, String> {
+		pollster::block_on(WgpuTerminalWindowRuntime::new(window))
+	}
 }
 
 impl WgpuTerminalWindowRuntime {
@@ -245,4 +261,24 @@ fn terminal_size_info(
 		height,
 		scale_factor,
 	))
+}
+
+impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
+	fn request_window_redraw(&self) { WgpuTerminalWindowRuntime::request_window_redraw(self) }
+
+	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
+		WgpuTerminalWindowRuntime::set_surface_snapshot(self, snapshot);
+	}
+
+	fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
+		WgpuTerminalWindowRuntime::resize_surface_size_info(self, window_size)
+	}
+
+	fn take_redraw_request(&mut self) -> bool { WgpuTerminalWindowRuntime::take_redraw_request(self) }
+
+	fn terminal_size_info(&self) -> TerminalSizeInfo {
+		WgpuTerminalWindowRuntime::terminal_size_info(self)
+	}
+
+	fn render(&mut self) { WgpuTerminalWindowRuntime::render(self) }
 }

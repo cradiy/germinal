@@ -23,10 +23,13 @@ use germinal_domain::{
 	rendering::render_target_id::RenderTargetId,
 	workspace::pane_id::PaneId,
 };
-use germinal_infra::pty_host::worker::TerminalWorkerInput;
 use germinal_ports::{
 	event::{gshell_input::GShellInput, runtime_event_dispatcher::RuntimeEventDispatcher},
-	rendering::surface_snapshot::RenderSurfaceSnapshot,
+	pty_host::{
+		pty_backend::IPtyBackendProvider, worker_backend::ITerminalWorkerBackendProvider,
+		worker_input::TerminalWorkerInput,
+	},
+	rendering::{surface_snapshot::RenderSurfaceSnapshot, window_runtime::IRenderRuntimeStore},
 	service::{
 		gnative_service::IGNativeService, gshell_service::IGShellService,
 		layout_service::ILayoutService, pty_service::IPtyService, render_service::IRenderService,
@@ -70,6 +73,35 @@ impl AsMut<RenderServiceState> for App {
 
 impl AsRef<LayoutServiceState> for App {
 	fn as_ref(&self) -> &LayoutServiceState { &self.layout_service_state }
+}
+
+impl IPtyBackendProvider for App {
+	type PtyBackend = germinal_infra::pty::PlatformPtyBackend;
+
+	fn pty_backend(&self) -> &Self::PtyBackend { &self.pty_backend }
+}
+
+impl ITerminalWorkerBackendProvider for App {
+	type TerminalWorkerBackend = germinal_infra::pty_host::worker::PlatformTerminalWorkerBackend;
+
+	fn terminal_worker_backend(&self) -> &Self::TerminalWorkerBackend {
+		&self.terminal_worker_backend
+	}
+}
+
+impl IRenderRuntimeStore for App {
+	type WindowRuntime =
+		germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalWindowRuntime;
+
+	fn window_runtime(&self) -> Option<&Self::WindowRuntime> { self.render_runtime.as_ref() }
+
+	fn window_runtime_mut(&mut self) -> Option<&mut Self::WindowRuntime> {
+		self.render_runtime.as_mut()
+	}
+
+	fn set_window_runtime(&mut self, runtime: Self::WindowRuntime) {
+		self.render_runtime = Some(runtime);
+	}
 }
 
 impl IGShellService for App {
