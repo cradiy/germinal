@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+	env,
+	sync::Arc,
+	time::{Duration, Instant},
+};
 
 use germinal_ports::{
 	pty_host::{
@@ -38,6 +42,7 @@ pub struct WgpuTerminalWindowRuntime {
 	size_info:        TerminalSizeInfo,
 	profile:          TerminalProfile,
 	needs_redraw:     bool,
+	perf:             WgpuTerminalRenderPerf,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -125,6 +130,7 @@ impl WgpuTerminalWindowRuntime {
 			size_info,
 			profile,
 			needs_redraw: false,
+			perf: WgpuTerminalRenderPerf::new(),
 		})
 	}
 
@@ -178,6 +184,8 @@ impl WgpuTerminalWindowRuntime {
 		let size_info = self.terminal_size_info();
 		let render_target_plan = WgpuTerminalRenderTargetPlan::from_size_info(size_info);
 		let renderer_config = WgpuRendererConfig::from(size_info);
+		let row_count = self.surface_snapshot.rows.len() as u64;
+		let run_count = self.surface_snapshot.rows.iter().map(|row| row.runs.len() as u64).sum();
 
 		match self.presenter.present_surface_frame(WgpuTerminalSurfacePresentInput {
 			surface: &self.surface,
@@ -188,8 +196,11 @@ impl WgpuTerminalWindowRuntime {
 			surface_snapshot: &self.surface_snapshot,
 			renderer_config,
 		}) {
-			Ok(_) => {}
+			Ok(result) => {
+				self.perf.record_frame(row_count, run_count, &result);
+			}
 			Err(error) => {
+				self.perf.record_error(error);
 				self.handle_present_error(error);
 			}
 		}
@@ -269,6 +280,204 @@ fn terminal_size_info(
 		height,
 		scale_factor,
 	))
+}
+
+const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const RENDER_PERF_LOG_ENV: &str = "GERMINAL_RENDER_PERF_LOG";
+
+struct WgpuTerminalRenderPerf {
+	logging_enabled:            bool,
+	started_at:                 Instant,
+	last_log_at:                Instant,
+	frame_count:                u64,
+	error_count:                u64,
+	row_count:                  u64,
+	run_count:                  u64,
+	quad_count:                 u64,
+	vertex_count:               u64,
+	glyph_count:                u64,
+	prepare_time:               Duration,
+	upload_time:                Duration,
+	encode_time:                Duration,
+	render_total:               Duration,
+	present_total:              Duration,
+	publish_total:              Duration,
+	prepare_max:                Duration,
+	upload_max:                 Duration,
+	render_max:                 Duration,
+	present_max:                Duration,
+	glyph_atlas_cpu_cache_hits: u64,
+	glyph_atlas_gpu_cache_hits: u64,
+}
+
+impl WgpuTerminalRenderPerf {
+	fn new() -> Self {
+		let now = Instant::now();
+
+		Self {
+			logging_enabled:            render_perf_logging_enabled(),
+			started_at:                 now,
+			last_log_at:                now,
+			frame_count:                0,
+			error_count:                0,
+			row_count:                  0,
+			run_count:                  0,
+			quad_count:                 0,
+			vertex_count:               0,
+			glyph_count:                0,
+			prepare_time:               Duration::ZERO,
+			upload_time:                Duration::ZERO,
+			encode_time:                Duration::ZERO,
+			render_total:               Duration::ZERO,
+			present_total:              Duration::ZERO,
+			publish_total:              Duration::ZERO,
+			prepare_max:                Duration::ZERO,
+			upload_max:                 Duration::ZERO,
+			render_max:                 Duration::ZERO,
+			present_max:                Duration::ZERO,
+			glyph_atlas_cpu_cache_hits: 0,
+			glyph_atlas_gpu_cache_hits: 0,
+		}
+	}
+
+	fn record_frame(
+		&mut self,
+		row_count: u64,
+		run_count: u64,
+		result: &crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentResult,
+	) {
+		if !self.logging_enabled {
+			return;
+		}
+
+		self.frame_count += 1;
+		self.row_count += row_count;
+		self.run_count += run_count;
+		self.quad_count += result.render_result.quad_count as u64;
+		self.vertex_count += result.render_result.vertex_count as u64;
+		self.glyph_count += result.render_result.glyph_count as u64;
+		self.prepare_time += result.render_result.timings.prepare;
+		self.upload_time += result.render_result.timings.upload;
+		self.encode_time += result.render_result.timings.encode;
+		self.render_total += result.render_result.timings.total;
+		self.present_total += result.timings.render_to_view;
+		self.publish_total += result.timings.total;
+		self.prepare_max = self.prepare_max.max(result.render_result.timings.prepare);
+		self.upload_max = self.upload_max.max(result.render_result.timings.upload);
+		self.render_max = self.render_max.max(result.render_result.timings.total);
+		self.present_max = self.present_max.max(result.timings.total);
+
+		if result.render_result.glyph_atlas_cpu_cache_hit {
+			self.glyph_atlas_cpu_cache_hits += 1;
+		}
+
+		if result.render_result.glyph_atlas_gpu_cache_hit {
+			self.glyph_atlas_gpu_cache_hits += 1;
+		}
+
+		self.maybe_log();
+	}
+
+	fn record_error(&mut self, _error: WgpuTerminalSurfaceFramePresentError) {
+		if !self.logging_enabled {
+			return;
+		}
+
+		self.error_count += 1;
+		self.maybe_log();
+	}
+
+	fn maybe_log(&mut self) {
+		if self.last_log_at.elapsed() < RENDER_PERF_LOG_INTERVAL {
+			return;
+		}
+
+		self.log_and_reset();
+	}
+
+	fn log_and_reset(&mut self) {
+		if self.frame_count == 0 && self.error_count == 0 {
+			self.last_log_at = Instant::now();
+			return;
+		}
+
+		eprintln!(
+			"[render] frames={} errors={} rows/frame={} runs/frame={} quads/frame={} glyphs/frame={} \
+			 prepare avg={} max={} upload avg={} max={} render avg={} max={} surface avg={} max={} \
+			 frame_total avg={} cpu_atlas_hit={}/{} gpu_atlas_hit={}/{} uptime={}",
+			self.frame_count,
+			self.error_count,
+			self.row_count / self.frame_count.max(1),
+			self.run_count / self.frame_count.max(1),
+			self.quad_count / self.frame_count.max(1),
+			self.glyph_count / self.frame_count.max(1),
+			fmt_avg(self.prepare_time, self.frame_count),
+			fmt_duration(self.prepare_max),
+			fmt_avg(self.upload_time, self.frame_count),
+			fmt_duration(self.upload_max),
+			fmt_avg(self.render_total, self.frame_count),
+			fmt_duration(self.render_max),
+			fmt_avg(self.present_total, self.frame_count),
+			fmt_duration(self.present_max),
+			fmt_avg(self.publish_total, self.frame_count),
+			self.glyph_atlas_cpu_cache_hits,
+			self.frame_count,
+			self.glyph_atlas_gpu_cache_hits,
+			self.frame_count,
+			fmt_duration(self.started_at.elapsed()),
+		);
+
+		self.last_log_at = Instant::now();
+		self.frame_count = 0;
+		self.error_count = 0;
+		self.row_count = 0;
+		self.run_count = 0;
+		self.quad_count = 0;
+		self.vertex_count = 0;
+		self.glyph_count = 0;
+		self.prepare_time = Duration::ZERO;
+		self.upload_time = Duration::ZERO;
+		self.encode_time = Duration::ZERO;
+		self.render_total = Duration::ZERO;
+		self.present_total = Duration::ZERO;
+		self.publish_total = Duration::ZERO;
+		self.prepare_max = Duration::ZERO;
+		self.upload_max = Duration::ZERO;
+		self.render_max = Duration::ZERO;
+		self.present_max = Duration::ZERO;
+		self.glyph_atlas_cpu_cache_hits = 0;
+		self.glyph_atlas_gpu_cache_hits = 0;
+	}
+}
+
+fn render_perf_logging_enabled() -> bool {
+	env::var_os(RENDER_PERF_LOG_ENV).and_then(|value| value.into_string().ok()).is_some_and(|value| {
+		matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+	})
+}
+
+fn fmt_avg(total: Duration, count: u64) -> String {
+	if count == 0 {
+		return "-".to_string();
+	}
+
+	fmt_duration(total / count as u32)
+}
+
+fn fmt_duration(duration: Duration) -> String {
+	let micros = duration.as_micros();
+
+	if micros < 1_000 {
+		return format!("{micros}us");
+	}
+
+	let millis = duration.as_secs_f64() * 1_000.0;
+
+	if millis < 1_000.0 {
+		return format!("{millis:.2}ms");
+	}
+
+	format!("{:.2}s", duration.as_secs_f64())
 }
 
 impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {

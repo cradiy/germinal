@@ -8,6 +8,7 @@ pub struct RenderSurfaceSnapshot {
 	pub target_id:  RenderTargetId,
 	pub latest_seq: Seq,
 	pub rows:       Vec<RenderSurfaceRowSnapshot>,
+	pub dirty_rows: Vec<u32>,
 	pub cursor:     Option<RenderSurfaceCursorSnapshot>,
 }
 

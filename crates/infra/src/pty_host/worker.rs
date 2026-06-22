@@ -3,7 +3,7 @@ use std::{
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
-		mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+		mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError},
 	},
 	thread,
 	time::{Duration, Instant},
@@ -43,6 +43,7 @@ use crate::{
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
 const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
+const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(2);
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
 
@@ -137,17 +138,26 @@ impl TerminalWorkerRuntime {
 	}
 
 	fn run(&mut self, rx: Receiver<TerminalWorkerInput>) {
-		while let Ok(first_input) = rx.recv() {
-			self.process_batch(first_input, &rx);
+		loop {
+			match rx.recv_timeout(PUBLISH_RETRY_INTERVAL) {
+				Ok(first_input) => {
+					self.process_batch(first_input, &rx);
 
-			if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
-				self.flush_pending_input();
+					if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
+						self.flush_pending_input();
+					}
+
+					self.flush_pending_input();
+					self.publish_unpublished_snapshot();
+
+					self.perf.maybe_log();
+				}
+				Err(RecvTimeoutError::Timeout) => {
+					self.publish_unpublished_snapshot();
+					self.perf.maybe_log();
+				}
+				Err(RecvTimeoutError::Disconnected) => break,
 			}
-
-			self.flush_pending_input();
-			self.publish_unpublished_snapshot();
-
-			self.perf.maybe_log();
 		}
 
 		self.flush_pending_input();
@@ -262,6 +272,15 @@ impl TerminalWorkerRuntime {
 	}
 
 	fn publish_unpublished_snapshot(&mut self) {
+		if self.unpublished_seq.is_none() {
+			return;
+		}
+
+		if self.snapshot_wake_pending.load(Ordering::Acquire) {
+			self.perf.coalesced_wakeups += 1;
+			return;
+		}
+
 		let Some(seq) = self.unpublished_seq.take() else {
 			return;
 		};
@@ -299,6 +318,7 @@ impl TerminalWorkerRuntime {
 
 		if wake_already_pending {
 			self.perf.coalesced_wakeups += 1;
+			self.unpublished_seq = Some(seq);
 			return;
 		}
 
