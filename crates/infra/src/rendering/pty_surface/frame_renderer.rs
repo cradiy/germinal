@@ -6,6 +6,7 @@ use germinal_ports::{
 };
 
 use crate::rendering::pty_surface::{
+	buffer_uploader::WgpuBufferUploader,
 	command_encoder_adapter::{WgpuTerminalCommandEncoderAdapter, WgpuTerminalCommandEncoderResult},
 	frame_builder::{
 		WgpuTerminalFrameBuilder, WgpuTerminalPreparedFrame, WgpuTerminalPreparedFrameTimings,
@@ -23,6 +24,7 @@ use crate::rendering::pty_surface::{
 #[derive(Debug, Clone)]
 pub struct WgpuTerminalFrameRenderer {
 	frame_builder:           WgpuTerminalFrameBuilder,
+	buffer_uploader:         WgpuBufferUploader,
 	command_encoder_adapter: WgpuTerminalCommandEncoderAdapter,
 	glyph_atlas_gpu_cache:   WgpuTerminalGlyphAtlasGpuCache,
 }
@@ -31,6 +33,7 @@ impl WgpuTerminalFrameRenderer {
 	pub fn new(frame_builder: WgpuTerminalFrameBuilder) -> Self {
 		Self {
 			frame_builder,
+			buffer_uploader: WgpuBufferUploader::new(),
 			command_encoder_adapter: WgpuTerminalCommandEncoderAdapter::new(),
 			glyph_atlas_gpu_cache: WgpuTerminalGlyphAtlasGpuCache::new(),
 		}
@@ -83,6 +86,7 @@ impl WgpuTerminalFrameRenderer {
 		upload_plan.upload(WgpuTerminalUploadContext {
 			device: gpu.device,
 			queue: gpu.queue,
+			buffer_uploader: &self.buffer_uploader,
 			viewport_bind_group_layout: &pipeline.viewport_bind_group_layout,
 			viewport_binding: pipeline.spec.shader.viewport_binding,
 			glyph_atlas_bind_group_layout: &pipeline.glyph_atlas_bind_group_layout,

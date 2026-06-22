@@ -1,45 +1,76 @@
-use std::sync::Arc;
+use std::{
+	cell::RefCell,
+	sync::{Arc, LazyLock},
+};
 
 use germinal_ports::rendering::frame_plan_builder::RgbColorDto;
 
 use crate::rendering::pty_surface::{
-	glyph_atlas::WgpuTerminalGlyphKey,
+	glyph_atlas::{WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey},
+	glyph_uv_mapper::WgpuTerminalGlyphUvMapResult,
 	renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind},
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct WgpuQuadVertexBufferBuilder;
+pub struct WgpuQuadVertexBufferBuilder {
+	cached_indices: RefCell<Option<(usize, Arc<Vec<u32>>)>>,
+}
 
 impl WgpuQuadVertexBufferBuilder {
-	pub fn new() -> Self { Self }
+	pub fn new() -> Self { Self { cached_indices: RefCell::new(None) } }
 
 	pub fn build(&self, quads: &[WgpuQuadDrawItem]) -> WgpuVertexBuffer {
+		self.build_with_glyph_atlas(quads, &WgpuTerminalGlyphAtlas::empty()).0
+	}
+
+	pub fn build_with_glyph_atlas(
+		&self,
+		quads: &[WgpuQuadDrawItem],
+		atlas: &WgpuTerminalGlyphAtlas,
+	) -> (WgpuVertexBuffer, WgpuTerminalGlyphUvMapResult) {
 		let mut vertices = Vec::with_capacity(quads.len() * 4);
-		let mut indices = Vec::with_capacity(quads.len() * 6);
+		let mut glyph_uv_map_result = WgpuTerminalGlyphUvMapResult::default();
 
 		for quad in quads {
-			let base = vertices.len() as u32;
-
-			vertices.extend(gpu_vertices_of_quad(*quad));
-			indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+			vertices.extend(gpu_vertices_of_quad(*quad, atlas, &mut glyph_uv_map_result));
 		}
 
-		WgpuVertexBuffer { vertices: Arc::from(vertices), indices: Arc::from(indices) }
+		(
+			WgpuVertexBuffer {
+				vertices: Arc::new(vertices),
+				indices:  self.cached_indices_for_quad_count(quads.len()),
+			},
+			glyph_uv_map_result,
+		)
+	}
+
+	fn cached_indices_for_quad_count(&self, quad_count: usize) -> Arc<Vec<u32>> {
+		{
+			let cache = self.cached_indices.borrow();
+
+			if let Some((cached_quad_count, cached_indices)) = cache.as_ref()
+				&& *cached_quad_count == quad_count
+			{
+				return Arc::clone(cached_indices);
+			}
+		}
+
+		let indices = Arc::new(build_quad_indices(quad_count));
+		let mut cache = self.cached_indices.borrow_mut();
+		*cache = Some((quad_count, Arc::clone(&indices)));
+		indices
 	}
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgpuVertexBuffer {
-	pub vertices: Arc<[WgpuGpuVertex]>,
-	pub indices:  Arc<[u32]>,
+	pub vertices: Arc<Vec<WgpuGpuVertex>>,
+	pub indices:  Arc<Vec<u32>>,
 }
 
 impl Default for WgpuVertexBuffer {
 	fn default() -> Self {
-		Self {
-			vertices: Arc::from(Vec::<WgpuGpuVertex>::new()),
-			indices:  Arc::from(Vec::<u32>::new()),
-		}
+		Self { vertices: Arc::new(Vec::<WgpuGpuVertex>::new()), indices: Arc::new(Vec::<u32>::new()) }
 	}
 }
 
@@ -48,9 +79,9 @@ impl WgpuVertexBuffer {
 
 	pub fn quad_count(&self) -> usize { self.indices.len() / 6 }
 
-	pub fn vertex_bytes(&self) -> &[u8] { bytes_of_slice(&self.vertices) }
+	pub fn vertex_bytes(&self) -> &[u8] { bytes_of_slice(self.vertices.as_slice()) }
 
-	pub fn index_bytes(&self) -> &[u8] { bytes_of_slice(&self.indices) }
+	pub fn index_bytes(&self) -> &[u8] { bytes_of_slice(self.indices.as_slice()) }
 }
 
 #[repr(C)]
@@ -156,22 +187,63 @@ pub enum WgpuVertexKind {
 	Underline,
 }
 
-fn gpu_vertices_of_quad(quad: WgpuQuadDrawItem) -> [WgpuGpuVertex; 4] {
-	let x0 = quad.x_px as f32;
-	let y0 = quad.y_px as f32;
-	let x1 = (quad.x_px + quad.width_px) as f32;
-	let y1 = (quad.y_px + quad.height_px) as f32;
-
-	let color = normalize_color(color_of_quad(quad));
+fn gpu_vertices_of_quad(
+	quad: WgpuQuadDrawItem,
+	atlas: &WgpuTerminalGlyphAtlas,
+	glyph_uv_map_result: &mut WgpuTerminalGlyphUvMapResult,
+) -> [WgpuGpuVertex; 4] {
 	let (kind, glyph_codepoint) = gpu_kind_and_codepoint(kind_of_quad(quad.kind));
+	let color = normalize_color(color_of_quad(quad));
+	let (x0, y0, x1, y1, uv) = glyph_quad_geometry_and_uv(quad, atlas, glyph_uv_map_result)
+		.unwrap_or((
+			quad.x_px as f32,
+			quad.y_px as f32,
+			(quad.x_px + quad.width_px) as f32,
+			(quad.y_px + quad.height_px) as f32,
+			default_uv(),
+		));
 
 	[
-		WgpuGpuVertex { position_px: [x0, y0], uv: [0.0, 0.0], color, kind, glyph_codepoint },
-		WgpuGpuVertex { position_px: [x1, y0], uv: [1.0, 0.0], color, kind, glyph_codepoint },
-		WgpuGpuVertex { position_px: [x1, y1], uv: [1.0, 1.0], color, kind, glyph_codepoint },
-		WgpuGpuVertex { position_px: [x0, y1], uv: [0.0, 1.0], color, kind, glyph_codepoint },
+		WgpuGpuVertex { position_px: [x0, y0], uv: [uv[0], uv[1]], color, kind, glyph_codepoint },
+		WgpuGpuVertex { position_px: [x1, y0], uv: [uv[2], uv[1]], color, kind, glyph_codepoint },
+		WgpuGpuVertex { position_px: [x1, y1], uv: [uv[2], uv[3]], color, kind, glyph_codepoint },
+		WgpuGpuVertex { position_px: [x0, y1], uv: [uv[0], uv[3]], color, kind, glyph_codepoint },
 	]
 }
+
+fn glyph_quad_geometry_and_uv(
+	quad: WgpuQuadDrawItem,
+	atlas: &WgpuTerminalGlyphAtlas,
+	glyph_uv_map_result: &mut WgpuTerminalGlyphUvMapResult,
+) -> Option<(f32, f32, f32, f32, [f32; 4])> {
+	let WgpuQuadKind::Glyph { c, bold } = quad.kind else {
+		return None;
+	};
+
+	glyph_uv_map_result.glyph_vertices += 4;
+
+	let Some(entry) = atlas.entry_for_key(WgpuTerminalGlyphKey::new(c, bold)) else {
+		glyph_uv_map_result.missing_vertices += 4;
+		return None;
+	};
+
+	glyph_uv_map_result.mapped_vertices += 4;
+	Some(mapped_glyph_quad_geometry_and_uv(quad, entry))
+}
+
+fn mapped_glyph_quad_geometry_and_uv(
+	quad: WgpuQuadDrawItem,
+	entry: &WgpuTerminalGlyphAtlasEntry,
+) -> (f32, f32, f32, f32, [f32; 4]) {
+	let x0 = quad.x_px as f32 + entry.draw_offset_x_px as f32;
+	let y0 = quad.y_px as f32 + entry.draw_offset_y_px as f32;
+	let x1 = x0 + entry.draw_width_px.max(1) as f32;
+	let y1 = y0 + entry.draw_height_px.max(1) as f32;
+
+	(x0, y0, x1, y1, [entry.uv.min_u, entry.uv.min_v, entry.uv.max_u, entry.uv.max_v])
+}
+
+fn default_uv() -> [f32; 4] { [0.0, 0.0, 1.0, 1.0] }
 
 fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 	match kind {
@@ -216,9 +288,26 @@ fn normalize_color(color: WgpuVertexColor) -> [f32; 4] {
 }
 
 fn srgb_u8_to_linear_f32(component: u8) -> f32 {
-	let srgb = component as f32 / 255.0;
+	static SRGB_TO_LINEAR_LUT: LazyLock<[f32; 256]> = LazyLock::new(|| {
+		std::array::from_fn(|component| {
+			let srgb = component as f32 / 255.0;
 
-	if srgb <= 0.04045 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
+			if srgb <= 0.04045 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
+		})
+	});
+
+	SRGB_TO_LINEAR_LUT[component as usize]
+}
+
+fn build_quad_indices(quad_count: usize) -> Vec<u32> {
+	let mut indices = Vec::with_capacity(quad_count * 6);
+
+	for quad_index in 0..quad_count {
+		let base = (quad_index * 4) as u32;
+		indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+	}
+
+	indices
 }
 
 fn bytes_of_slice<T>(items: &[T]) -> &[u8] {
@@ -232,6 +321,7 @@ mod tests {
 	use germinal_ports::rendering::frame_plan_builder::TextStyleDto;
 
 	use super::*;
+	use crate::rendering::pty_surface::glyph_atlas::WgpuDebugGlyphAtlasBuilder;
 
 	#[test]
 	fn builds_four_gpu_vertices_and_six_indices_for_one_quad() {
@@ -286,6 +376,66 @@ mod tests {
 		assert_eq!(buffer.vertices.len(), 8);
 		assert_eq!(buffer.indices.as_ref(), &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
 		assert_eq!(buffer.quad_count(), 2);
+	}
+
+	#[test]
+	fn reuses_cached_index_buffer_for_same_quad_count() {
+		let builder = WgpuQuadVertexBufferBuilder::new();
+
+		let first = builder.build(&[WgpuQuadDrawItem {
+			kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
+			x_px:      0,
+			y_px:      0,
+			width_px:  8,
+			height_px: 16,
+			style:     TextStyleDto::plain(),
+		}]);
+
+		let second = builder.build(&[WgpuQuadDrawItem {
+			kind:      WgpuQuadKind::Glyph { c: 'b', bold: false },
+			x_px:      8,
+			y_px:      0,
+			width_px:  8,
+			height_px: 16,
+			style:     TextStyleDto::plain(),
+		}]);
+
+		assert!(Arc::ptr_eq(&first.indices, &second.indices));
+	}
+
+	#[test]
+	fn builds_glyph_vertices_with_atlas_geometry_and_uvs() {
+		let builder = WgpuQuadVertexBufferBuilder::new();
+		let atlas = WgpuDebugGlyphAtlasBuilder::new().build_for_texts(["a"]);
+
+		let (buffer, uv_map_result) = builder.build_with_glyph_atlas(
+			&[WgpuQuadDrawItem {
+				kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
+				x_px:      10,
+				y_px:      20,
+				width_px:  8,
+				height_px: 16,
+				style:     TextStyleDto::plain(),
+			}],
+			&atlas,
+		);
+
+		let entry = atlas.entry('a').expect("glyph entry should exist");
+
+		assert_eq!(uv_map_result.glyph_vertices, 4);
+		assert_eq!(uv_map_result.mapped_vertices, 4);
+		assert_eq!(uv_map_result.missing_vertices, 0);
+
+		assert_eq!(buffer.vertices[0].position_px, [
+			10.0 + entry.draw_offset_x_px as f32,
+			20.0 + entry.draw_offset_y_px as f32,
+		]);
+		assert_eq!(buffer.vertices[0].uv, [entry.uv.min_u, entry.uv.min_v]);
+		assert_eq!(buffer.vertices[2].position_px, [
+			10.0 + entry.draw_offset_x_px as f32 + entry.draw_width_px.max(1) as f32,
+			20.0 + entry.draw_offset_y_px as f32 + entry.draw_height_px.max(1) as f32,
+		]);
+		assert_eq!(buffer.vertices[2].uv, [entry.uv.max_u, entry.uv.max_v]);
 	}
 
 	#[test]

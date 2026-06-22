@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use wgpu::util::DeviceExt;
+use std::{cell::RefCell, sync::Arc};
 
 use crate::rendering::pty_surface::quad_vertex_buffer_builder::WgpuVertexBuffer;
 pub use crate::rendering::pty_surface::quad_vertex_buffer_builder::{
@@ -8,10 +6,12 @@ pub use crate::rendering::pty_surface::quad_vertex_buffer_builder::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct WgpuBufferUploader;
+pub struct WgpuBufferUploader {
+	cached_buffers: RefCell<Option<WgpuBufferUploadCache>>,
+}
 
 impl WgpuBufferUploader {
-	pub fn new() -> Self { Self }
+	pub fn new() -> Self { Self { cached_buffers: RefCell::new(None) } }
 
 	pub fn build_upload_bytes(&self, buffer: &WgpuVertexBuffer) -> WgpuBufferUploadBytes {
 		WgpuBufferUploadBytes {
@@ -22,43 +22,46 @@ impl WgpuBufferUploader {
 		}
 	}
 
-	pub fn upload(&self, device: &wgpu::Device, buffer: &WgpuVertexBuffer) -> WgpuUploadedBuffers {
-		let upload_bytes = self.build_upload_bytes(buffer);
-
-		self.upload_bytes(device, &upload_bytes)
-	}
-
 	pub fn upload_bytes(
 		&self,
 		device: &wgpu::Device,
+		queue: &wgpu::Queue,
 		upload_bytes: &WgpuBufferUploadBytes,
 	) -> WgpuUploadedBuffers {
-		let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-			label:    Some("germinal.wgpu.vertex_buffer"),
-			contents: upload_bytes.vertex_bytes(),
-			usage:    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-		});
+		let mut cache = self.cached_buffers.borrow_mut();
+		let vertex_byte_len = upload_bytes.vertex_byte_len() as u64;
+		let index_byte_len = upload_bytes.index_byte_len() as u64;
 
-		let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-			label:    Some("germinal.wgpu.index_buffer"),
-			contents: upload_bytes.index_bytes(),
-			usage:    wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-		});
+		let cached = cache
+			.get_or_insert_with(|| WgpuBufferUploadCache::new(device, vertex_byte_len, index_byte_len));
+
+		if cached.vertex_capacity_bytes < vertex_byte_len
+			|| cached.index_capacity_bytes < index_byte_len
+		{
+			*cached = WgpuBufferUploadCache::new(
+				device,
+				cached.vertex_capacity_bytes.max(vertex_byte_len),
+				cached.index_capacity_bytes.max(index_byte_len),
+			);
+		}
+
+		queue.write_buffer(&cached.vertex_buffer, 0, upload_bytes.vertex_bytes());
+		queue.write_buffer(&cached.index_buffer, 0, upload_bytes.index_bytes());
 
 		WgpuUploadedBuffers {
-			vertex_buffer,
-			index_buffer,
-			vertex_count: upload_bytes.vertex_count,
-			index_count: upload_bytes.index_count,
-			index_format: wgpu::IndexFormat::Uint32,
+			vertex_buffer: Arc::clone(&cached.vertex_buffer),
+			index_buffer:  Arc::clone(&cached.index_buffer),
+			vertex_count:  upload_bytes.vertex_count,
+			index_count:   upload_bytes.index_count,
+			index_format:  wgpu::IndexFormat::Uint32,
 		}
 	}
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgpuBufferUploadBytes {
-	pub vertex_data:  Arc<[WgpuGpuVertex]>,
-	pub index_data:   Arc<[u32]>,
+	pub vertex_data:  Arc<Vec<WgpuGpuVertex>>,
+	pub index_data:   Arc<Vec<u32>>,
 	pub vertex_count: u32,
 	pub index_count:  u32,
 }
@@ -66,9 +69,9 @@ pub struct WgpuBufferUploadBytes {
 impl WgpuBufferUploadBytes {
 	pub fn is_empty(&self) -> bool { self.vertex_count == 0 && self.index_count == 0 }
 
-	pub fn vertex_bytes(&self) -> &[u8] { bytes_of_slice(&self.vertex_data) }
+	pub fn vertex_bytes(&self) -> &[u8] { bytes_of_slice(self.vertex_data.as_slice()) }
 
-	pub fn index_bytes(&self) -> &[u8] { bytes_of_slice(&self.index_data) }
+	pub fn index_bytes(&self) -> &[u8] { bytes_of_slice(self.index_data.as_slice()) }
 
 	pub fn vertex_byte_len(&self) -> usize { self.vertex_bytes().len() }
 
@@ -77,11 +80,40 @@ impl WgpuBufferUploadBytes {
 
 #[derive(Debug)]
 pub struct WgpuUploadedBuffers {
-	pub vertex_buffer: wgpu::Buffer,
-	pub index_buffer:  wgpu::Buffer,
+	pub vertex_buffer: Arc<wgpu::Buffer>,
+	pub index_buffer:  Arc<wgpu::Buffer>,
 	pub vertex_count:  u32,
 	pub index_count:   u32,
 	pub index_format:  wgpu::IndexFormat,
+}
+
+#[derive(Debug, Clone)]
+struct WgpuBufferUploadCache {
+	vertex_buffer:         Arc<wgpu::Buffer>,
+	index_buffer:          Arc<wgpu::Buffer>,
+	vertex_capacity_bytes: u64,
+	index_capacity_bytes:  u64,
+}
+
+impl WgpuBufferUploadCache {
+	fn new(device: &wgpu::Device, vertex_capacity_bytes: u64, index_capacity_bytes: u64) -> Self {
+		Self {
+			vertex_buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+				label:              Some("germinal.wgpu.vertex_buffer"),
+				size:               vertex_capacity_bytes.max(1),
+				usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+				mapped_at_creation: false,
+			})),
+			index_buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+				label:              Some("germinal.wgpu.index_buffer"),
+				size:               index_capacity_bytes.max(1),
+				usage:              wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+				mapped_at_creation: false,
+			})),
+			vertex_capacity_bytes,
+			index_capacity_bytes,
+		}
+	}
 }
 
 fn bytes_of_slice<T>(items: &[T]) -> &[u8] {

@@ -1,6 +1,6 @@
 use std::{
 	cell::RefCell,
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap},
 	rc::Rc,
 };
 
@@ -41,25 +41,104 @@ impl FramePlanPresenter for TextSurfaceFramePlanPresenter {
 
 		let surface = inner.entry(frame.target_id).or_default();
 
-		for command in &frame.commands {
-			match command {
-				RenderCommandDto::Clear => {
-					surface.rows.clear();
-				}
-				RenderCommandDto::ClearLine { y } => {
-					surface.rows.remove(y);
-				}
-				RenderCommandDto::TextRun { x, y, text } => {
-					surface.apply_text_run(*x, *y, text, TextStyleDto::plain());
-				}
-				RenderCommandDto::StyledTextRun { x, y, text, style } => {
-					surface.apply_text_run(*x, *y, text, *style);
-				}
-			}
+		if let Some((full_damage, dirty_rows)) = try_present_fast(surface, frame) {
+			surface.latest_seq = frame.seq;
+			surface.latest_dirty_rows = if full_damage { Vec::new() } else { dirty_rows };
+			return;
 		}
 
+		present_incremental(surface, frame);
 		surface.latest_seq = frame.seq;
 	}
+}
+
+fn present_incremental(surface: &mut TextSurface, frame: &BuiltFramePlan) {
+	let mut dirty_rows = BTreeSet::new();
+	let mut full_damage = false;
+
+	for command in &frame.commands {
+		match command {
+			RenderCommandDto::Clear => {
+				surface.rows.clear();
+				full_damage = true;
+			}
+			RenderCommandDto::ClearLine { y } => {
+				dirty_rows.insert(*y);
+				surface.rows.remove(y);
+			}
+			RenderCommandDto::TextRun { x, y, text } => {
+				dirty_rows.insert(*y);
+				surface.apply_text_run(*x, *y, text, TextStyleDto::plain());
+			}
+			RenderCommandDto::StyledTextRun { x, y, text, style } => {
+				dirty_rows.insert(*y);
+				surface.apply_text_run(*x, *y, text, *style);
+			}
+		}
+	}
+
+	surface.latest_dirty_rows =
+		if full_damage { Vec::new() } else { dirty_rows.into_iter().collect() };
+}
+
+fn try_present_fast(surface: &mut TextSurface, frame: &BuiltFramePlan) -> Option<(bool, Vec<u32>)> {
+	let mut dirty_rows = BTreeSet::new();
+	let mut staged_rows: BTreeMap<u32, Vec<TextSurfaceRun>> = BTreeMap::new();
+	let mut cleared_rows = BTreeSet::new();
+	let mut full_damage = false;
+
+	for command in &frame.commands {
+		match command {
+			RenderCommandDto::Clear => {
+				surface.rows.clear();
+				staged_rows.clear();
+				cleared_rows.clear();
+				dirty_rows.clear();
+				full_damage = true;
+			}
+			RenderCommandDto::ClearLine { y } => {
+				dirty_rows.insert(*y);
+				cleared_rows.insert(*y);
+				staged_rows.insert(*y, Vec::new());
+			}
+			RenderCommandDto::TextRun { x, y, text } => {
+				if !full_damage && !cleared_rows.contains(y) {
+					return None;
+				}
+
+				dirty_rows.insert(*y);
+				staged_rows.entry(*y).or_default().push(TextSurfaceRun {
+					x:     *x,
+					text:  text.clone(),
+					style: TextStyleDto::plain(),
+				});
+			}
+			RenderCommandDto::StyledTextRun { x, y, text, style } => {
+				if !full_damage && !cleared_rows.contains(y) {
+					return None;
+				}
+
+				dirty_rows.insert(*y);
+				staged_rows.entry(*y).or_default().push(TextSurfaceRun {
+					x:     *x,
+					text:  text.clone(),
+					style: *style,
+				});
+			}
+		}
+	}
+
+	for (y, mut runs) in staged_rows {
+		if runs.is_empty() {
+			surface.rows.remove(&y);
+			continue;
+		}
+
+		runs.sort_by_key(|run| run.x);
+		surface.rows.insert(y, TextSurfaceRow { runs });
+	}
+
+	Some((full_damage, if full_damage { Vec::new() } else { dirty_rows.into_iter().collect() }))
 }
 
 impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
@@ -85,18 +164,31 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
 			})
 			.collect();
 
-		Some(RenderSurfaceSnapshot { target_id, latest_seq: surface.latest_seq, rows, cursor: None })
+		Some(RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: surface.latest_seq,
+			rows,
+			dirty_rows: surface.latest_dirty_rows.clone(),
+			cursor: None,
+		})
 	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextSurface {
-	pub latest_seq: Seq,
-	rows:           BTreeMap<u32, TextSurfaceRow>,
+	pub latest_seq:        Seq,
+	pub latest_dirty_rows: Vec<u32>,
+	rows:                  BTreeMap<u32, TextSurfaceRow>,
 }
 
 impl Default for TextSurface {
-	fn default() -> Self { Self { latest_seq: Seq::ZERO, rows: BTreeMap::new() } }
+	fn default() -> Self {
+		Self {
+			latest_seq:        Seq::ZERO,
+			latest_dirty_rows: Vec::new(),
+			rows:              BTreeMap::new(),
+		}
+	}
 }
 
 impl TextSurface {
@@ -264,6 +356,26 @@ mod tests {
 		assert_eq!(surface.latest_seq, Seq::new(2));
 		assert_eq!(surface.text_at(0), None);
 		assert!(surface.line_texts().is_empty());
+	}
+
+	#[test]
+	fn surface_snapshot_tracks_dirty_rows_from_latest_frame() {
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let target_id = RenderTargetId::new(1);
+
+		presenter.present(&BuiltFramePlan {
+			target_id,
+			seq: Seq::new(1),
+			commands: vec![
+				RenderCommandDto::ClearLine { y: 1 },
+				RenderCommandDto::TextRun { x: 0, y: 1, text: "dirty".to_string() },
+				RenderCommandDto::TextRun { x: 0, y: 3, text: "also".to_string() },
+			],
+		});
+
+		let snapshot = presenter.surface_snapshot_of(target_id).expect("snapshot should exist");
+
+		assert_eq!(snapshot.dirty_rows, vec![1, 3]);
 	}
 
 	#[test]

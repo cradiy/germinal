@@ -47,9 +47,8 @@ impl WgpuTerminalFrameUploadPlan {
 	pub fn viewport_byte_len(&self) -> usize { self.viewport_upload.byte_len() }
 
 	pub fn upload(&self, context: WgpuTerminalUploadContext<'_>) -> WgpuTerminalUploadedFrame {
-		let buffer_uploader = WgpuBufferUploader::new();
-
-		let uploaded_buffers = buffer_uploader.upload_bytes(context.device, &self.vertex_upload);
+		let uploaded_buffers =
+			context.buffer_uploader.upload_bytes(context.device, context.queue, &self.vertex_upload);
 
 		let viewport_factory = WgpuViewportBindGroupFactory::new();
 
@@ -93,6 +92,7 @@ impl WgpuTerminalFrameUploadPlan {
 pub struct WgpuTerminalUploadContext<'a> {
 	pub device:                        &'a wgpu::Device,
 	pub queue:                         &'a wgpu::Queue,
+	pub buffer_uploader:               &'a WgpuBufferUploader,
 	pub viewport_bind_group_layout:    &'a wgpu::BindGroupLayout,
 	pub viewport_binding:              u32,
 	pub glyph_atlas_bind_group_layout: &'a wgpu::BindGroupLayout,

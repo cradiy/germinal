@@ -22,22 +22,14 @@ use germinal_ports::{
 		worker_input::TerminalWorkerInput,
 	},
 	rendering::{
-		frame_plan_builder::{BuildFramePlanTask, FramePlanBuilder},
-		frame_plan_presenter::FramePlanPresenter,
 		render_target_id::RenderTargetId,
-		surface_snapshot::{
-			RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
-		},
+		surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
 	},
 	seq::Seq,
 };
 
-use crate::{
-	rendering::{
-		snapshot_frame_plan_builder::SnapshotFramePlanBuilder,
-		text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter,
-	},
-	repositories::alacritty_terminal_repository::{AlacrittyTermSize, AlacrittyTerminalRepository},
+use crate::repositories::alacritty_terminal_repository::{
+	AlacrittyTermSize, AlacrittyTerminalRepository,
 };
 
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
@@ -83,8 +75,6 @@ struct TerminalWorkerRuntime {
 	seq:       u64,
 
 	terminal_repository: AlacrittyTerminalRepository,
-	frame_plan_builder:  SnapshotFramePlanBuilder<AlacrittyTerminalRepository>,
-	surface_presenter:   TextSurfaceFramePlanPresenter,
 
 	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
 	snapshot_wake_pending: Arc<AtomicBool>,
@@ -109,8 +99,6 @@ impl TerminalWorkerRuntime {
 	) -> Self {
 		let target_id = RenderTargetId::new(gshell_id.value());
 		let terminal_repository = AlacrittyTerminalRepository::with_size(initial_size);
-		let frame_plan_builder = SnapshotFramePlanBuilder::new(terminal_repository.clone());
-		let surface_presenter = TextSurfaceFramePlanPresenter::new();
 
 		Self {
 			proxy,
@@ -120,8 +108,6 @@ impl TerminalWorkerRuntime {
 			seq: 0,
 
 			terminal_repository,
-			frame_plan_builder,
-			surface_presenter,
 
 			surface_snapshot_tx,
 			snapshot_wake_pending,
@@ -139,25 +125,31 @@ impl TerminalWorkerRuntime {
 
 	fn run(&mut self, rx: Receiver<TerminalWorkerInput>) {
 		loop {
-			match rx.recv_timeout(PUBLISH_RETRY_INTERVAL) {
-				Ok(first_input) => {
-					self.process_batch(first_input, &rx);
+			let next_input = if self.unpublished_seq.is_some() {
+				match rx.recv_timeout(PUBLISH_RETRY_INTERVAL) {
+					Ok(input) => Some(input),
+					Err(RecvTimeoutError::Timeout) => None,
+					Err(RecvTimeoutError::Disconnected) => break,
+				}
+			} else {
+				match rx.recv() {
+					Ok(input) => Some(input),
+					Err(_) => break,
+				}
+			};
 
-					if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
-						self.flush_pending_input();
-					}
+			if let Some(first_input) = next_input {
+				self.process_batch(first_input, &rx);
 
+				if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
 					self.flush_pending_input();
-					self.publish_unpublished_snapshot();
+				}
 
-					self.perf.maybe_log();
-				}
-				Err(RecvTimeoutError::Timeout) => {
-					self.publish_unpublished_snapshot();
-					self.perf.maybe_log();
-				}
-				Err(RecvTimeoutError::Disconnected) => break,
+				self.flush_pending_input();
 			}
+
+			self.publish_unpublished_snapshot();
+			self.perf.maybe_log();
 		}
 
 		self.flush_pending_input();
@@ -286,25 +278,29 @@ impl TerminalWorkerRuntime {
 		};
 
 		let started_at = Instant::now();
-
-		let frame =
-			self.frame_plan_builder.build(BuildFramePlanTask { target_id: self.target_id, seq });
-
-		self.surface_presenter.present(&frame);
-		self.terminal_repository.clear_damage_up_to(self.target_id, seq);
-
+		let snapshot_started_at = Instant::now();
 		let mut snapshot = self
-			.surface_presenter
-			.surface_snapshot_of(self.target_id)
+			.terminal_repository
+			.render_surface_snapshot_of(self.target_id)
 			.expect("surface snapshot should exist");
+		self.perf.publish_snapshot += snapshot_started_at.elapsed();
+
+		let cursor_started_at = Instant::now();
 		snapshot.cursor = self
 			.terminal_repository
 			.cursor_position_0_based(self.target_id)
 			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y, focused: true });
+		self.perf.publish_cursor += cursor_started_at.elapsed();
 
+		let send_started_at = Instant::now();
 		let snapshot_sent = self.surface_snapshot_tx.send(snapshot).is_ok();
 		let wake_already_pending =
 			snapshot_sent && self.snapshot_wake_pending.swap(true, Ordering::AcqRel);
+		self.perf.publish_send += send_started_at.elapsed();
+
+		let clear_started_at = Instant::now();
+		self.terminal_repository.clear_damage_up_to(self.target_id, seq);
+		self.perf.publish_clear += clear_started_at.elapsed();
 
 		let elapsed = started_at.elapsed();
 
@@ -322,10 +318,12 @@ impl TerminalWorkerRuntime {
 			return;
 		}
 
+		let dispatch_started_at = Instant::now();
 		let _ = self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady {
 			gshell_id: self.gshell_id,
 			seq,
 		}));
+		self.perf.publish_dispatch += dispatch_started_at.elapsed();
 	}
 }
 
@@ -342,9 +340,14 @@ struct TerminalWorkerPerf {
 	apply_time:    Duration,
 	apply_max:     Duration,
 
-	publish_count: u64,
-	publish_time:  Duration,
-	publish_max:   Duration,
+	publish_count:    u64,
+	publish_time:     Duration,
+	publish_max:      Duration,
+	publish_snapshot: Duration,
+	publish_cursor:   Duration,
+	publish_send:     Duration,
+	publish_clear:    Duration,
+	publish_dispatch: Duration,
 
 	resize_count: u64,
 	resize_time:  Duration,
@@ -370,9 +373,14 @@ impl TerminalWorkerPerf {
 			apply_time:    Duration::ZERO,
 			apply_max:     Duration::ZERO,
 
-			publish_count: 0,
-			publish_time:  Duration::ZERO,
-			publish_max:   Duration::ZERO,
+			publish_count:    0,
+			publish_time:     Duration::ZERO,
+			publish_max:      Duration::ZERO,
+			publish_snapshot: Duration::ZERO,
+			publish_cursor:   Duration::ZERO,
+			publish_send:     Duration::ZERO,
+			publish_clear:    Duration::ZERO,
+			publish_dispatch: Duration::ZERO,
 
 			resize_count: 0,
 			resize_time:  Duration::ZERO,
@@ -419,8 +427,9 @@ impl TerminalWorkerPerf {
 
 		eprintln!(
 			"[terminal-worker] input={} chunks / {:.2} MiB / {:.2} MiB/s, apply={} batches {} chunks \
-			 avg={} max={}, publish={} avg={} max={}, resize={} avg={} max={}, coalesced_wakeups={}, \
-			 uptime={}",
+			 avg={} max={}, publish={} avg={} max={} \
+			 parts(snapshot/cursor/send/clear/dispatch)={}/{}/{}/{}/{}, resize={} avg={} max={}, \
+			 coalesced_wakeups={}, uptime={}",
 			self.input_chunks,
 			mib,
 			mib_per_sec,
@@ -431,6 +440,11 @@ impl TerminalWorkerPerf {
 			self.publish_count,
 			fmt_avg(self.publish_time, self.publish_count),
 			fmt_duration(self.publish_max),
+			fmt_avg(self.publish_snapshot, self.publish_count),
+			fmt_avg(self.publish_cursor, self.publish_count),
+			fmt_avg(self.publish_send, self.publish_count),
+			fmt_avg(self.publish_clear, self.publish_count),
+			fmt_avg(self.publish_dispatch, self.publish_count),
 			self.resize_count,
 			fmt_avg(self.resize_time, self.resize_count),
 			fmt_duration(self.resize_max),
@@ -451,6 +465,11 @@ impl TerminalWorkerPerf {
 		self.publish_count = 0;
 		self.publish_time = Duration::ZERO;
 		self.publish_max = Duration::ZERO;
+		self.publish_snapshot = Duration::ZERO;
+		self.publish_cursor = Duration::ZERO;
+		self.publish_send = Duration::ZERO;
+		self.publish_clear = Duration::ZERO;
+		self.publish_dispatch = Duration::ZERO;
 
 		self.resize_count = 0;
 		self.resize_time = Duration::ZERO;

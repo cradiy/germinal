@@ -21,6 +21,7 @@ use germinal_ports::{
 	rendering::{
 		frame_plan_builder::{RgbColorDto, TextStyleDto},
 		render_target_id::RenderTargetId,
+		surface_snapshot::{RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot},
 	},
 	seq::Seq,
 };
@@ -144,6 +145,22 @@ impl AlacrittyTerminalRepository {
 		}
 	}
 
+	fn render_surface_snapshot_from_state(
+		render_target_id: RenderTargetId,
+		state: &mut AlacrittyTermState,
+	) -> RenderSurfaceSnapshot {
+		let rows = visible_surface_rows(&state.term);
+		let dirty_rows = dirty_rows_of(state.term.damage(), state.size.screen_lines());
+
+		RenderSurfaceSnapshot {
+			target_id: render_target_id,
+			latest_seq: state.latest_seq,
+			rows,
+			dirty_rows,
+			cursor: None,
+		}
+	}
+
 	pub fn stats_of(&self, render_target_id: RenderTargetId) -> Option<AlacrittyTermApplyStats> {
 		let inner = self.inner.borrow();
 
@@ -209,6 +226,17 @@ impl TerminalSnapshotProvider for AlacrittyTerminalRepository {
 		let state = inner.get_mut(&render_target_id)?;
 
 		Some(Self::snapshot_from_state(render_target_id, state))
+	}
+
+	fn render_surface_snapshot_of(
+		&self,
+		render_target_id: RenderTargetId,
+	) -> Option<RenderSurfaceSnapshot> {
+		let mut inner = self.inner.borrow_mut();
+
+		let state = inner.get_mut(&render_target_id)?;
+
+		Some(Self::render_surface_snapshot_from_state(render_target_id, state))
 	}
 
 	fn snapshot_for_build(
@@ -347,6 +375,91 @@ fn visible_lines_and_runs(
 	(lines, text_runs)
 }
 
+fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurfaceRowSnapshot> {
+	let renderable = term.renderable_content();
+	let mut rows = Vec::new();
+	let mut current_row = None::<u32>;
+	let mut current_runs = Vec::new();
+	let mut current_x = 0_u32;
+	let mut current_next_x = 0_u32;
+	let mut current_text = String::new();
+	let mut current_style = None::<TextStyleDto>;
+
+	for indexed in renderable.display_iter {
+		let raw_row = indexed.point.line.0;
+		let raw_col = indexed.point.column.0;
+		let cell = indexed.cell;
+
+		let Some(row) = u32::try_from(raw_row).ok() else {
+			continue;
+		};
+
+		let col = raw_col as u32;
+
+		if current_row != Some(row) {
+			if let Some(style) = current_style.take() {
+				push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, style);
+				current_text.clear();
+			}
+
+			if let Some(previous_row) = current_row.replace(row) {
+				if !current_runs.is_empty() {
+					rows.push(RenderSurfaceRowSnapshot {
+						y:    previous_row,
+						runs: std::mem::take(&mut current_runs),
+					});
+				}
+			}
+		}
+
+		if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+			continue;
+		}
+
+		let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors);
+		if cell.c == ' ' && !style_has_visible_content(style) {
+			continue;
+		}
+
+		let cell_width = terminal_char_cell_width(cell.c).max(1);
+		let is_contiguous = current_style.is_some() && col == current_next_x;
+
+		match current_style {
+			None => {
+				current_x = col;
+				current_next_x = col + cell_width;
+				current_text.push(cell.c);
+				current_style = Some(style);
+			}
+			Some(existing_style) if existing_style == style && is_contiguous => {
+				current_text.push(cell.c);
+				current_next_x = col + cell_width;
+			}
+			Some(existing_style) => {
+				push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, existing_style);
+
+				current_x = col;
+				current_next_x = col + cell_width;
+				current_text.clear();
+				current_text.push(cell.c);
+				current_style = Some(style);
+			}
+		}
+	}
+
+	if let Some(style) = current_style.take() {
+		push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, style);
+	}
+
+	if let Some(row) = current_row {
+		if !current_runs.is_empty() {
+			rows.push(RenderSurfaceRowSnapshot { y: row, runs: current_runs });
+		}
+	}
+
+	rows
+}
+
 fn line_text_from_cells(cells: &[StyledCell]) -> String {
 	let mut text = String::new();
 	let mut next_col = 0_u32;
@@ -428,6 +541,23 @@ fn push_run_if_not_blank(
 	}
 
 	runs.push(TerminalTextRunSnapshot { x, y, text: text.to_string(), style });
+}
+
+fn push_surface_run_if_not_blank(
+	runs: &mut Vec<RenderSurfaceRunSnapshot>,
+	x: u32,
+	text: &str,
+	style: TextStyleDto,
+) {
+	if text.is_empty() {
+		return;
+	}
+
+	if text.trim().is_empty() && !style_has_visible_content(style) {
+		return;
+	}
+
+	runs.push(RenderSurfaceRunSnapshot { x, text: text.to_string(), style });
 }
 
 fn style_has_visible_content(style: TextStyleDto) -> bool {

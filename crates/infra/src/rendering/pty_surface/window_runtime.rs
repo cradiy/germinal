@@ -115,6 +115,7 @@ impl WgpuTerminalWindowRuntime {
 			target_id:  germinal_ports::rendering::render_target_id::RenderTargetId::new(0),
 			latest_seq: Seq::ZERO,
 			rows:       Vec::new(),
+			dirty_rows: Vec::new(),
 			cursor:     None,
 		};
 
@@ -297,6 +298,12 @@ struct WgpuTerminalRenderPerf {
 	vertex_count:               u64,
 	glyph_count:                u64,
 	prepare_time:               Duration,
+	prepare_render_surface:     Duration,
+	prepare_quads_clone:        Duration,
+	prepare_vertex_build:       Duration,
+	prepare_atlas_build:        Duration,
+	prepare_uv_map:             Duration,
+	prepare_upload_bytes:       Duration,
 	upload_time:                Duration,
 	encode_time:                Duration,
 	render_total:               Duration,
@@ -326,6 +333,12 @@ impl WgpuTerminalRenderPerf {
 			vertex_count:               0,
 			glyph_count:                0,
 			prepare_time:               Duration::ZERO,
+			prepare_render_surface:     Duration::ZERO,
+			prepare_quads_clone:        Duration::ZERO,
+			prepare_vertex_build:       Duration::ZERO,
+			prepare_atlas_build:        Duration::ZERO,
+			prepare_uv_map:             Duration::ZERO,
+			prepare_upload_bytes:       Duration::ZERO,
 			upload_time:                Duration::ZERO,
 			encode_time:                Duration::ZERO,
 			render_total:               Duration::ZERO,
@@ -357,6 +370,12 @@ impl WgpuTerminalRenderPerf {
 		self.vertex_count += result.render_result.vertex_count as u64;
 		self.glyph_count += result.render_result.glyph_count as u64;
 		self.prepare_time += result.render_result.timings.prepare;
+		self.prepare_render_surface += result.render_result.timings.prepared_frame.render_surface;
+		self.prepare_quads_clone += result.render_result.timings.prepared_frame.quads_clone;
+		self.prepare_vertex_build += result.render_result.timings.prepared_frame.vertex_build;
+		self.prepare_atlas_build += result.render_result.timings.prepared_frame.atlas_build;
+		self.prepare_uv_map += result.render_result.timings.prepared_frame.uv_map;
+		self.prepare_upload_bytes += result.render_result.timings.prepared_frame.upload_bytes;
 		self.upload_time += result.render_result.timings.upload;
 		self.encode_time += result.render_result.timings.encode;
 		self.render_total += result.render_result.timings.total;
@@ -403,8 +422,9 @@ impl WgpuTerminalRenderPerf {
 
 		eprintln!(
 			"[render] frames={} errors={} rows/frame={} runs/frame={} quads/frame={} glyphs/frame={} \
-			 prepare avg={} max={} upload avg={} max={} render avg={} max={} surface avg={} max={} \
-			 frame_total avg={} cpu_atlas_hit={}/{} gpu_atlas_hit={}/{} uptime={}",
+			 prepare avg={} max={} prep_parts(surface/quads/vb/atlas/uv/bytes)={}/{}/{}/{}/{}/{} upload \
+			 avg={} max={} render avg={} max={} surface avg={} max={} frame_total avg={} \
+			 cpu_atlas_hit={}/{} gpu_atlas_hit={}/{} uptime={}",
 			self.frame_count,
 			self.error_count,
 			self.row_count / self.frame_count.max(1),
@@ -413,6 +433,12 @@ impl WgpuTerminalRenderPerf {
 			self.glyph_count / self.frame_count.max(1),
 			fmt_avg(self.prepare_time, self.frame_count),
 			fmt_duration(self.prepare_max),
+			fmt_avg(self.prepare_render_surface, self.frame_count),
+			fmt_avg(self.prepare_quads_clone, self.frame_count),
+			fmt_avg(self.prepare_vertex_build, self.frame_count),
+			fmt_avg(self.prepare_atlas_build, self.frame_count),
+			fmt_avg(self.prepare_uv_map, self.frame_count),
+			fmt_avg(self.prepare_upload_bytes, self.frame_count),
 			fmt_avg(self.upload_time, self.frame_count),
 			fmt_duration(self.upload_max),
 			fmt_avg(self.render_total, self.frame_count),
@@ -436,6 +462,12 @@ impl WgpuTerminalRenderPerf {
 		self.vertex_count = 0;
 		self.glyph_count = 0;
 		self.prepare_time = Duration::ZERO;
+		self.prepare_render_surface = Duration::ZERO;
+		self.prepare_quads_clone = Duration::ZERO;
+		self.prepare_vertex_build = Duration::ZERO;
+		self.prepare_atlas_build = Duration::ZERO;
+		self.prepare_uv_map = Duration::ZERO;
+		self.prepare_upload_bytes = Duration::ZERO;
 		self.upload_time = Duration::ZERO;
 		self.encode_time = Duration::ZERO;
 		self.render_total = Duration::ZERO;

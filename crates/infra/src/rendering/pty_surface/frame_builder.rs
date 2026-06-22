@@ -1,4 +1,8 @@
-use std::time::{Duration, Instant};
+use std::{
+	cell::RefCell,
+	rc::Rc,
+	time::{Duration, Instant},
+};
 
 use germinal_ports::{
 	pty_host::width::terminal_text_cell_width,
@@ -17,7 +21,7 @@ use crate::rendering::pty_surface::{
 		WgpuTerminalGlyphAtlasFrame, WgpuTerminalGlyphAtlasFrameBuilder,
 		WgpuTerminalGlyphAtlasSourceKind,
 	},
-	glyph_uv_mapper::{WgpuTerminalGlyphUvMapResult, WgpuTerminalGlyphUvMapper},
+	glyph_uv_mapper::WgpuTerminalGlyphUvMapResult,
 	quad_vertex_buffer_builder::{WgpuQuadVertexBufferBuilder, WgpuVertexBuffer},
 	render_pass_plan::WgpuTerminalRenderPassPlan,
 	renderer_backend::{WgpuRendererBackend, WgpuRendererConfig},
@@ -29,6 +33,8 @@ use crate::rendering::pty_surface::{
 pub struct WgpuTerminalFrameBuilder {
 	renderer_config:           WgpuRendererConfig,
 	glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder,
+	vertex_buffer_builder:     WgpuQuadVertexBufferBuilder,
+	renderer_backend:          Rc<RefCell<WgpuRendererBackend>>,
 }
 
 impl WgpuTerminalFrameBuilder {
@@ -36,6 +42,8 @@ impl WgpuTerminalFrameBuilder {
 		Self {
 			renderer_config,
 			glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7(),
+			vertex_buffer_builder: WgpuQuadVertexBufferBuilder::new(),
+			renderer_backend: Rc::new(RefCell::new(WgpuRendererBackend::new(renderer_config))),
 		}
 	}
 
@@ -96,28 +104,33 @@ impl WgpuTerminalFrameBuilder {
 		let total_started_at = Instant::now();
 
 		let render_surface_started_at = Instant::now();
-		let renderer = WgpuRendererBackend::new(renderer_config);
-		renderer.render_surface(surface_snapshot);
-		let render_surface_time = render_surface_started_at.elapsed();
+		let (render_surface_time, quads, quads_clone_time) = {
+			let mut renderer = self.renderer_backend.borrow_mut();
 
-		let quads_clone_started_at = Instant::now();
-		let renderer_state = renderer.state();
-		let quads = renderer_state.quads().to_vec();
-		let quads_clone_time = quads_clone_started_at.elapsed();
+			if renderer.config() != renderer_config {
+				*renderer = WgpuRendererBackend::new(renderer_config);
+			}
 
-		let vertex_build_started_at = Instant::now();
-		let vertex_builder = WgpuQuadVertexBufferBuilder::new();
-		let mut vertex_buffer = vertex_builder.build(&quads);
-		let vertex_build_time = vertex_build_started_at.elapsed();
+			renderer.render_surface(surface_snapshot);
+			let render_surface_time = render_surface_started_at.elapsed();
+
+			let quads_clone_started_at = Instant::now();
+			let quads = renderer.quads();
+			let quads_clone_time = quads_clone_started_at.elapsed();
+
+			(render_surface_time, quads, quads_clone_time)
+		};
 
 		let atlas_build_started_at = Instant::now();
 		let glyph_atlas_frame = self.glyph_atlas_frame_builder.build(surface_snapshot);
 		let atlas_build_time = atlas_build_started_at.elapsed();
 
+		let vertex_build_started_at = Instant::now();
+		let (vertex_buffer, glyph_uv_map_result) =
+			self.vertex_buffer_builder.build_with_glyph_atlas(&quads, &glyph_atlas_frame.atlas);
+		let vertex_build_time = vertex_build_started_at.elapsed();
+
 		let uv_map_started_at = Instant::now();
-		let glyph_uv_mapper = WgpuTerminalGlyphUvMapper::new();
-		let glyph_uv_map_result =
-			glyph_uv_mapper.apply_glyph_uvs(&mut vertex_buffer, &glyph_atlas_frame.atlas);
 		let uv_map_time = uv_map_started_at.elapsed();
 
 		let upload_bytes_started_at = Instant::now();
@@ -131,7 +144,7 @@ impl WgpuTerminalFrameBuilder {
 		let draw_plan_time = draw_plan_started_at.elapsed();
 
 		let renderer_lines_started_at = Instant::now();
-		let renderer_lines = renderer_lines_of(surface_snapshot);
+		let renderer_lines = if cfg!(test) { renderer_lines_of(surface_snapshot) } else { Vec::new() };
 		let renderer_lines_time = renderer_lines_started_at.elapsed();
 
 		let viewport_upload_started_at = Instant::now();

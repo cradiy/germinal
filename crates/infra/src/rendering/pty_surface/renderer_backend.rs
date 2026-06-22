@@ -1,4 +1,7 @@
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+	cell::RefCell,
+	collections::{BTreeMap, BTreeSet},
+};
 
 use germinal_ports::{
 	pty_host::{
@@ -27,89 +30,117 @@ impl WgpuRendererBackend {
 		Self { inner: RefCell::new(WgpuRendererState { config, ..WgpuRendererState::default() }) }
 	}
 
+	pub fn config(&self) -> WgpuRendererConfig { self.inner.borrow().config }
+
+	pub fn quads(&self) -> Vec<WgpuQuadDrawItem> { self.inner.borrow().quads.clone() }
+
 	pub fn state(&self) -> WgpuRendererState { self.inner.borrow().clone() }
 }
 
 impl RendererBackend for WgpuRendererBackend {
 	fn render_surface(&self, snapshot: &RenderSurfaceSnapshot) {
-		let config = { self.inner.borrow().config };
+		let mut inner = self.inner.borrow_mut();
+		let config = inner.config;
+		let full_rerender =
+			snapshot.dirty_rows.is_empty() || inner.last_target_id != Some(snapshot.target_id);
+		let snapshot_rows: BTreeMap<u32, &_> = snapshot.rows.iter().map(|row| (row.y, row)).collect();
+		let dirty_rows: BTreeSet<u32> = if full_rerender {
+			snapshot_rows.keys().copied().collect()
+		} else {
+			snapshot.dirty_rows.iter().copied().collect()
+		};
 
-		let mut draw_rows = BTreeMap::new();
-
-		let mut background_quads = Vec::new();
-		let mut glyph_quads = Vec::new();
-		let mut underline_quads = Vec::new();
-		let mut cursor_quads = Vec::new();
-
-		for row in &snapshot.rows {
-			let mut draw_row = WgpuDrawRow { y: row.y, glyphs: Vec::new() };
-
-			for run in &row.runs {
-				let mut x = run.x;
-
-				for c in run.text.chars() {
-					let cell_width = terminal_char_cell_width(c);
-
-					if cell_width == 0 {
-						continue;
-					}
-
-					let y = row.y;
-					let glyph = WgpuGlyphDrawItem { x, y, c, cell_width, style: run.style };
-
-					draw_row.glyphs.push(glyph);
-
-					if run.style.background.is_some() {
-						background_quads
-							.push(WgpuQuadDrawItem::background(x, y, cell_width, config, run.style));
-					}
-
-					if is_builtin_box_drawing(c) {
-						append_box_drawing_quads(&mut glyph_quads, glyph, config);
-					} else if is_builtin_block_element(c) {
-						append_block_element_quads(&mut glyph_quads, glyph, config);
-					} else if c != ' ' {
-						glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
-					}
-
-					if run.style.underline {
-						underline_quads.push(WgpuQuadDrawItem::underline(x, y, cell_width, config, run.style));
-					}
-
-					x += cell_width;
-				}
-			}
-
-			draw_rows.insert(row.y, draw_row);
+		if full_rerender {
+			inner.rendered_rows.clear();
+			inner.draw_rows.clear();
 		}
 
+		for row_y in dirty_rows {
+			if let Some(row) = snapshot_rows.get(&row_y) {
+				let rendered_row = render_row(row, config);
+				inner.draw_rows.insert(row_y, rendered_row.draw_row.clone());
+				inner.rendered_rows.insert(row_y, rendered_row);
+			} else {
+				inner.draw_rows.remove(&row_y);
+				inner.rendered_rows.remove(&row_y);
+			}
+		}
+
+		let mut cursor_quads = Vec::new();
 		if let Some(cursor) = snapshot.cursor {
 			append_cursor_quads(&mut cursor_quads, cursor, config);
 		}
 
-		let mut quads = Vec::with_capacity(
-			background_quads.len() + glyph_quads.len() + underline_quads.len() + cursor_quads.len(),
-		);
+		let total_row_quads: usize = inner
+			.rendered_rows
+			.values()
+			.map(|row| row.background_quads.len() + row.glyph_quads.len() + row.underline_quads.len())
+			.sum();
+		let mut quads = Vec::with_capacity(total_row_quads + cursor_quads.len());
 
-		// Keep draw order renderer-friendly:
-		//
-		// 1. backgrounds
-		// 2. glyphs
-		// 3. underline overlays
-		// 4. cursor overlay
-		quads.extend(background_quads);
-		quads.extend(glyph_quads);
-		quads.extend(underline_quads);
+		for row in inner.rendered_rows.values() {
+			quads.extend(row.background_quads.iter().copied());
+		}
+		for row in inner.rendered_rows.values() {
+			quads.extend(row.glyph_quads.iter().copied());
+		}
+		for row in inner.rendered_rows.values() {
+			quads.extend(row.underline_quads.iter().copied());
+		}
 		quads.extend(cursor_quads);
-
-		let mut inner = self.inner.borrow_mut();
 
 		inner.render_count += 1;
 		inner.last_target_id = Some(snapshot.target_id);
 		inner.last_seq = Some(snapshot.latest_seq);
-		inner.draw_rows = draw_rows;
 		inner.quads = quads;
 	}
+}
+
+fn render_row(
+	row: &germinal_ports::rendering::surface_snapshot::RenderSurfaceRowSnapshot,
+	config: WgpuRendererConfig,
+) -> WgpuRenderedRow {
+	let mut draw_row = WgpuDrawRow { y: row.y, glyphs: Vec::new() };
+	let mut background_quads = Vec::new();
+	let mut glyph_quads = Vec::new();
+	let mut underline_quads = Vec::new();
+
+	for run in &row.runs {
+		let mut x = run.x;
+
+		for c in run.text.chars() {
+			let cell_width = terminal_char_cell_width(c);
+
+			if cell_width == 0 {
+				continue;
+			}
+
+			let y = row.y;
+			let glyph = WgpuGlyphDrawItem { x, y, c, cell_width, style: run.style };
+
+			draw_row.glyphs.push(glyph);
+
+			if run.style.background.is_some() {
+				background_quads.push(WgpuQuadDrawItem::background(x, y, cell_width, config, run.style));
+			}
+
+			if is_builtin_box_drawing(c) {
+				append_box_drawing_quads(&mut glyph_quads, glyph, config);
+			} else if is_builtin_block_element(c) {
+				append_block_element_quads(&mut glyph_quads, glyph, config);
+			} else if c != ' ' {
+				glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+			}
+
+			if run.style.underline {
+				underline_quads.push(WgpuQuadDrawItem::underline(x, y, cell_width, config, run.style));
+			}
+
+			x += cell_width;
+		}
+	}
+
+	WgpuRenderedRow { draw_row, background_quads, glyph_quads, underline_quads }
 }
 
 fn is_builtin_box_drawing(c: char) -> bool {
@@ -500,6 +531,7 @@ pub struct WgpuRendererState {
 	pub render_count:   u64,
 	pub last_target_id: Option<RenderTargetId>,
 	pub last_seq:       Option<Seq>,
+	rendered_rows:      BTreeMap<u32, WgpuRenderedRow>,
 	draw_rows:          BTreeMap<u32, WgpuDrawRow>,
 	quads:              Vec<WgpuQuadDrawItem>,
 }
@@ -535,6 +567,14 @@ impl WgpuRendererState {
 	pub fn line_texts(&self) -> Vec<String> {
 		self.draw_rows.values().map(|row| row.text()).collect()
 	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WgpuRenderedRow {
+	draw_row:         WgpuDrawRow,
+	background_quads: Vec<WgpuQuadDrawItem>,
+	glyph_quads:      Vec<WgpuQuadDrawItem>,
+	underline_quads:  Vec<WgpuQuadDrawItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,6 +754,7 @@ mod tests {
 				y:    2,
 				runs: vec![RenderSurfaceRunSnapshot { x: 4, text: "red".to_string(), style: red }],
 			}],
+			dirty_rows: Vec::new(),
 			cursor: None,
 		});
 
@@ -776,6 +817,7 @@ mod tests {
 					style: underline,
 				}],
 			}],
+			dirty_rows: Vec::new(),
 			cursor: None,
 		});
 
@@ -816,6 +858,7 @@ mod tests {
 					},
 				],
 			}],
+			dirty_rows: Vec::new(),
 			cursor: None,
 		});
 
@@ -823,6 +866,67 @@ mod tests {
 		let row = state.row(0).expect("row 0 should exist");
 
 		assert_eq!(row.text(), "hallo");
+	}
+
+	#[test]
+	fn dirty_row_render_keeps_untouched_rows() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+		let target_id = RenderTargetId::new(1);
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: vec![
+				RenderSurfaceRowSnapshot {
+					y:    0,
+					runs: vec![RenderSurfaceRunSnapshot {
+						x:     0,
+						text:  "hello".to_string(),
+						style: TextStyleDto::plain(),
+					}],
+				},
+				RenderSurfaceRowSnapshot {
+					y:    1,
+					runs: vec![RenderSurfaceRunSnapshot {
+						x:     0,
+						text:  "world".to_string(),
+						style: TextStyleDto::plain(),
+					}],
+				},
+			],
+			dirty_rows: Vec::new(),
+			cursor: None,
+		});
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(2),
+			rows: vec![
+				RenderSurfaceRowSnapshot {
+					y:    0,
+					runs: vec![RenderSurfaceRunSnapshot {
+						x:     0,
+						text:  "hello".to_string(),
+						style: TextStyleDto::plain(),
+					}],
+				},
+				RenderSurfaceRowSnapshot {
+					y:    1,
+					runs: vec![RenderSurfaceRunSnapshot {
+						x:     0,
+						text:  "there".to_string(),
+						style: TextStyleDto::plain(),
+					}],
+				},
+			],
+			dirty_rows: vec![1],
+			cursor: None,
+		});
+
+		let state = backend.state();
+
+		assert_eq!(state.row(0).expect("row 0 should exist").text(), "hello");
+		assert_eq!(state.row(1).expect("row 1 should exist").text(), "there");
 	}
 
 	#[test]
@@ -851,6 +955,7 @@ mod tests {
 				y:    3,
 				runs: vec![RenderSurfaceRunSnapshot { x: 2, text: "ab".to_string(), style }],
 			}],
+			dirty_rows: Vec::new(),
 			cursor: None,
 		});
 
@@ -925,6 +1030,7 @@ mod tests {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "▄".to_string(), style }],
 			}],
+			dirty_rows: Vec::new(),
 			cursor:     None,
 		});
 
@@ -958,6 +1064,7 @@ mod tests {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot { x: 0, text: "🮂".to_string(), style }],
 			}],
+			dirty_rows: Vec::new(),
 			cursor:     None,
 		});
 

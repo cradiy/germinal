@@ -250,6 +250,7 @@ mod tests {
 					},
 				],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -294,6 +295,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -322,6 +324,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -336,6 +339,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -363,6 +367,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -377,6 +382,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			dirty_rows: vec![0],
 			cursor: None,
 		};
 
@@ -395,8 +401,13 @@ mod tests {
 	fn empty_surface_snapshot_can_hit_cache_on_second_build() {
 		let target_id = RenderTargetId::new(1);
 
-		let snapshot =
-			RenderSurfaceSnapshot { target_id, latest_seq: Seq::new(1), rows: Vec::new(), cursor: None };
+		let snapshot = RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: Vec::new(),
+			dirty_rows: Vec::new(),
+			cursor: None,
+		};
 
 		let builder = WgpuTerminalGlyphAtlasFrameBuilder::new();
 
