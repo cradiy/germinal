@@ -4,20 +4,20 @@ use std::{
 	rc::Rc,
 };
 
-use germinal_domain::{
+use germinal_ports::{
 	pty_host::width::{
 		terminal_char_cell_advance, terminal_chars_cell_width, terminal_text_cell_width,
 	},
-	rendering::render_target_id::RenderTargetId,
-	shared::seq::Seq,
-};
-use germinal_ports::rendering::{
-	frame_plan_builder::{BuiltFramePlan, RenderCommandDto, TextStyleDto},
-	frame_plan_presenter::FramePlanPresenter,
-	surface_snapshot::{
-		RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
-		RenderSurfaceSnapshotProvider,
+	rendering::{
+		frame_plan_builder::{BuiltFramePlan, RenderCommandDto, TextStyleDto},
+		frame_plan_presenter::FramePlanPresenter,
+		render_target_id::RenderTargetId,
+		surface_snapshot::{
+			RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+			RenderSurfaceSnapshotProvider,
+		},
 	},
+	seq::Seq,
 };
 
 #[derive(Debug, Clone, Default)]

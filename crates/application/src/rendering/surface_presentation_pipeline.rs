@@ -1,12 +1,13 @@
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
 use germinal_ports::{
 	pty_host::snapshot::TerminalSnapshotProvider,
 	rendering::{
 		frame_plan_builder::BuiltFramePlan,
 		frame_plan_presenter::FramePlanPresenter,
+		render_target_id::RenderTargetId,
 		renderer_backend::RendererBackend,
 		surface_snapshot::{RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider},
 	},
+	seq::Seq,
 };
 
 #[derive(Debug)]

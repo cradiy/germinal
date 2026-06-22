@@ -9,10 +9,10 @@ use compio::{
 	io::{AsyncWrite, AsyncWriteExt},
 	runtime::{ResumeUnwind, fd::AsyncFd, spawn},
 };
-use germinal_domain::workspace::pane_id::PaneId;
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
 	event::{
-		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 	},
 	pty_host::{
@@ -31,7 +31,8 @@ use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
 
 pub(crate) fn spawn_compio_bridge_thread(
 	proxy: RuntimeEventDispatcher,
-	pane_id: PaneId,
+	gshell_id: GShellId,
+	_pty_host_id: PtyHostId,
 	config: PtyBridgeConfig,
 	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	shutdown_tx: PtyInputSender,
@@ -41,7 +42,7 @@ pub(crate) fn spawn_compio_bridge_thread(
 		let runtime = compio::runtime::Runtime::new().expect("failed to create compio runtime");
 		runtime.block_on(run_compio_bridge(
 			proxy,
-			pane_id,
+			gshell_id,
 			config,
 			terminal_worker_tx,
 			shutdown_tx,
@@ -52,7 +53,7 @@ pub(crate) fn spawn_compio_bridge_thread(
 
 async fn run_compio_bridge(
 	proxy: RuntimeEventDispatcher,
-	pane_id: PaneId,
+	gshell_id: GShellId,
 	config: PtyBridgeConfig,
 	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	shutdown_tx: PtyInputSender,
@@ -119,7 +120,7 @@ async fn run_compio_bridge(
 	let _ = input_task.await.resume_unwind();
 
 	let _ = child.wait();
-	let _ = proxy.dispatch(RuntimeEvent::Pane(PaneRuntimeEvent::Closed { pane_id }));
+	let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
 }
 
 async fn read_pty_to_terminal_worker_async(

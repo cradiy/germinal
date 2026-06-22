@@ -1,4 +1,4 @@
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
+use crate::{rendering::render_target_id::RenderTargetId, seq::Seq};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildFramePlanTask {

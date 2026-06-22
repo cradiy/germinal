@@ -14,26 +14,35 @@ use germinal_application::service::{
 	workspace_service::WorkspaceServiceState,
 };
 use germinal_domain::{
-	pty_host::{
-		size_info::TerminalSizeInfo,
-		terminal_size::{TerminalGridSize, TerminalPtySize},
-		window_metrics::TerminalWindowMetrics,
-		window_size::TerminalWindowSize,
-	},
-	rendering::render_target_id::RenderTargetId,
-	workspace::pane_id::PaneId,
+	gshell::vo::gshell_id::GShellId,
+	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 use germinal_ports::{
-	event::{gshell_input::GShellInput, runtime_event_dispatcher::RuntimeEventDispatcher},
-	pty_host::{
-		pty_backend::IPtyBackendProvider, worker_backend::ITerminalWorkerBackendProvider,
-		worker_input::TerminalWorkerInput,
+	event::{
+		gshell_input::{GShellInput, GShellInputEvent},
+		runtime_event_dispatcher::RuntimeEventDispatcher,
 	},
-	rendering::{surface_snapshot::RenderSurfaceSnapshot, window_runtime::IRenderRuntimeStore},
+	pty_host::{
+		pty_backend::IPtyBackendProvider, size_info::TerminalSizeInfo, terminal_size::TerminalPtySize,
+		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
+		worker_backend::ITerminalWorkerBackendProvider, worker_input::TerminalWorkerInput,
+	},
+	rendering::{
+		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+		window_runtime::IRenderRuntimeStore,
+	},
 	service::{
-		gnative_service::IGNativeService, gshell_service::IGShellService,
-		layout_service::ILayoutService, pty_service::IPtyService, render_service::IRenderService,
+		gnative_service::IGNativeService,
+		gshell_service::IGShellService,
+		layout_service::ILayoutService,
+		pty_host_service::IPtyHostRuntimeRepositoryProvider,
+		pty_service::IPtyService,
+		render_service::IRenderService,
 		worker_service::IWorkerService,
+		workspace_service::{
+			IWorkspacePersistenceRepositoryProvider, IWorkspaceRuntimeRepositoryProvider,
+			IWorkspaceService,
+		},
 	},
 };
 
@@ -45,6 +54,39 @@ impl AsRef<WorkspaceServiceState> for App {
 
 impl AsMut<WorkspaceServiceState> for App {
 	fn as_mut(&mut self) -> &mut WorkspaceServiceState { &mut self.workspace_service_state }
+}
+
+impl IWorkspaceRuntimeRepositoryProvider for App {
+	type WorkspaceRuntimeRepository =
+		germinal_infra::repositories::hash_map_repository::HashMapRepository<
+			germinal_domain::workspace::entity::workspace::Workspace,
+		>;
+
+	fn workspace_runtime_repository(&self) -> &Self::WorkspaceRuntimeRepository {
+		&self.workspace_runtime_repository
+	}
+}
+
+impl IWorkspacePersistenceRepositoryProvider for App {
+	type WorkspacePersistenceRepository =
+		germinal_infra::repositories::sqlite_repository::SqliteRepository<
+			germinal_domain::workspace::entity::workspace::Workspace,
+		>;
+
+	fn workspace_persistence_repository(&self) -> &Self::WorkspacePersistenceRepository {
+		&self.workspace_persistence_repository
+	}
+}
+
+impl IPtyHostRuntimeRepositoryProvider for App {
+	type PtyHostRuntimeRepository =
+		germinal_infra::repositories::hash_map_repository::HashMapRepository<
+			germinal_domain::pty_host::entity::pty_host::PtyHost,
+		>;
+
+	fn pty_host_runtime_repository(&self) -> &Self::PtyHostRuntimeRepository {
+		&self.pty_host_runtime_repository
+	}
 }
 
 impl AsRef<GShellServiceState> for App {
@@ -105,17 +147,17 @@ impl IRenderRuntimeStore for App {
 }
 
 impl IGShellService for App {
-	fn ensure_pane_gshell(
+	fn ensure_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) {
-		GShellService::inj_ref(self).ensure_pane_gshell(
-			pane_id,
+		GShellService::inj_ref(self).ensure_gshell(
+			gshell_id,
 			proxy,
 			pty_size,
 			term_size,
@@ -128,28 +170,30 @@ impl IGShellService for App {
 		GShellService::inj_ref(self).route_input_to_gshell(input)
 	}
 
-	fn resize_pane_gshell(
+	fn resize_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	) {
-		GShellService::inj_ref(self).resize_pane_gshell(pane_id, pty_size, term_size)
+		GShellService::inj_ref(self).resize_gshell(gshell_id, pty_size, term_size)
 	}
 }
 
 impl IPtyService for App {
-	fn ensure_pane_pty(
+	fn ensure_gshell_pty(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
+		pty_host_id: PtyHostId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) {
-		PtyService::inj_ref(self).ensure_pane_pty(
-			pane_id,
+		PtyService::inj_ref(self).ensure_gshell_pty(
+			gshell_id,
+			pty_host_id,
 			proxy,
 			pty_size,
 			term_size,
@@ -158,23 +202,23 @@ impl IPtyService for App {
 		)
 	}
 
-	fn send_pane_pty_input(&self, input: GShellInput) {
-		PtyService::inj_ref(self).send_pane_pty_input(input)
+	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent) {
+		PtyService::inj_ref(self).send_pty_host_input(pty_host_id, event)
 	}
 
-	fn resize_pane_pty(
+	fn resize_pty_host(
 		&self,
-		pane_id: PaneId,
+		pty_host_id: PtyHostId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	) {
-		PtyService::inj_ref(self).resize_pane_pty(pane_id, pty_size, term_size)
+		PtyService::inj_ref(self).resize_pty_host(pty_host_id, pty_size, term_size)
 	}
 }
 
 impl IGNativeService for App {
-	fn ensure_pane_gnative(&self, pane_id: PaneId) {
-		GNativeService::inj_ref(self).ensure_pane_gnative(pane_id)
+	fn ensure_gshell_gnative(&self, gshell_id: GShellId) {
+		GNativeService::inj_ref(self).ensure_gshell_gnative(gshell_id)
 	}
 }
 
@@ -185,14 +229,14 @@ impl IWorkerService for App {
 
 	fn spawn_terminal_worker(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<SyncSender<TerminalWorkerInput>> {
 		WorkerService::inj_ref(self).spawn_terminal_worker(
-			pane_id,
+			gshell_id,
 			initial_size,
 			proxy,
 			surface_snapshot_tx,
@@ -237,6 +281,28 @@ impl IRenderService for App {
 	fn flush_redraw_request(&mut self) { RenderService::inj_ref_mut(self).flush_redraw_request() }
 
 	fn present_workspace(&mut self) { RenderService::inj_ref_mut(self).present_workspace() }
+}
+
+impl IWorkspaceService for App {
+	fn focused_gshell(&self) -> GShellId {
+		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
+			.focused_gshell()
+	}
+
+	fn runtime_event_proxy(&self) -> RuntimeEventDispatcher {
+		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
+			.runtime_event_proxy()
+	}
+
+	fn restore_workspace(&self) -> Result<(), String> {
+		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
+			.restore_workspace()
+	}
+
+	fn persist_workspace(&self) -> Result<(), String> {
+		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
+			.persist_workspace()
+	}
 }
 
 impl ILayoutService for App {

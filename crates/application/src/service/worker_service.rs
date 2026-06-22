@@ -4,7 +4,7 @@ use std::sync::{
 	mpsc::{Sender, SyncSender},
 };
 
-use germinal_domain::{pty_host::terminal_size::TerminalGridSize, workspace::pane_id::PaneId};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 use germinal_ports::{
 	event::runtime_event_dispatcher::RuntimeEventDispatcher,
 	pty_host::{
@@ -38,14 +38,14 @@ where Deps: AsRef<WorkerServiceState> + ITerminalWorkerBackendProvider
 
 	fn spawn_terminal_worker(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<SyncSender<TerminalWorkerInput>> {
 		Some(self.prj_ref().terminal_worker_backend().spawn_terminal_worker(
-			pane_id,
+			gshell_id,
 			initial_size,
 			proxy,
 			surface_snapshot_tx,

@@ -1,6 +1,9 @@
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
-use germinal_ports::rendering::{
-	frame_plan_builder::BuiltFramePlan, frame_plan_executor::FramePlanExecutor,
+use germinal_ports::{
+	rendering::{
+		frame_plan_builder::BuiltFramePlan, frame_plan_executor::FramePlanExecutor,
+		render_target_id::RenderTargetId,
+	},
+	seq::Seq,
 };
 
 use crate::rendering::render_scheduler::{BuildRequest, BuildResult, ReadyFrame, RenderScheduler};
@@ -67,9 +70,12 @@ impl FrameBuiltResult {
 mod tests {
 	use std::cell::RefCell;
 
-	use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
-	use germinal_ports::rendering::frame_plan_builder::{
-		BuildFramePlanTask, BuiltFramePlan, RenderCommandDto,
+	use germinal_ports::{
+		rendering::{
+			frame_plan_builder::{BuildFramePlanTask, BuiltFramePlan, RenderCommandDto},
+			render_target_id::RenderTargetId,
+		},
+		seq::Seq,
 	};
 
 	use super::*;

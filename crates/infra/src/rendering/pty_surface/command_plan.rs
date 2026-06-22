@@ -1,4 +1,4 @@
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
+use germinal_ports::{rendering::render_target_id::RenderTargetId, seq::Seq};
 
 use crate::rendering::pty_surface::{
 	frame_encoder::WgpuTerminalFrameEncodeResult, frame_upload_plan::WgpuTerminalFrameUploadPlan,

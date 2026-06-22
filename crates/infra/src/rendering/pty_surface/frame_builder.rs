@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
-use germinal_domain::{
-	pty_host::width::terminal_text_cell_width, rendering::render_target_id::RenderTargetId,
-	shared::seq::Seq,
-};
-use germinal_ports::rendering::{
-	renderer_backend::RendererBackend, surface_snapshot::RenderSurfaceSnapshot,
+use germinal_ports::{
+	pty_host::width::terminal_text_cell_width,
+	rendering::{
+		render_target_id::RenderTargetId, renderer_backend::RendererBackend,
+		surface_snapshot::RenderSurfaceSnapshot,
+	},
+	seq::Seq,
 };
 
 use crate::rendering::pty_surface::{

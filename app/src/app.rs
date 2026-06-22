@@ -6,7 +6,7 @@ use germinal_application::service::{
 	workspace_service::WorkspaceServiceState,
 };
 use germinal_domain::{
-	pty_host::window_size::TerminalWindowSize, rendering::render_target_id::RenderTargetId,
+	pty_host::entity::pty_host::PtyHost, workspace::entity::workspace::Workspace,
 };
 use germinal_infra::{
 	pty::PlatformPtyBackend,
@@ -14,18 +14,24 @@ use germinal_infra::{
 	rendering::pty_surface::window_runtime::{
 		WgpuTerminalWindowRuntime, WgpuTerminalWindowRuntimeFactory,
 	},
+	repositories::{hash_map_repository::HashMapRepository, sqlite_repository::SqliteRepository},
 };
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
-		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
 		},
 	},
-	service::{gshell_service::IGShellService, render_service::IRenderService},
+	pty_host::window_size::TerminalWindowSize,
+	rendering::render_target_id::RenderTargetId,
+	service::{
+		gshell_service::IGShellService, render_service::IRenderService,
+		workspace_service::IWorkspaceService,
+	},
 };
 use winit::{
 	application::ApplicationHandler,
@@ -36,36 +42,49 @@ use winit::{
 };
 
 pub struct App {
-	workspace_service_state: WorkspaceServiceState,
-	gshell_service_state:    GShellServiceState,
-	worker_service_state:    WorkerServiceState,
-	render_service_state:    RenderServiceState,
-	layout_service_state:    LayoutServiceState,
-	pty_backend:             PlatformPtyBackend,
-	terminal_worker_backend: PlatformTerminalWorkerBackend,
-	render_runtime_factory:  WgpuTerminalWindowRuntimeFactory,
-	render_runtime:          Option<WgpuTerminalWindowRuntime>,
-	render_window_id:        Option<WindowId>,
+	workspace_service_state:          WorkspaceServiceState,
+	gshell_service_state:             GShellServiceState,
+	worker_service_state:             WorkerServiceState,
+	render_service_state:             RenderServiceState,
+	layout_service_state:             LayoutServiceState,
+	workspace_runtime_repository:     HashMapRepository<Workspace>,
+	workspace_persistence_repository: SqliteRepository<Workspace>,
+	pty_host_runtime_repository:      HashMapRepository<PtyHost>,
+	pty_backend:                      PlatformPtyBackend,
+	terminal_worker_backend:          PlatformTerminalWorkerBackend,
+	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
+	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
+	render_window_id:                 Option<WindowId>,
 }
 
 impl App {
-	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Self {
+	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Result<Self, String> {
 		let runtime_event_dispatcher = RuntimeEventDispatcher::new(move |event| {
 			runtime_event_proxy.send_event(event).map_err(|error| error.to_string())
 		});
 
-		Self {
-			workspace_service_state: WorkspaceServiceState::new(runtime_event_dispatcher),
-			gshell_service_state:    GShellServiceState::new(),
-			worker_service_state:    WorkerServiceState::new(),
-			render_service_state:    RenderServiceState::new(),
-			layout_service_state:    LayoutServiceState::default(),
-			pty_backend:             PlatformPtyBackend::new(),
-			terminal_worker_backend: PlatformTerminalWorkerBackend::new(),
-			render_runtime_factory:  WgpuTerminalWindowRuntimeFactory::new(),
-			render_runtime:          None,
-			render_window_id:        None,
-		}
+		let app = Self {
+			workspace_service_state:          WorkspaceServiceState::new(runtime_event_dispatcher),
+			gshell_service_state:             GShellServiceState::new(),
+			worker_service_state:             WorkerServiceState::new(),
+			render_service_state:             RenderServiceState::new(),
+			layout_service_state:             LayoutServiceState::default(),
+			workspace_runtime_repository:     HashMapRepository::new(),
+			workspace_persistence_repository: SqliteRepository::new(
+				"germinal-workspace.sqlite3",
+				"workspace",
+			)?,
+			pty_host_runtime_repository:      HashMapRepository::new(),
+			pty_backend:                      PlatformPtyBackend::new(),
+			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(),
+			render_runtime_factory:           WgpuTerminalWindowRuntimeFactory::new(),
+			render_runtime:                   None,
+			render_window_id:                 None,
+		};
+
+		app.restore_workspace()?;
+
+		Ok(app)
 	}
 
 	pub fn run(&mut self, event_loop: EventLoop<RuntimeEvent>) -> Result<(), String> {
@@ -98,17 +117,23 @@ impl App {
 	fn current_window_id(&self) -> WindowId {
 		self.render_window_id.expect("window runtime must be initialized before use")
 	}
+
+	fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
+		if let Err(error) = self.persist_workspace() {
+			eprintln!("failed to persist workspace: {error}");
+		}
+
+		event_loop.exit();
+	}
 }
 
 impl ApplicationHandler<RuntimeEvent> for App {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-		let (proxy, focused_pane) = {
-			let state = &self.workspace_service_state;
-			(state.runtime_event_proxy(), state.focused_pane())
-		};
+		let proxy = self.runtime_event_proxy();
+		let focused_gshell = self.focused_gshell();
 
 		if self.ensure_window_runtime(event_loop).is_err() {
-			event_loop.exit();
+			self.exit_and_persist(event_loop);
 			return;
 		}
 
@@ -118,29 +143,29 @@ impl ApplicationHandler<RuntimeEvent> for App {
 		let surface_snapshot_tx = self.surface_snapshot_sender();
 		let snapshot_wake_pending = self.snapshot_wake_pending();
 
-		self.ensure_pane_gshell(
-			focused_pane,
+		self.ensure_gshell(
+			focused_gshell,
 			proxy,
 			pty_size,
 			term_size,
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		);
-		self.set_focused_render_target(RenderTargetId::new(focused_pane.value()));
+		self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
 		self.prepare_render_backend();
 	}
 
 	fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
 		match event {
-			RuntimeEvent::Pane(PaneRuntimeEvent::FrameReady { .. }) => {
+			RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { .. }) => {
 				self.consume_latest_terminal_snapshot();
 				self.request_redraw();
 			}
-			RuntimeEvent::Pane(PaneRuntimeEvent::Closed { .. }) => {
-				event_loop.exit();
+			RuntimeEvent::GShell(GShellRuntimeEvent::Closed { .. }) => {
+				self.exit_and_persist(event_loop);
 			}
 			RuntimeEvent::App(_) => {
-				event_loop.exit();
+				self.exit_and_persist(event_loop);
 			}
 			RuntimeEvent::Workspace(_) => {
 				self.request_redraw();
@@ -162,16 +187,12 @@ impl ApplicationHandler<RuntimeEvent> for App {
 
 		match event {
 			WindowEvent::CloseRequested => {
-				event_loop.exit();
+				self.exit_and_persist(event_loop);
 			}
 			WindowEvent::Resized(size) => {
 				let size_info = self
 					.resize_window_size_info(TerminalWindowSize::new(size.width.max(1), size.height.max(1)));
-				self.resize_pane_gshell(
-					self.workspace_service_state.focused_pane(),
-					size_info.pty_size(),
-					size_info.grid_size(),
-				);
+				self.resize_gshell(self.focused_gshell(), size_info.pty_size(), size_info.grid_size());
 			}
 			WindowEvent::Focused(focused) => {
 				self.set_window_focused(focused);
@@ -181,8 +202,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
 			}
 			WindowEvent::ModifiersChanged(modifiers) => {
 				self.route_input_to_gshell(GShellInput {
-					pane_id: self.workspace_service_state.focused_pane(),
-					event:   GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(
+					gshell_id: self.focused_gshell(),
+					event:     GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(
 						WindowInputModifiers::new(modifiers.state().control_key(), modifiers.state().alt_key()),
 					)),
 				});
@@ -191,8 +212,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				let winit::event::KeyEvent { state, logical_key, text, .. } = event;
 
 				self.route_input_to_gshell(GShellInput {
-					pane_id: self.workspace_service_state.focused_pane(),
-					event:   GShellInputEvent::Window(WindowInputEvent::Key {
+					gshell_id: self.focused_gshell(),
+					event:     GShellInputEvent::Window(WindowInputEvent::Key {
 						state: winit_element_state_to_port(state),
 						logical_key: winit_key_to_port(logical_key),
 						text,
@@ -201,8 +222,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
 			}
 			WindowEvent::Ime(Ime::Commit(text)) => {
 				self.route_input_to_gshell(GShellInput {
-					pane_id: self.workspace_service_state.focused_pane(),
-					event:   GShellInputEvent::Window(WindowInputEvent::Ime(text)),
+					gshell_id: self.focused_gshell(),
+					event:     GShellInputEvent::Window(WindowInputEvent::Ime(text)),
 				});
 			}
 			_ => {}

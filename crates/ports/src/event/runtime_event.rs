@@ -1,10 +1,12 @@
-use germinal_domain::{shared::seq::Seq, workspace::pane_id::PaneId};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
+
+use crate::seq::Seq;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
 	App(AppRuntimeEvent),
 	Workspace(WorkspaceRuntimeEvent),
-	Pane(PaneRuntimeEvent),
+	GShell(GShellRuntimeEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +20,7 @@ pub enum WorkspaceRuntimeEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaneRuntimeEvent {
-	FrameReady { pane_id: PaneId, seq: Seq },
-	Closed { pane_id: PaneId },
+pub enum GShellRuntimeEvent {
+	FrameReady { gshell_id: GShellId, seq: Seq },
+	Closed { gshell_id: GShellId },
 }

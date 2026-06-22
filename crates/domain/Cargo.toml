@@ -8,3 +8,4 @@ authors.workspace    = true
 
 [dependencies]
 unicode-width.workspace = true
+serde.workspace         = true

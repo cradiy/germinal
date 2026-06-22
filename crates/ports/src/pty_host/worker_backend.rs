@@ -4,7 +4,7 @@ use std::sync::{
 	mpsc::{Sender, SyncSender},
 };
 
-use germinal_domain::{pty_host::terminal_size::TerminalGridSize, workspace::pane_id::PaneId};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 
 use crate::{
 	event::runtime_event_dispatcher::RuntimeEventDispatcher,
@@ -14,7 +14,7 @@ use crate::{
 pub trait ITerminalWorkerBackend {
 	fn spawn_terminal_worker(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,

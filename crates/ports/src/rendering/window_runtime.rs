@@ -1,6 +1,7 @@
-use germinal_domain::pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize};
-
-use crate::rendering::surface_snapshot::RenderSurfaceSnapshot;
+use crate::{
+	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
+	rendering::surface_snapshot::RenderSurfaceSnapshot,
+};
 
 pub trait ITerminalWindowRuntime {
 	fn request_window_redraw(&self);

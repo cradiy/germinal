@@ -1,19 +1,17 @@
 use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 
-use germinal_domain::{
-	pty_host::terminal_size::{TerminalGridSize, TerminalPtySize},
-	workspace::pane_id::PaneId,
-};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 
 use crate::{
 	event::{gshell_input::GShellInput, runtime_event_dispatcher::RuntimeEventDispatcher},
+	pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
 pub trait IGShellService {
-	fn ensure_pane_gshell(
+	fn ensure_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
@@ -21,9 +19,9 @@ pub trait IGShellService {
 		snapshot_wake_pending: Arc<AtomicBool>,
 	);
 	fn route_input_to_gshell(&self, input: GShellInput);
-	fn resize_pane_gshell(
+	fn resize_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	);

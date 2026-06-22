@@ -1,4 +1,4 @@
-use germinal_domain::workspace::pane_id::PaneId;
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_ports::service::{gnative_service::IGNativeService, worker_service::IWorkerService};
 
 #[derive(kudi::DepInj)]
@@ -16,5 +16,5 @@ impl Default for GNativeServiceState {
 impl<Deps> IGNativeService for GNativeService<Deps>
 where Deps: IWorkerService
 {
-	fn ensure_pane_gnative(&self, _pane_id: PaneId) { self.prj_ref().start_worker_pool(); }
+	fn ensure_gshell_gnative(&self, _gshell_id: GShellId) { self.prj_ref().start_worker_pool(); }
 }

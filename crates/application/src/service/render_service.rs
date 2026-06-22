@@ -4,12 +4,10 @@ use std::sync::{
 	mpsc::{self, Receiver, Sender, TryRecvError},
 };
 
-use germinal_domain::{
-	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
-	rendering::render_target_id::RenderTargetId,
-};
 use germinal_ports::{
+	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
 	rendering::{
+		render_target_id::RenderTargetId,
 		surface_snapshot::RenderSurfaceSnapshot,
 		window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
 	},

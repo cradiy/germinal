@@ -11,15 +11,18 @@ use alacritty_terminal::{
 	term::{Config, Term, TermDamage, cell::Flags, color::Colors},
 	vte::ansi::{Color, NamedColor, Processor, Rgb, StdSyncHandler},
 };
-use germinal_domain::{
-	pty_host::width::terminal_char_cell_width, rendering::render_target_id::RenderTargetId,
-	shared::seq::Seq,
-};
 use germinal_ports::{
-	pty_host::snapshot::{
-		TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider, TerminalTextRunSnapshot,
+	pty_host::{
+		snapshot::{
+			TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider, TerminalTextRunSnapshot,
+		},
+		width::terminal_char_cell_width,
 	},
-	rendering::frame_plan_builder::{RgbColorDto, TextStyleDto},
+	rendering::{
+		frame_plan_builder::{RgbColorDto, TextStyleDto},
+		render_target_id::RenderTargetId,
+	},
+	seq::Seq,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,12 +71,12 @@ impl EventListener for PtyWriteEventListener {
 }
 
 #[derive(Clone)]
-pub struct AlacrittyTermStateStore {
+pub struct AlacrittyTerminalRepository {
 	inner: Rc<RefCell<HashMap<RenderTargetId, AlacrittyTermState>>>,
 	size:  AlacrittyTermSize,
 }
 
-impl AlacrittyTermStateStore {
+impl AlacrittyTerminalRepository {
 	pub fn new() -> Self { Self::with_size(AlacrittyTermSize::default()) }
 
 	pub fn with_size(size: AlacrittyTermSize) -> Self {
@@ -189,11 +192,11 @@ impl AlacrittyTermStateStore {
 	}
 }
 
-impl Default for AlacrittyTermStateStore {
+impl Default for AlacrittyTerminalRepository {
 	fn default() -> Self { Self::new() }
 }
 
-impl TerminalSnapshotProvider for AlacrittyTermStateStore {
+impl TerminalSnapshotProvider for AlacrittyTerminalRepository {
 	fn snapshot_of(&self, render_target_id: RenderTargetId) -> Option<TerminalSnapshot> {
 		let mut inner = self.inner.borrow_mut();
 
@@ -561,7 +564,7 @@ mod tests {
 
 	#[test]
 	fn applies_bytes_and_exports_snapshot() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"\x1b[31mred\x1b[0m\r\nhello\r\nworld");
@@ -580,7 +583,7 @@ mod tests {
 
 	#[test]
 	fn exports_red_bold_text_run() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"\x1b[31;1mred\x1b[0m");
@@ -598,7 +601,7 @@ mod tests {
 
 	#[test]
 	fn clear_damage_up_to_resets_full_damage() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"hello");
@@ -619,7 +622,7 @@ mod tests {
 
 	#[test]
 	fn clear_damage_up_to_does_not_clear_newer_seq() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(2), b"hello");
@@ -633,7 +636,7 @@ mod tests {
 
 	#[test]
 	fn resize_updates_snapshot_bounds() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"hello");
@@ -651,7 +654,7 @@ mod tests {
 
 	#[test]
 	fn resolves_default_background_to_black_run() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"\x1b[40m \x1b[0m");
@@ -670,7 +673,7 @@ mod tests {
 
 	#[test]
 	fn expands_partial_damage_to_neighbor_rows() {
-		let store = AlacrittyTermStateStore::with_size(AlacrittyTermSize::new(4, 4));
+		let store = AlacrittyTerminalRepository::with_size(AlacrittyTermSize::new(4, 4));
 		let target_id = RenderTargetId::new(1);
 
 		let _ = store.snapshot_of(target_id);
@@ -685,7 +688,7 @@ mod tests {
 
 	#[test]
 	fn inverse_text_swaps_default_foreground_and_background() {
-		let store = AlacrittyTermStateStore::new();
+		let store = AlacrittyTerminalRepository::new();
 		let target_id = RenderTargetId::new(1);
 
 		store.apply_bytes(target_id, Seq::new(1), b"\x1b[7mfoo\x1b[0m");

@@ -1,8 +1,8 @@
-use germinal_domain::{
-	gshell::gshell_id::GShellId, rendering::render_target_id::RenderTargetId, shared::seq::Seq,
-};
+use germinal_domain::gshell::gshell_id::GShellId;
 
-use crate::gshell::output_event::GShellOutputEvent;
+use crate::{
+	gshell::output_event::GShellOutputEvent, rendering::render_target_id::RenderTargetId, seq::Seq,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalApplyResult {

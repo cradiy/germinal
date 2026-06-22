@@ -1,26 +1,68 @@
-use germinal_domain::{
-	gshell::gshell_id::GShellId, rendering::render_target_id::RenderTargetId, shared::seq::Seq,
-	workspace::pane_id::PaneId,
-};
+use germinal_domain::gshell::gshell_id::GShellId;
 use germinal_ports::{
 	gshell::output_event::GShellOutputEvent,
 	pty_host::output_applier::TerminalOutputApplier,
-	rendering::{frame_plan_builder::BuiltFramePlan, frame_plan_executor::FramePlanExecutor},
+	rendering::{
+		frame_plan_builder::BuiltFramePlan, frame_plan_executor::FramePlanExecutor,
+		render_target_id::RenderTargetId,
+	},
+	seq::Seq,
 };
 
-use super::{
-	gshell_output_store::{GShellOutputState, GShellOutputStore},
-	gshell_pane_registry::GShellPaneRegistry,
-};
 use crate::{
 	rendering::render_pipeline::{FrameBuiltResult, InputUpdateResult},
 	workspace_rendering::workspace_render_pipeline::WorkspaceRenderPipeline,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GShellOutputState {
+	pub latest_seq:       Seq,
+	pub render_target_id: RenderTargetId,
+	pub total_bytes:      u64,
+	pub chunk_count:      u64,
+	pub changed:          bool,
+}
+
+impl Default for GShellOutputState {
+	fn default() -> Self {
+		Self {
+			latest_seq:       Seq::ZERO,
+			render_target_id: RenderTargetId::new(0),
+			total_bytes:      0,
+			chunk_count:      0,
+			changed:          false,
+		}
+	}
+}
+
+#[derive(Debug, Default)]
+pub struct GShellOutputTracker {
+	states: std::collections::HashMap<GShellId, GShellOutputState>,
+}
+
+impl GShellOutputTracker {
+	pub fn new() -> Self { Self::default() }
+
+	pub fn record_apply_result(
+		&mut self,
+		result: &germinal_ports::pty_host::output_applier::TerminalApplyResult,
+	) {
+		let state = self.states.entry(result.gshell_id).or_default();
+		state.latest_seq = result.latest_seq;
+		state.render_target_id = result.render_target_id;
+		state.total_bytes += result.bytes_applied as u64;
+		state.chunk_count += 1;
+		state.changed |= result.changed;
+	}
+
+	pub fn state_of(&self, gshell_id: GShellId) -> Option<&GShellOutputState> {
+		self.states.get(&gshell_id)
+	}
+}
+
 #[derive(Debug)]
 pub struct GShellRenderPipeline<E, T> {
-	registry:           GShellPaneRegistry,
-	output_store:       GShellOutputStore,
+	output_tracker:     GShellOutputTracker,
 	terminal_applier:   T,
 	workspace_pipeline: WorkspaceRenderPipeline<E>,
 }
@@ -32,38 +74,29 @@ where
 {
 	pub fn new(executor: E, terminal_applier: T) -> Self {
 		Self {
-			registry: GShellPaneRegistry::new(),
-			output_store: GShellOutputStore::new(),
+			output_tracker: GShellOutputTracker::new(),
 			terminal_applier,
 			workspace_pipeline: WorkspaceRenderPipeline::new(executor),
 		}
 	}
 
-	pub fn bind_gshell_to_pane(&mut self, gshell_id: GShellId, pane_id: PaneId) {
-		self.registry.bind(gshell_id, pane_id);
-		self.workspace_pipeline.register_pane(pane_id);
+	pub fn register_gshell(&mut self, gshell_id: GShellId) {
+		self.workspace_pipeline.register_gshell(gshell_id)
 	}
 
 	pub fn on_gshell_output_event(&mut self, event: GShellOutputEvent) -> GShellOutputUpdateResult {
 		let gshell_id = event.gshell_id;
 
-		let Some(pane_id) = self.registry.pane_of(gshell_id) else {
-			return GShellOutputUpdateResult::UnknownGShell;
-		};
-
-		self.workspace_pipeline.register_pane(pane_id);
-
-		let Some(render_target_id) = self.workspace_pipeline.render_target_of(pane_id) else {
-			return GShellOutputUpdateResult::UnknownGShell;
-		};
+		self.workspace_pipeline.register_gshell(gshell_id);
+		let render_target_id = RenderTargetId::new(gshell_id.value());
 
 		let apply_result = self.terminal_applier.apply(render_target_id, &event);
 
 		let seq = apply_result.latest_seq;
 
-		self.output_store.record_apply_result(&apply_result);
+		self.output_tracker.record_apply_result(&apply_result);
 
-		let result = self.workspace_pipeline.on_pane_output_updated(pane_id, seq);
+		let result = self.workspace_pipeline.on_gshell_output_updated(gshell_id, seq);
 
 		GShellOutputUpdateResult::Accepted(result)
 	}
@@ -73,11 +106,7 @@ where
 		gshell_id: GShellId,
 		seq: Seq,
 	) -> GShellOutputUpdateResult {
-		let Some(pane_id) = self.registry.pane_of(gshell_id) else {
-			return GShellOutputUpdateResult::UnknownGShell;
-		};
-
-		let result = self.workspace_pipeline.on_pane_output_updated(pane_id, seq);
+		let result = self.workspace_pipeline.on_gshell_output_updated(gshell_id, seq);
 
 		GShellOutputUpdateResult::Accepted(result)
 	}
@@ -90,10 +119,8 @@ where
 		self.workspace_pipeline.mark_presented(target_id, seq)
 	}
 
-	pub fn registry(&self) -> &GShellPaneRegistry { &self.registry }
-
 	pub fn output_state_of(&self, gshell_id: GShellId) -> Option<&GShellOutputState> {
-		self.output_store.state_of(gshell_id)
+		self.output_tracker.state_of(gshell_id)
 	}
 }
 
@@ -163,10 +190,10 @@ mod tests {
 		let terminal_applier = TestTerminalOutputApplier;
 		let mut pipeline = GShellRenderPipeline::new(executor, terminal_applier);
 
-		assert_eq!(
+		assert!(matches!(
 			pipeline.on_gshell_output_updated(GShellId::new(1), Seq::new(1)),
-			GShellOutputUpdateResult::UnknownGShell
-		);
+			GShellOutputUpdateResult::Accepted(_)
+		));
 	}
 
 	#[test]
@@ -176,9 +203,7 @@ mod tests {
 		let mut pipeline = GShellRenderPipeline::new(executor, terminal_applier);
 
 		let gshell_id = GShellId::new(1);
-		let pane_id = PaneId::new(10);
-
-		pipeline.bind_gshell_to_pane(gshell_id, pane_id);
+		pipeline.register_gshell(gshell_id);
 
 		let result = pipeline.on_gshell_output_updated(gshell_id, Seq::new(1));
 
@@ -186,8 +211,6 @@ mod tests {
 			result,
 			GShellOutputUpdateResult::Accepted(InputUpdateResult::TaskSubmitted(_))
 		));
-
-		assert_eq!(pipeline.registry().pane_of(gshell_id), Some(pane_id));
 
 		let submitted = pipeline.workspace_pipeline.render_pipeline.executor.submitted();
 
@@ -202,9 +225,7 @@ mod tests {
 		let mut pipeline = GShellRenderPipeline::new(executor, terminal_applier);
 
 		let gshell_id = GShellId::new(1);
-		let pane_id = PaneId::new(10);
-
-		pipeline.bind_gshell_to_pane(gshell_id, pane_id);
+		pipeline.register_gshell(gshell_id);
 
 		let event = GShellOutputEvent::new(gshell_id, Seq::new(1), b"hello\n".to_vec());
 
@@ -235,9 +256,7 @@ mod tests {
 		let mut pipeline = GShellRenderPipeline::new(executor, terminal_applier);
 
 		let gshell_id = GShellId::new(1);
-		let pane_id = PaneId::new(10);
-
-		pipeline.bind_gshell_to_pane(gshell_id, pane_id);
+		pipeline.register_gshell(gshell_id);
 
 		pipeline.on_gshell_output_updated(gshell_id, Seq::new(1));
 		pipeline.on_gshell_output_updated(gshell_id, Seq::new(2));

@@ -1,17 +1,17 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
-use germinal_domain::{
+use germinal_ports::{
 	pty_host::{
 		render_viewport::TerminalRenderViewport, size_info::TerminalSizeInfo,
 		width::terminal_char_cell_width,
 	},
-	rendering::render_target_id::RenderTargetId,
-	shared::seq::Seq,
-};
-use germinal_ports::rendering::{
-	frame_plan_builder::{RgbColorDto, TextStyleDto},
-	renderer_backend::RendererBackend,
-	surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
+	rendering::{
+		frame_plan_builder::{RgbColorDto, TextStyleDto},
+		render_target_id::RenderTargetId,
+		renderer_backend::RendererBackend,
+		surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
+	},
+	seq::Seq,
 };
 
 const CURSOR_OUTLINE_THICKNESS_PX: u32 = 2;

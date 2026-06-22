@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 
-use germinal_domain::{
-	rendering::{
-		render_generation::{BuildCompletion, RenderGenerationState},
-		render_target_id::RenderTargetId,
-	},
-	shared::seq::Seq,
+use germinal_ports::{
+	rendering::{frame_plan_builder::BuildFramePlanTask, render_target_id::RenderTargetId},
+	seq::Seq,
 };
-use germinal_ports::rendering::frame_plan_builder::BuildFramePlanTask;
+
+use crate::rendering::render_generation::{BuildCompletion, RenderGenerationState};
 
 #[derive(Debug, Default)]
 pub struct RenderScheduler {

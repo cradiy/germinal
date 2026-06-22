@@ -1,10 +1,11 @@
 use std::sync::mpsc::SyncSender;
 
-use germinal_domain::{pty_host::terminal_size::TerminalPtySize, workspace::pane_id::PaneId};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
 	event::runtime_event_dispatcher::RuntimeEventDispatcher,
 	pty_host::{
 		pty_input::{PtyInputSender, pty_input_channel},
+		terminal_size::TerminalPtySize,
 		worker_input::TerminalWorkerInput,
 	},
 };
@@ -33,16 +34,24 @@ pub struct PtyBridge;
 impl PtyBridge {
 	pub fn spawn(
 		proxy: RuntimeEventDispatcher,
-		pane_id: PaneId,
+		gshell_id: GShellId,
+		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
 		terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	) -> PtyInputSender {
-		Self::spawn_with_config(proxy, pane_id, PtyBridgeConfig::new(initial_size), terminal_worker_tx)
+		Self::spawn_with_config(
+			proxy,
+			gshell_id,
+			pty_host_id,
+			PtyBridgeConfig::new(initial_size),
+			terminal_worker_tx,
+		)
 	}
 
 	pub(crate) fn spawn_with_config(
 		proxy: RuntimeEventDispatcher,
-		pane_id: PaneId,
+		gshell_id: GShellId,
+		pty_host_id: PtyHostId,
 		config: PtyBridgeConfig,
 		terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	) -> PtyInputSender {
@@ -51,7 +60,8 @@ impl PtyBridge {
 		#[cfg(unix)]
 		spawn_compio_bridge_thread(
 			proxy,
-			pane_id,
+			gshell_id,
+			pty_host_id,
 			config,
 			terminal_worker_tx,
 			input_tx.clone(),
@@ -59,7 +69,14 @@ impl PtyBridge {
 		);
 
 		#[cfg(windows)]
-		spawn_blocking_bridge_thread(proxy, pane_id, config, terminal_worker_tx, input_rx);
+		spawn_blocking_bridge_thread(
+			proxy,
+			gshell_id,
+			pty_host_id,
+			config,
+			terminal_worker_tx,
+			input_rx,
+		);
 
 		input_tx
 	}

@@ -1,11 +1,9 @@
 use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 
-use germinal_domain::{
+use crate::{
 	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
-	rendering::render_target_id::RenderTargetId,
+	rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
 };
-
-use crate::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 pub trait IRenderService {
 	fn prepare_render_backend(&mut self);

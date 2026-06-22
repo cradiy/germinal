@@ -1,10 +1,10 @@
-use germinal_domain::{
-	pty_host::terminal_size::TerminalPtySize, shared::seq::Seq, workspace::pane_id::PaneId,
-};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
+
+use crate::{pty_host::terminal_size::TerminalPtySize, seq::Seq};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerTask {
-	PtyBytes { pane_id: PaneId, bytes: Vec<u8>, seq: Seq },
-	PtyResize { pane_id: PaneId, size: TerminalPtySize, seq: Seq },
-	GNativeMessage { pane_id: PaneId, message: Vec<u8>, seq: Seq },
+	PtyBytes { pty_host_id: PtyHostId, bytes: Vec<u8>, seq: Seq },
+	PtyResize { pty_host_id: PtyHostId, size: TerminalPtySize, seq: Seq },
+	GNativeMessage { gshell_id: GShellId, message: Vec<u8>, seq: Seq },
 }

@@ -7,7 +7,7 @@ use std::{
 use crossfont::{
 	BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
 };
-use germinal_domain::pty_host::width::terminal_char_cell_width;
+use germinal_ports::pty_host::width::terminal_char_cell_width;
 
 use crate::rendering::pty_surface::glyph_atlas::{
 	WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,

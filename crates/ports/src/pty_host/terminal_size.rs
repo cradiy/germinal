@@ -1,27 +1,9 @@
+use germinal_domain::pty_host::terminal_size::TerminalGridSize;
+use serde::{Deserialize, Serialize};
+
 use crate::pty_host::{cell_size::TerminalCellSize, content_size::TerminalContentSize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalGridSize {
-	columns: usize,
-	rows:    usize,
-}
-
-impl TerminalGridSize {
-	pub const fn new(columns: usize, rows: usize) -> Self { Self { columns, rows } }
-
-	pub const fn columns(self) -> usize { self.columns }
-
-	pub const fn rows(self) -> usize { self.rows }
-
-	pub fn from_content_pixels(content: TerminalContentSize, cell: TerminalCellSize) -> Self {
-		let columns = (content.width_px() / cell.width_px()).max(1) as usize;
-		let rows = (content.height_px() / cell.height_px()).max(1) as usize;
-
-		Self { columns, rows }
-	}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalPtySize {
 	rows:         u16,
 	columns:      u16,
@@ -43,7 +25,7 @@ impl TerminalPtySize {
 	pub const fn pixel_height(self) -> u16 { self.pixel_height }
 
 	pub fn from_content_pixels(content: TerminalContentSize, cell: TerminalCellSize) -> Self {
-		let grid = TerminalGridSize::from_content_pixels(content, cell);
+		let grid = terminal_grid_size_from_content_pixels(content, cell);
 
 		Self {
 			rows:         u16_saturating(grid.rows() as u32),
@@ -52,6 +34,16 @@ impl TerminalPtySize {
 			pixel_height: u16_saturating(content.height_px()),
 		}
 	}
+}
+
+pub fn terminal_grid_size_from_content_pixels(
+	content: TerminalContentSize,
+	cell: TerminalCellSize,
+) -> TerminalGridSize {
+	let columns = (content.width_px() / cell.width_px()).max(1) as usize;
+	let rows = (content.height_px() / cell.height_px()).max(1) as usize;
+
+	TerminalGridSize::new(columns, rows)
 }
 
 fn u16_saturating(value: u32) -> u16 { value.min(u16::MAX as u32) as u16 }

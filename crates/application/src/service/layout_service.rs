@@ -1,8 +1,10 @@
-use germinal_domain::pty_host::{
-	profile::TerminalProfile, scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
-	window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
+use germinal_ports::{
+	pty_host::{
+		profile::TerminalProfile, scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
+		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
+	},
+	service::layout_service::ILayoutService,
 };
-use germinal_ports::service::layout_service::ILayoutService;
 
 #[derive(kudi::DepInj)]
 #[target(LayoutService)]

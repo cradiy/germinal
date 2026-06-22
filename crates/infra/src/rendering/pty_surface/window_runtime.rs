@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use germinal_domain::pty_host::{
-	cell_size::TerminalCellSize, font_weight::TerminalFontWeight, profile::TerminalProfile,
-	scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
-	window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
-};
-use germinal_ports::rendering::{
-	surface_snapshot::RenderSurfaceSnapshot, window_runtime::ITerminalWindowRuntime,
+use germinal_ports::{
+	pty_host::{
+		cell_size::TerminalCellSize, font_weight::TerminalFontWeight, profile::TerminalProfile,
+		scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
+		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
+	},
+	rendering::{surface_snapshot::RenderSurfaceSnapshot, window_runtime::ITerminalWindowRuntime},
+	seq::Seq,
 };
 use winit::window::{Window, WindowId};
 
@@ -101,8 +102,8 @@ impl WgpuTerminalWindowRuntime {
 		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer);
 
 		let surface_snapshot = RenderSurfaceSnapshot {
-			target_id:  germinal_domain::rendering::render_target_id::RenderTargetId::new(0),
-			latest_seq: germinal_domain::shared::seq::Seq::ZERO,
+			target_id:  germinal_ports::rendering::render_target_id::RenderTargetId::new(0),
+			latest_seq: Seq::ZERO,
 			rows:       Vec::new(),
 			cursor:     None,
 		};

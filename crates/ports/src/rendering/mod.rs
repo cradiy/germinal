@@ -4,6 +4,8 @@ pub mod frame_plan_executor;
 
 pub mod frame_plan_presenter;
 
+pub mod render_target_id;
+
 pub mod surface_snapshot;
 
 pub mod renderer_backend;

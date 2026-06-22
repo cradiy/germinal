@@ -5,8 +5,11 @@ use std::{
 };
 
 use germinal_domain::{
-	pty_host::terminal_size::{TerminalGridSize, TerminalPtySize},
-	workspace::pane_id::PaneId,
+	gshell::{
+		entity::{gshell::GShell, gshell_mode::GShellMode},
+		vo::gshell_id::GShellId,
+	},
+	pty_host::{entity::pty_host::PtyHost, pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 use germinal_ports::{
 	event::{
@@ -14,43 +17,23 @@ use germinal_ports::{
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::WindowInputEvent,
 	},
+	pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
+	repository::IRepository,
 	service::{
-		gnative_service::IGNativeService, gshell_service::IGShellService, pty_service::IPtyService,
+		gnative_service::IGNativeService, gshell_service::IGShellService,
+		pty_host_service::IPtyHostRuntimeRepositoryProvider, pty_service::IPtyService,
 	},
 };
 
 use crate::service::{gnative_service::GNativeServiceState, pty_service::PtyServiceState};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GShellMode {
-	Pty,
-	GNative,
-}
-
-#[derive(Debug)]
-pub struct GShell {
-	mode: GShellMode,
-}
-
-impl GShell {
-	pub fn new() -> Self { Self { mode: GShellMode::Pty } }
-
-	pub fn mode(&self) -> GShellMode { self.mode }
-
-	pub fn enter_gnative(&mut self) { self.mode = GShellMode::GNative; }
-}
-
-impl Default for GShell {
-	fn default() -> Self { Self::new() }
-}
 
 #[derive(kudi::DepInj)]
 #[target(GShellService)]
 pub struct GShellServiceState {
 	pty_service_state:     PtyServiceState,
 	gnative_service_state: GNativeServiceState,
-	shells:                RefCell<HashMap<PaneId, GShell>>,
+	shells:                RefCell<HashMap<GShellId, GShell>>,
 }
 
 impl GShellServiceState {
@@ -66,12 +49,12 @@ impl GShellServiceState {
 
 	pub fn gnative_service_state(&self) -> &GNativeServiceState { &self.gnative_service_state }
 
-	fn ensure_pane_gshell_state(&self, pane_id: PaneId) {
-		self.shells.borrow_mut().entry(pane_id).or_default();
+	fn mode_of(&self, gshell_id: GShellId) -> GShellMode {
+		self.shells.borrow().get(&gshell_id).map(GShell::mode).unwrap_or(GShellMode::Pty)
 	}
 
-	fn mode_of(&self, pane_id: PaneId) -> GShellMode {
-		self.shells.borrow().get(&pane_id).map(GShell::mode).unwrap_or(GShellMode::Pty)
+	fn pty_host_id_of(&self, gshell_id: GShellId) -> Option<PtyHostId> {
+		self.shells.borrow().get(&gshell_id).map(GShell::pty_host_id)
 	}
 }
 
@@ -80,11 +63,12 @@ impl Default for GShellServiceState {
 }
 
 impl<Deps> IGShellService for GShellService<Deps>
-where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
+where Deps:
+		AsRef<GShellServiceState> + IPtyHostRuntimeRepositoryProvider + IPtyService + IGNativeService
 {
-	fn ensure_pane_gshell(
+	fn ensure_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
@@ -92,9 +76,23 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) {
 		let state: &GShellServiceState = self.prj_ref().as_ref();
-		state.ensure_pane_gshell_state(pane_id);
-		self.prj_ref().ensure_pane_pty(
-			pane_id,
+		let pty_host_id = if let Some(pty_host_id) = state.pty_host_id_of(gshell_id) {
+			pty_host_id
+		} else {
+			let Ok(pty_host_raw_id) =
+				self.prj_ref().pty_host_runtime_repository().insert(PtyHost::new(term_size))
+			else {
+				return;
+			};
+			let pty_host_id = PtyHostId::new(pty_host_raw_id);
+			state.shells.borrow_mut().insert(gshell_id, GShell::new(pty_host_id));
+			pty_host_id
+		};
+
+		sync_pty_host_size(self.prj_ref().pty_host_runtime_repository(), pty_host_id, term_size);
+		self.prj_ref().ensure_gshell_pty(
+			gshell_id,
+			pty_host_id,
 			proxy,
 			pty_size,
 			term_size,
@@ -106,8 +104,13 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 	fn route_input_to_gshell(&self, input: GShellInput) {
 		let state: &GShellServiceState = self.prj_ref().as_ref();
 
-		match state.mode_of(input.pane_id) {
-			GShellMode::Pty => self.prj_ref().send_pane_pty_input(input),
+		match state.mode_of(input.gshell_id) {
+			GShellMode::Pty => {
+				let Some(pty_host_id) = state.pty_host_id_of(input.gshell_id) else {
+					return;
+				};
+				self.prj_ref().send_pty_host_input(pty_host_id, input.event);
+			}
 			GShellMode::GNative => {
 				if matches!(
 					input.event,
@@ -117,23 +120,47 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 						| GShellInputEvent::Window(WindowInputEvent::Ime(_))
 						| GShellInputEvent::Window(WindowInputEvent::Paste(_))
 				) {
-					self.prj_ref().ensure_pane_gnative(input.pane_id);
+					self.prj_ref().ensure_gshell_gnative(input.gshell_id);
 				}
 			}
 		}
 	}
 
-	fn resize_pane_gshell(
+	fn resize_gshell(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	) {
 		let state: &GShellServiceState = self.prj_ref().as_ref();
 
-		match state.mode_of(pane_id) {
-			GShellMode::Pty => self.prj_ref().resize_pane_pty(pane_id, pty_size, term_size),
-			GShellMode::GNative => self.prj_ref().ensure_pane_gnative(pane_id),
+		match state.mode_of(gshell_id) {
+			GShellMode::Pty => {
+				let Some(pty_host_id) = state.pty_host_id_of(gshell_id) else {
+					return;
+				};
+				sync_pty_host_size(self.prj_ref().pty_host_runtime_repository(), pty_host_id, term_size);
+				self.prj_ref().resize_pty_host(pty_host_id, pty_size, term_size);
+			}
+			GShellMode::GNative => self.prj_ref().ensure_gshell_gnative(gshell_id),
 		}
 	}
+}
+
+fn sync_pty_host_size<Repo>(
+	repository: &Repo,
+	pty_host_id: PtyHostId,
+	grid_size: TerminalGridSize,
+) where
+	Repo: germinal_ports::repository::IRepository<Id = u64, Aggregate = PtyHost>,
+{
+	let Ok(Some(mut pty_host)) = repository.get(pty_host_id.value()) else {
+		return;
+	};
+
+	if !pty_host.resize(grid_size) {
+		return;
+	}
+
+	let _ = repository.update(pty_host_id.value(), pty_host);
 }

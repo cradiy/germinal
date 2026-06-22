@@ -9,12 +9,12 @@ use std::{
 };
 
 use germinal_domain::{
-	pty_host::terminal_size::{TerminalGridSize, TerminalPtySize},
-	workspace::pane_id::PaneId,
+	gshell::vo::gshell_id::GShellId,
+	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 use germinal_ports::{
 	event::{
-		gshell_input::{GShellInput, GShellInputEvent},
+		gshell_input::GShellInputEvent,
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
@@ -24,6 +24,7 @@ use germinal_ports::{
 	pty_host::{
 		pty_backend::{IPtyBackend, IPtyBackendProvider},
 		pty_input::{PtyInput, PtyInputSender},
+		terminal_size::TerminalPtySize,
 		worker_input::TerminalWorkerInput,
 	},
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
@@ -39,15 +40,15 @@ struct PtyPaneRuntime {
 #[derive(kudi::DepInj)]
 #[target(PtyService)]
 pub struct PtyServiceState {
-	pane_runtimes: RefCell<HashMap<PaneId, PtyPaneRuntime>>,
-	modifiers:     RefCell<WindowInputModifiers>,
+	pty_host_runtimes: RefCell<HashMap<PtyHostId, PtyPaneRuntime>>,
+	modifiers:         RefCell<WindowInputModifiers>,
 }
 
 impl PtyServiceState {
 	pub fn new() -> Self {
 		Self {
-			pane_runtimes: RefCell::new(HashMap::new()),
-			modifiers:     RefCell::new(WindowInputModifiers::new(false, false)),
+			pty_host_runtimes: RefCell::new(HashMap::new()),
+			modifiers:         RefCell::new(WindowInputModifiers::new(false, false)),
 		}
 	}
 }
@@ -61,9 +62,10 @@ where Deps: AsRef<PtyServiceState>
 		+ IPtyBackendProvider
 		+ IWorkerService<TerminalWorkerSender = SyncSender<TerminalWorkerInput>>
 {
-	fn ensure_pane_pty(
+	fn ensure_gshell_pty(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
+		pty_host_id: PtyHostId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
@@ -71,12 +73,12 @@ where Deps: AsRef<PtyServiceState>
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) {
 		let state: &PtyServiceState = self.prj_ref().as_ref();
-		if state.pane_runtimes.borrow().contains_key(&pane_id) {
+		if state.pty_host_runtimes.borrow().contains_key(&pty_host_id) {
 			return;
 		}
 
 		let Some(terminal_worker_sender) = self.prj_ref().spawn_terminal_worker(
-			pane_id,
+			gshell_id,
 			term_size,
 			proxy.clone(),
 			surface_snapshot_tx,
@@ -87,7 +89,8 @@ where Deps: AsRef<PtyServiceState>
 
 		let pty_input_sender = self.prj_ref().pty_backend().spawn_pty(
 			proxy,
-			pane_id,
+			gshell_id,
+			pty_host_id,
 			pty_size,
 			terminal_worker_sender.clone(),
 		);
@@ -95,17 +98,17 @@ where Deps: AsRef<PtyServiceState>
 		let _ = terminal_worker_sender.send(TerminalWorkerInput::SetPtyInput(pty_input_sender.clone()));
 
 		state
-			.pane_runtimes
+			.pty_host_runtimes
 			.borrow_mut()
-			.insert(pane_id, PtyPaneRuntime { pty_input_sender, terminal_worker_sender });
+			.insert(pty_host_id, PtyPaneRuntime { pty_input_sender, terminal_worker_sender });
 	}
 
-	fn send_pane_pty_input(&self, input: GShellInput) {
+	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent) {
 		let state: &PtyServiceState = self.prj_ref().as_ref();
-		match input.event {
-			GShellInputEvent::Bytes(bytes) => send_pane_bytes(state, input.pane_id, bytes),
+		match event {
+			GShellInputEvent::Bytes(bytes) => send_pty_host_bytes(state, pty_host_id, bytes),
 			GShellInputEvent::Paste(text) => {
-				send_pane_bytes(state, input.pane_id, text.into_bytes());
+				send_pty_host_bytes(state, pty_host_id, text.into_bytes());
 			}
 			GShellInputEvent::Window(window_input) => match window_input {
 				WindowInputEvent::ModifiersChanged(modifiers) => {
@@ -116,29 +119,29 @@ where Deps: AsRef<PtyServiceState>
 					if let Some(bytes) =
 						translate_key_event(modifiers, key_state, &logical_key, text.as_deref())
 					{
-						send_pane_bytes(state, input.pane_id, bytes);
+						send_pty_host_bytes(state, pty_host_id, bytes);
 					}
 				}
 				WindowInputEvent::Ime(text) => {
 					if let Some(bytes) = translate_ime_commit(&text) {
-						send_pane_bytes(state, input.pane_id, bytes);
+						send_pty_host_bytes(state, pty_host_id, bytes);
 					}
 				}
 				WindowInputEvent::Paste(text) => {
-					send_pane_bytes(state, input.pane_id, text.into_bytes());
+					send_pty_host_bytes(state, pty_host_id, text.into_bytes());
 				}
 			},
 		}
 	}
 
-	fn resize_pane_pty(
+	fn resize_pty_host(
 		&self,
-		pane_id: PaneId,
+		pty_host_id: PtyHostId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	) {
 		let state: &PtyServiceState = self.prj_ref().as_ref();
-		let Some(runtime) = state.pane_runtimes.borrow().get(&pane_id).cloned() else {
+		let Some(runtime) = state.pty_host_runtimes.borrow().get(&pty_host_id).cloned() else {
 			return;
 		};
 
@@ -147,8 +150,8 @@ where Deps: AsRef<PtyServiceState>
 	}
 }
 
-fn send_pane_bytes(state: &PtyServiceState, pane_id: PaneId, bytes: Vec<u8>) {
-	let Some(runtime) = state.pane_runtimes.borrow().get(&pane_id).cloned() else {
+fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
+	let Some(runtime) = state.pty_host_runtimes.borrow().get(&pty_host_id).cloned() else {
 		return;
 	};
 

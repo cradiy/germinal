@@ -1,11 +1,11 @@
-use germinal_domain::workspace::pane_id::PaneId;
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 
 use crate::event::window_input_event::WindowInputEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GShellInput {
-	pub pane_id: PaneId,
-	pub event:   GShellInputEvent,
+	pub gshell_id: GShellId,
+	pub event:     GShellInputEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

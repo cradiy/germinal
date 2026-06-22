@@ -1,6 +1,6 @@
-use crate::pty_host::{
-	cell_size::TerminalCellSize, size_info::TerminalPadding, terminal_size::TerminalGridSize,
-};
+use germinal_domain::pty_host::terminal_size::TerminalGridSize;
+
+use crate::pty_host::{cell_size::TerminalCellSize, size_info::TerminalPadding};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalGridPixelRect {

@@ -1,4 +1,4 @@
-use germinal_domain::pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize};
+use germinal_ports::pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WgpuTerminalRenderTargetPlan {

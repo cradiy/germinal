@@ -12,7 +12,13 @@ fn main() {
 		}
 	};
 
-	let mut app = app::App::new(event_loop.create_proxy());
+	let mut app = match app::App::new(event_loop.create_proxy()) {
+		Ok(app) => app,
+		Err(error) => {
+			eprintln!("failed to create Germinal app: {error}");
+			return;
+		}
+	};
 
 	if let Err(error) = app.run(event_loop) {
 		eprintln!("failed to run Germinal: {error}");

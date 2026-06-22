@@ -1,9 +1,11 @@
+use germinal_domain::pty_host::terminal_size::TerminalGridSize;
+
 use crate::pty_host::{
 	cell_size::TerminalCellSize,
 	content_size::TerminalContentSize,
 	render_viewport::TerminalRenderViewport,
 	scale_factor::TerminalScaleFactor,
-	terminal_size::{TerminalGridSize, TerminalPtySize},
+	terminal_size::{TerminalPtySize, terminal_grid_size_from_content_pixels},
 	window_size::TerminalWindowSize,
 };
 
@@ -98,7 +100,8 @@ impl TerminalSizeInfo {
 			content_axis_px(window_size.height_px(), configured_padding.y_px());
 		let initial_content_size =
 			TerminalContentSize::new(initial_content_width_px, initial_content_height_px);
-		let grid_size = TerminalGridSize::from_content_pixels(initial_content_size, config.cell_size());
+		let grid_size =
+			terminal_grid_size_from_content_pixels(initial_content_size, config.cell_size());
 
 		let dynamic_padding = if config.dynamic_padding() {
 			dynamic_padding_for_grid(initial_content_size, config.cell_size(), grid_size)
@@ -110,7 +113,7 @@ impl TerminalSizeInfo {
 		let content_width_px = content_axis_px(window_size.width_px(), total_padding.x_px());
 		let content_height_px = content_axis_px(window_size.height_px(), total_padding.y_px());
 		let content_size = TerminalContentSize::new(content_width_px, content_height_px);
-		let grid_size = TerminalGridSize::from_content_pixels(content_size, config.cell_size());
+		let grid_size = terminal_grid_size_from_content_pixels(content_size, config.cell_size());
 
 		// Keep the pixel dimensions identical to the drawable content size used for
 		// the grid. This mirrors the single source of truth used by Alacritty's
@@ -170,7 +173,7 @@ impl TerminalSizeInfo {
 
 	pub fn is_consistent(self) -> bool {
 		let expected_grid_size =
-			TerminalGridSize::from_content_pixels(self.content_size, self.cell_size);
+			terminal_grid_size_from_content_pixels(self.content_size, self.cell_size);
 		let expected_pty_size = TerminalPtySize::from_content_pixels(self.content_size, self.cell_size);
 		let viewport = self.render_viewport();
 

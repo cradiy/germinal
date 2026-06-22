@@ -4,14 +4,15 @@ use std::{
 	thread,
 };
 
-use germinal_domain::{pty_host::terminal_size::TerminalPtySize, workspace::pane_id::PaneId};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
 	event::{
-		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 	},
 	pty_host::{
 		pty_input::{PtyInput, PtyInputReceiver},
+		terminal_size::TerminalPtySize,
 		worker_input::TerminalWorkerInput,
 	},
 };
@@ -21,7 +22,8 @@ use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
 
 pub(crate) fn spawn_blocking_bridge_thread(
 	proxy: RuntimeEventDispatcher,
-	pane_id: PaneId,
+	gshell_id: GShellId,
+	_pty_host_id: PtyHostId,
 	config: PtyBridgeConfig,
 	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	input_rx: PtyInputReceiver,
@@ -66,7 +68,7 @@ pub(crate) fn spawn_blocking_bridge_thread(
 		read_pty_to_terminal_worker(&mut reader, &terminal_worker_tx);
 
 		let _ = child.wait();
-		let _ = proxy.dispatch(RuntimeEvent::Pane(PaneRuntimeEvent::Closed { pane_id }));
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
 	});
 }
 

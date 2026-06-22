@@ -1,3 +1,5 @@
+pub mod render_generation;
+
 pub mod render_scheduler;
 
 pub mod render_pipeline;

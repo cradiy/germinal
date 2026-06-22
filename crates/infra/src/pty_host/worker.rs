@@ -9,13 +9,10 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use germinal_domain::{
-	pty_host::terminal_size::TerminalGridSize, rendering::render_target_id::RenderTargetId,
-	shared::seq::Seq, workspace::pane_id::PaneId,
-};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 use germinal_ports::{
 	event::{
-		runtime_event::{PaneRuntimeEvent, RuntimeEvent},
+		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::RuntimeEventDispatcher,
 	},
 	pty_host::{
@@ -27,18 +24,20 @@ use germinal_ports::{
 	rendering::{
 		frame_plan_builder::{BuildFramePlanTask, FramePlanBuilder},
 		frame_plan_presenter::FramePlanPresenter,
+		render_target_id::RenderTargetId,
 		surface_snapshot::{
 			RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
 		},
 	},
+	seq::Seq,
 };
 
 use crate::{
-	pty_host::alacritty_state_store::{AlacrittyTermSize, AlacrittyTermStateStore},
 	rendering::{
 		snapshot_frame_plan_builder::SnapshotFramePlanBuilder,
 		text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter,
 	},
+	repositories::alacritty_terminal_repository::{AlacrittyTermSize, AlacrittyTerminalRepository},
 };
 
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
@@ -52,7 +51,7 @@ pub struct TerminalWorker;
 impl TerminalWorker {
 	pub fn spawn(
 		proxy: RuntimeEventDispatcher,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
@@ -62,7 +61,7 @@ impl TerminalWorker {
 		thread::spawn(move || {
 			let mut runtime = TerminalWorkerRuntime::new(
 				proxy,
-				pane_id,
+				gshell_id,
 				to_alacritty_term_size(initial_size),
 				surface_snapshot_tx,
 				snapshot_wake_pending,
@@ -78,13 +77,13 @@ impl TerminalWorker {
 struct TerminalWorkerRuntime {
 	proxy: RuntimeEventDispatcher,
 
-	pane_id:   PaneId,
+	gshell_id: GShellId,
 	target_id: RenderTargetId,
 	seq:       u64,
 
-	term_store:         AlacrittyTermStateStore,
-	frame_plan_builder: SnapshotFramePlanBuilder<AlacrittyTermStateStore>,
-	surface_presenter:  TextSurfaceFramePlanPresenter,
+	terminal_repository: AlacrittyTerminalRepository,
+	frame_plan_builder:  SnapshotFramePlanBuilder<AlacrittyTerminalRepository>,
+	surface_presenter:   TextSurfaceFramePlanPresenter,
 
 	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
 	snapshot_wake_pending: Arc<AtomicBool>,
@@ -102,24 +101,24 @@ struct TerminalWorkerRuntime {
 impl TerminalWorkerRuntime {
 	fn new(
 		proxy: RuntimeEventDispatcher,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: AlacrittyTermSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Self {
-		let target_id = RenderTargetId::new(pane_id.value());
-		let term_store = AlacrittyTermStateStore::with_size(initial_size);
-		let frame_plan_builder = SnapshotFramePlanBuilder::new(term_store.clone());
+		let target_id = RenderTargetId::new(gshell_id.value());
+		let terminal_repository = AlacrittyTerminalRepository::with_size(initial_size);
+		let frame_plan_builder = SnapshotFramePlanBuilder::new(terminal_repository.clone());
 		let surface_presenter = TextSurfaceFramePlanPresenter::new();
 
 		Self {
 			proxy,
 
-			pane_id,
+			gshell_id,
 			target_id,
 			seq: 0,
 
-			term_store,
+			terminal_repository,
 			frame_plan_builder,
 			surface_presenter,
 
@@ -229,9 +228,9 @@ impl TerminalWorkerRuntime {
 		let started_at = Instant::now();
 
 		for bytes in chunks {
-			self.term_store.apply_bytes(self.target_id, seq, bytes);
+			self.terminal_repository.apply_bytes(self.target_id, seq, bytes);
 
-			let pending_pty_writes = self.term_store.take_pending_pty_writes(self.target_id);
+			let pending_pty_writes = self.terminal_repository.take_pending_pty_writes(self.target_id);
 			self.forward_pty_writes(pending_pty_writes);
 		}
 
@@ -251,7 +250,7 @@ impl TerminalWorkerRuntime {
 		let seq = Seq::new(self.seq);
 		let started_at = Instant::now();
 
-		self.term_store.resize(self.target_id, seq, size);
+		self.terminal_repository.resize(self.target_id, seq, size);
 
 		let elapsed = started_at.elapsed();
 
@@ -273,14 +272,14 @@ impl TerminalWorkerRuntime {
 			self.frame_plan_builder.build(BuildFramePlanTask { target_id: self.target_id, seq });
 
 		self.surface_presenter.present(&frame);
-		self.term_store.clear_damage_up_to(self.target_id, seq);
+		self.terminal_repository.clear_damage_up_to(self.target_id, seq);
 
 		let mut snapshot = self
 			.surface_presenter
 			.surface_snapshot_of(self.target_id)
 			.expect("surface snapshot should exist");
 		snapshot.cursor = self
-			.term_store
+			.terminal_repository
 			.cursor_position_0_based(self.target_id)
 			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y, focused: true });
 
@@ -303,9 +302,10 @@ impl TerminalWorkerRuntime {
 			return;
 		}
 
-		let _ = self
-			.proxy
-			.dispatch(RuntimeEvent::Pane(PaneRuntimeEvent::FrameReady { pane_id: self.pane_id, seq }));
+		let _ = self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady {
+			gshell_id: self.gshell_id,
+			seq,
+		}));
 	}
 }
 
@@ -484,12 +484,18 @@ impl PlatformTerminalWorkerBackend {
 impl ITerminalWorkerBackend for PlatformTerminalWorkerBackend {
 	fn spawn_terminal_worker(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> SyncSender<TerminalWorkerInput> {
-		TerminalWorker::spawn(proxy, pane_id, initial_size, surface_snapshot_tx, snapshot_wake_pending)
+		TerminalWorker::spawn(
+			proxy,
+			gshell_id,
+			initial_size,
+			surface_snapshot_tx,
+			snapshot_wake_pending,
+		)
 	}
 }

@@ -1,4 +1,6 @@
-use germinal_domain::{gshell::gshell_id::GShellId, shared::seq::Seq};
+use germinal_domain::gshell::gshell_id::GShellId;
+
+use crate::seq::Seq;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GShellOutputEvent {

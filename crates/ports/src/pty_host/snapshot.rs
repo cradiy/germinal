@@ -1,6 +1,7 @@
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
-
-use crate::rendering::frame_plan_builder::TextStyleDto;
+use crate::{
+	rendering::{frame_plan_builder::TextStyleDto, render_target_id::RenderTargetId},
+	seq::Seq,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSnapshot {

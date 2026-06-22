@@ -1,6 +1,4 @@
-pub mod rendering;
-
-pub mod shared;
+pub mod aggregate_root;
 
 pub mod workspace;
 

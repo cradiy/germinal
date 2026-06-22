@@ -1,4 +1,4 @@
-use germinal_domain::pty_host::{
+use crate::pty_host::{
 	size_info::TerminalSizeInfo, window_metrics::TerminalWindowMetrics,
 	window_size::TerminalWindowSize,
 };

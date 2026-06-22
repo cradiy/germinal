@@ -1,7 +1,21 @@
+pub mod cell_size;
+pub mod content_size;
+pub mod font_config;
+pub mod font_family;
+pub mod font_size;
+pub mod font_weight;
+pub mod glyph_render_config;
 pub mod pty_backend;
 pub mod pty_input;
+pub mod profile;
+pub mod render_viewport;
+pub mod scale_factor;
+pub mod size_info;
+pub mod terminal_size;
 pub mod output_applier;
-
 pub mod snapshot;
+pub mod width;
+pub mod window_metrics;
+pub mod window_size;
 pub mod worker_backend;
 pub mod worker_input;

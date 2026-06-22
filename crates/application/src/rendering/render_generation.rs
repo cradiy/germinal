@@ -1,4 +1,4 @@
-use crate::shared::seq::Seq;
+use germinal_ports::seq::Seq;
 
 #[derive(Debug, Clone)]
 pub struct RenderGenerationState {

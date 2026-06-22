@@ -4,7 +4,7 @@ use std::{
 	task::{Poll, Waker},
 };
 
-use germinal_domain::pty_host::terminal_size::TerminalPtySize;
+use crate::pty_host::terminal_size::TerminalPtySize;
 
 #[derive(Debug)]
 pub enum PtyInput {

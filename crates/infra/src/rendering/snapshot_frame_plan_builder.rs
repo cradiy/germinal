@@ -103,12 +103,15 @@ fn rows_to_render<T>(
 
 #[cfg(test)]
 mod tests {
-	use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
 	use germinal_ports::{
 		pty_host::snapshot::{
 			TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider, TerminalTextRunSnapshot,
 		},
-		rendering::frame_plan_builder::{RgbColorDto, TextStyleDto},
+		rendering::{
+			frame_plan_builder::{RgbColorDto, TextStyleDto},
+			render_target_id::RenderTargetId,
+		},
+		seq::Seq,
 	};
 
 	use super::*;

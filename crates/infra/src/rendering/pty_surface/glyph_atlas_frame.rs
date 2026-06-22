@@ -1,7 +1,9 @@
 use std::{cell::RefCell, collections::BTreeSet};
 
-use germinal_domain::{rendering::render_target_id::RenderTargetId, shared::seq::Seq};
-use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
+use germinal_ports::{
+	rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
+	seq::Seq,
+};
 
 use crate::rendering::pty_surface::{
 	crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError},

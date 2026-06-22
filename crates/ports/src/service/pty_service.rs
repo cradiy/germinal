@@ -1,29 +1,31 @@
 use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 
 use germinal_domain::{
-	pty_host::terminal_size::{TerminalGridSize, TerminalPtySize},
-	workspace::pane_id::PaneId,
+	gshell::vo::gshell_id::GShellId,
+	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 
 use crate::{
-	event::{gshell_input::GShellInput, runtime_event_dispatcher::RuntimeEventDispatcher},
+	event::{gshell_input::GShellInputEvent, runtime_event_dispatcher::RuntimeEventDispatcher},
+	pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
 pub trait IPtyService {
-	fn ensure_pane_pty(
+	fn ensure_gshell_pty(
 		&self,
-		pane_id: PaneId,
+		gshell_id: GShellId,
+		pty_host_id: PtyHostId,
 		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	);
-	fn send_pane_pty_input(&self, input: GShellInput);
-	fn resize_pane_pty(
+	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent);
+	fn resize_pty_host(
 		&self,
-		pane_id: PaneId,
+		pty_host_id: PtyHostId,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 	);
