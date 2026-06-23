@@ -22,6 +22,7 @@ use germinal_ports::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		runtime_event_dispatcher::{IRuntimeEventDispatcher, IRuntimeEventDispatcherProvider},
 	},
+	gnative::{rpc::IGNativeRpcClientProvider, session::GNativeSessionDescriptor},
 	pty_host::{
 		pty_backend::IPtyBackendProvider, size_info::TerminalSizeInfo, terminal_size::TerminalPtySize,
 		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
@@ -134,6 +135,13 @@ impl ITerminalWorkerBackendProvider for App {
 	}
 }
 
+impl IGNativeRpcClientProvider for App {
+	type GNativeRpcClient =
+		germinal_infra::gnative::local_rpc::LocalGNativeRpcClient<AppRuntimeEventDispatcher>;
+
+	fn gnative_rpc_client(&self) -> &Self::GNativeRpcClient { &self.gnative_rpc_client }
+}
+
 impl IRenderRuntimeStore for App {
 	type WindowRuntime =
 		germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalWindowRuntime;
@@ -165,6 +173,14 @@ impl IGShellService for App {
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		)
+	}
+
+	fn enter_gnative_mode(&self, gshell_id: GShellId) {
+		GShellService::inj_ref(self).enter_gnative_mode(gshell_id)
+	}
+
+	fn exit_gnative_mode(&self, gshell_id: GShellId) {
+		GShellService::inj_ref(self).exit_gnative_mode(gshell_id)
 	}
 
 	fn route_input_to_gshell(&self, input: GShellInput) {
@@ -218,6 +234,22 @@ impl IPtyService for App {
 impl IGNativeService for App {
 	fn ensure_gshell_gnative(&self, gshell_id: GShellId) {
 		GNativeService::inj_ref(self).ensure_gshell_gnative(gshell_id)
+	}
+
+	fn enter_gnative_session(&self, descriptor: GNativeSessionDescriptor) -> Result<(), String> {
+		GNativeService::inj_ref(self).enter_gnative_session(descriptor)
+	}
+
+	fn exit_gnative_session(&self, gshell_id: GShellId) {
+		GNativeService::inj_ref(self).exit_gnative_session(gshell_id)
+	}
+
+	fn route_gnative_input(&self, input: GShellInput) {
+		GNativeService::inj_ref(self).route_gnative_input(input)
+	}
+
+	fn resize_gnative_session(&self, gshell_id: GShellId, term_size: TerminalGridSize) {
+		GNativeService::inj_ref(self).resize_gnative_session(gshell_id, term_size)
 	}
 }
 

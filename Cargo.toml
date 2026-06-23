@@ -5,6 +5,9 @@ members = [
   "crates/ports",
   "crates/application",
   "crates/infra",
+  "crates/gnative_sdk",
+  "crates/gnative_ratatui_backend",
+  "crates/gnative_demo",
   "app",
 ]
 
@@ -16,16 +19,21 @@ repository = "https://github.com/zooeywm/germinal"
 authors    = ["zooeywm <zooeywm@gmail.com>"]
 
 [workspace.dependencies]
-germinal-domain      = { path = "crates/domain" }
-germinal-ports       = { path = "crates/ports" }
-germinal-application = { path = "crates/application" }
-germinal-infra       = { path = "crates/infra" }
+germinal-domain                  = { path = "crates/domain" }
+germinal-ports                   = { path = "crates/ports" }
+germinal-application             = { path = "crates/application" }
+germinal-infra                   = { path = "crates/infra" }
+germinal-gnative-sdk             = { path = "crates/gnative_sdk" }
+germinal-gnative-ratatui-backend = { path = "crates/gnative_ratatui_backend" }
 
 # util
 smol_str      = "0.2"
 unicode-width = "0.2"
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
+crossterm     = "0.29"
+ratatui-core  = { version = "0.1.2", features = ["std"] }
+ratatui       = "0.30.2"
 
 # application
 kudi = "0.1"

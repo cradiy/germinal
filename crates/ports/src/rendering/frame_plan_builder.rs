@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{rendering::render_target_id::RenderTargetId, seq::Seq};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +15,7 @@ pub struct BuiltFramePlan {
 	pub commands:  Vec<RenderCommandDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderCommandDto {
 	Clear,
 	ClearLine { y: u32 },
@@ -21,7 +23,7 @@ pub enum RenderCommandDto {
 	StyledTextRun { x: u32, y: u32, text: String, style: TextStyleDto },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextStyleDto {
 	pub foreground: Option<RgbColorDto>,
 	pub background: Option<RgbColorDto>,
@@ -46,7 +48,7 @@ impl Default for TextStyleDto {
 	fn default() -> Self { Self::plain() }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RgbColorDto {
 	pub red:   u8,
 	pub green: u8,

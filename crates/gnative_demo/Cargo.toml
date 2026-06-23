@@ -1,0 +1,14 @@
+[package]
+name                 = "germinal-gnative-demo"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+authors.workspace    = true
+
+[dependencies]
+germinal-gnative-sdk.workspace             = true
+germinal-gnative-ratatui-backend.workspace = true
+germinal-ports.workspace                   = true
+ratatui.workspace                          = true
+crossterm.workspace                        = true

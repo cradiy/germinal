@@ -1,3 +1,4 @@
+pub mod gnative;
 pub mod pty;
 pub mod repositories;
 pub mod rendering;

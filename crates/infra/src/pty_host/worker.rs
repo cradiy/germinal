@@ -16,6 +16,7 @@ use germinal_ports::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::IRuntimeEventDispatcher,
 	},
+	gnative::session::GNativeSessionDescriptor,
 	pty_host::{
 		pty_input::{PtyInput, PtyInputSender},
 		snapshot::TerminalSnapshotProvider,
@@ -30,7 +31,10 @@ use germinal_ports::{
 };
 use rayon::ThreadPool;
 
-use crate::pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore};
+use crate::{
+	gnative::control_sequence::GNativeEnterControlSequenceDecoder,
+	pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
+};
 
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
@@ -249,7 +253,8 @@ struct TerminalWorkerRuntime<Dispatch> {
 
 	perf: TerminalWorkerPerf,
 
-	pty_input_tx: Option<PtyInputSender>,
+	pty_input_tx:          Option<PtyInputSender>,
+	gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
 }
 
 impl<Dispatch> TerminalWorkerRuntime<Dispatch>
@@ -285,6 +290,7 @@ where Dispatch: IRuntimeEventDispatcher
 			perf: TerminalWorkerPerf::new(),
 
 			pty_input_tx: None,
+			gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
 		}
 	}
 
@@ -337,7 +343,7 @@ where Dispatch: IRuntimeEventDispatcher
 		let chunks = std::mem::take(&mut self.pending_chunks);
 		self.pending_bytes_len = 0;
 
-		self.unpublished_seq = Some(self.apply_byte_chunks(&chunks));
+		self.unpublished_seq = self.apply_byte_chunks(&chunks);
 	}
 
 	fn forward_pty_writes(&self, writes: Vec<Vec<u8>>) {
@@ -354,17 +360,39 @@ where Dispatch: IRuntimeEventDispatcher
 		}
 	}
 
-	fn apply_byte_chunks(&mut self, chunks: &[Vec<u8>]) -> Seq {
+	fn apply_byte_chunks(&mut self, chunks: &[Vec<u8>]) -> Option<Seq> {
 		self.seq += 1;
 
 		let seq = Seq::new(self.seq);
 		let started_at = Instant::now();
+		let mut applied_visible_bytes = false;
+		let mut session_descriptor = None;
 
 		for bytes in chunks {
-			self.terminal_store.apply_bytes(self.target_id, seq, bytes);
+			let decode_result = self.gnative_enter_decoder.decode(bytes);
+			if let Some(parsed_descriptor) = decode_result.descriptor {
+				session_descriptor = Some(GNativeSessionDescriptor {
+					gshell_id:        self.gshell_id,
+					endpoint:         parsed_descriptor.endpoint,
+					token:            parsed_descriptor.token,
+					protocol_version: parsed_descriptor.protocol_version,
+				});
+			}
+
+			if decode_result.visible_bytes.is_empty() {
+				continue;
+			}
+
+			applied_visible_bytes = true;
+			self.terminal_store.apply_bytes(self.target_id, seq, &decode_result.visible_bytes);
 
 			let pending_pty_writes = self.terminal_store.take_pending_pty_writes(self.target_id);
 			self.forward_pty_writes(pending_pty_writes);
+		}
+
+		if let Some(descriptor) = session_descriptor {
+			let _ =
+				self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { descriptor }));
 		}
 
 		let elapsed = started_at.elapsed();
@@ -374,7 +402,7 @@ where Dispatch: IRuntimeEventDispatcher
 		self.perf.apply_time += elapsed;
 		self.perf.apply_max = self.perf.apply_max.max(elapsed);
 
-		seq
+		applied_visible_bytes.then_some(seq)
 	}
 
 	fn resize(&mut self, size: AlacrittyTermSize) -> Seq {
@@ -713,6 +741,7 @@ mod tests {
 			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 			runtime_event_dispatcher::IRuntimeEventDispatcher,
 		},
+		gnative::session::GNativeSessionDescriptor,
 		pty_host::worker_backend::ITerminalWorkerBackend,
 		rendering::surface_snapshot::RenderSurfaceSnapshot,
 	};
@@ -779,6 +808,59 @@ mod tests {
 		let mut event_targets = vec![gshell_id_of(first_event), gshell_id_of(second_event)];
 		event_targets.sort_unstable();
 		assert_eq!(event_targets, vec![1, 2]);
+	}
+
+	#[test]
+	fn terminal_worker_strips_enter_gnative_control_sequence_and_dispatches_mode_switch() {
+		let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+		let backend =
+			PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+		let input = backend.spawn_terminal_worker(
+			GShellId::new(3),
+			TerminalGridSize::new(80, 24),
+			snapshot_tx,
+			Arc::new(AtomicBool::new(false)),
+		);
+
+		input
+			.send(germinal_ports::pty_host::worker_input::TerminalWorkerInput::Bytes(
+				b"left\x1bPgerminal-gnative;version=1;endpoint=test;token=secret\x1b\\right".to_vec(),
+			))
+			.expect("terminal input should send");
+
+		let snapshot = snapshot_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("surface snapshot should arrive");
+		let rendered_text: String =
+			snapshot.rows.iter().flat_map(|row| row.runs.iter()).map(|run| run.text.as_str()).collect();
+		assert_eq!(rendered_text.trim_end(), "leftright");
+
+		let first_event = event_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("enter-gnative event should arrive");
+		assert_eq!(
+			first_event,
+			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative {
+				descriptor: GNativeSessionDescriptor {
+					gshell_id:        GShellId::new(3),
+					endpoint:         "test".to_string(),
+					token:            "secret".to_string(),
+					protocol_version: 1,
+				},
+			})
+		);
+
+		let second_event = event_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("frame-ready event should arrive");
+		assert!(matches!(
+			second_event,
+			RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady {
+				gshell_id,
+				..
+			}) if gshell_id == GShellId::new(3)
+		));
 	}
 
 	fn gshell_id_of(event: RuntimeEvent) -> u64 {

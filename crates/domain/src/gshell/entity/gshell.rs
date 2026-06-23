@@ -17,6 +17,8 @@ impl GShell {
 	pub fn mode(&self) -> GShellMode { self.mode }
 
 	pub fn enter_gnative(&mut self) { self.mode = GShellMode::GNative; }
+
+	pub fn exit_gnative(&mut self) { self.mode = GShellMode::Pty; }
 }
 
 impl Default for GShell {

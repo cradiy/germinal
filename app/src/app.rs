@@ -26,8 +26,8 @@ use germinal_ports::{
 	pty_host::window_size::TerminalWindowSize,
 	rendering::render_target_id::RenderTargetId,
 	service::{
-		gshell_service::IGShellService, render_service::IRenderService,
-		workspace_service::IWorkspaceService,
+		gnative_service::IGNativeService, gshell_service::IGShellService,
+		render_service::IRenderService, workspace_service::IWorkspaceService,
 	},
 };
 use winit::{
@@ -52,6 +52,8 @@ pub struct App {
 	workspace_persistence_repository: SqliteRepository<Workspace>,
 	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
 	pty_backend:                      PlatformPtyBackend,
+	gnative_rpc_client:
+		germinal_infra::gnative::local_rpc::LocalGNativeRpcClient<AppRuntimeEventDispatcher>,
 	terminal_worker_backend:          PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
 	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
@@ -74,6 +76,8 @@ impl App {
 			)?,
 			runtime_event_dispatcher:         runtime_event_dispatcher.clone(),
 			pty_backend:                      PlatformPtyBackend::new(),
+			gnative_rpc_client:
+				germinal_infra::gnative::local_rpc::LocalGNativeRpcClient::new(),
 			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(
 				runtime_event_dispatcher,
 			),
@@ -81,6 +85,10 @@ impl App {
 			render_runtime:                   None,
 			render_window_id:                 None,
 		};
+
+		app
+			.gnative_rpc_client
+			.configure(app.runtime_event_dispatcher.clone(), app.surface_snapshot_sender());
 
 		app.restore_workspace()?;
 
@@ -155,6 +163,24 @@ impl ApplicationHandler<RuntimeEvent> for App {
 
 	fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
 		match event {
+			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { descriptor }) => {
+				if let Err(error) = self.enter_gnative_session(descriptor.clone()) {
+					eprintln!(
+						"failed to enter gnative session for {}: {error}",
+						descriptor.gshell_id.value()
+					);
+				} else {
+					self.enter_gnative_mode(descriptor.gshell_id);
+					let size_info = self.current_terminal_size_info();
+					self.resize_gshell(descriptor.gshell_id, size_info.pty_size(), size_info.grid_size());
+				}
+			}
+			RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }) => {
+				self.exit_gnative_session(gshell_id);
+				self.exit_gnative_mode(gshell_id);
+				self.consume_latest_terminal_snapshot();
+				self.request_redraw();
+			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { .. }) => {
 				self.consume_latest_terminal_snapshot();
 				self.request_redraw();

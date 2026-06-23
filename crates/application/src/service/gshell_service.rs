@@ -12,10 +12,7 @@ use germinal_domain::{
 	pty_host::{entity::pty_host::PtyHost, pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 use germinal_ports::{
-	event::{
-		gshell_input::{GShellInput, GShellInputEvent},
-		window_input_event::WindowInputEvent,
-	},
+	event::gshell_input::GShellInput,
 	pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 	service::{
@@ -49,6 +46,22 @@ impl GShellServiceState {
 	pub fn pty_service_state(&self) -> &PtyServiceState { &self.pty_service_state }
 
 	pub fn gnative_service_state(&self) -> &GNativeServiceState { &self.gnative_service_state }
+
+	pub fn enter_gnative_mode(&self, gshell_id: GShellId) {
+		let mut shells = self.shells.borrow_mut();
+		let Some(gshell) = shells.get_mut(&gshell_id) else {
+			return;
+		};
+		gshell.enter_gnative();
+	}
+
+	pub fn exit_gnative_mode(&self, gshell_id: GShellId) {
+		let mut shells = self.shells.borrow_mut();
+		let Some(gshell) = shells.get_mut(&gshell_id) else {
+			return;
+		};
+		gshell.exit_gnative();
+	}
 
 	fn mode_of(&self, gshell_id: GShellId) -> GShellMode {
 		self.shells.borrow().get(&gshell_id).map(GShell::mode).unwrap_or(GShellMode::Pty)
@@ -108,6 +121,16 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		);
 	}
 
+	fn enter_gnative_mode(&self, gshell_id: GShellId) {
+		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+		state.enter_gnative_mode(gshell_id);
+	}
+
+	fn exit_gnative_mode(&self, gshell_id: GShellId) {
+		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+		state.exit_gnative_mode(gshell_id);
+	}
+
 	fn route_input_to_gshell(&self, input: GShellInput) {
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 
@@ -118,18 +141,7 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 				};
 				self.prj_ref().send_pty_host_input(pty_host_id, input.event);
 			}
-			GShellMode::GNative => {
-				if matches!(
-					input.event,
-					GShellInputEvent::Bytes(_)
-						| GShellInputEvent::Paste(_)
-						| GShellInputEvent::Window(WindowInputEvent::Key { .. })
-						| GShellInputEvent::Window(WindowInputEvent::Ime(_))
-						| GShellInputEvent::Window(WindowInputEvent::Paste(_))
-				) {
-					self.prj_ref().ensure_gshell_gnative(input.gshell_id);
-				}
-			}
+			GShellMode::GNative => self.prj_ref().route_gnative_input(input),
 		}
 	}
 
@@ -149,7 +161,32 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 				state.sync_pty_host_size(pty_host_id, term_size);
 				self.prj_ref().resize_pty_host(pty_host_id, pty_size, term_size);
 			}
-			GShellMode::GNative => self.prj_ref().ensure_gshell_gnative(gshell_id),
+			GShellMode::GNative => self.prj_ref().resize_gnative_session(gshell_id, term_size),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use germinal_domain::{
+		gshell::{entity::gshell_mode::GShellMode, vo::gshell_id::GShellId},
+		pty_host::terminal_size::TerminalGridSize,
+	};
+
+	use super::GShellServiceState;
+
+	#[test]
+	fn state_switches_between_pty_and_gnative_modes() {
+		let state = GShellServiceState::new();
+		let gshell_id = GShellId::new(7);
+		state.create_pty_host(gshell_id, TerminalGridSize::new(80, 24));
+
+		assert_eq!(state.mode_of(gshell_id), GShellMode::Pty);
+
+		state.enter_gnative_mode(gshell_id);
+		assert_eq!(state.mode_of(gshell_id), GShellMode::GNative);
+
+		state.exit_gnative_mode(gshell_id);
+		assert_eq!(state.mode_of(gshell_id), GShellMode::Pty);
 	}
 }
