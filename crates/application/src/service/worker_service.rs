@@ -6,7 +6,6 @@ use std::sync::{
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 use germinal_ports::{
-	event::runtime_event_dispatcher::IRuntimeEventDispatcherProvider,
 	pty_host::{
 		worker_backend::{ITerminalWorkerBackend, ITerminalWorkerBackendProvider},
 		worker_input::TerminalWorkerInput,
@@ -28,14 +27,11 @@ impl Default for WorkerServiceState {
 }
 
 impl<Deps> IWorkerService for WorkerService<Deps>
-where Deps:
-		AsRef<WorkerServiceState> + IRuntimeEventDispatcherProvider + ITerminalWorkerBackendProvider
+where Deps: AsRef<WorkerServiceState> + ITerminalWorkerBackendProvider
 {
 	type TerminalWorkerSender = SyncSender<TerminalWorkerInput>;
 
-	fn start_worker_pool(&self) {
-		// Current PTY path spawns one terminal worker per pane.
-	}
+	fn start_worker_pool(&self) { self.prj_ref().terminal_worker_backend().start_worker_pool(); }
 
 	fn spawn_terminal_worker(
 		&self,
@@ -44,10 +40,10 @@ where Deps:
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<SyncSender<TerminalWorkerInput>> {
+		self.prj_ref().terminal_worker_backend().start_worker_pool();
 		Some(self.prj_ref().terminal_worker_backend().spawn_terminal_worker(
 			gshell_id,
 			initial_size,
-			self.prj_ref().runtime_event_dispatcher().clone(),
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		))

@@ -52,7 +52,7 @@ pub struct App {
 	workspace_persistence_repository: SqliteRepository<Workspace>,
 	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
 	pty_backend:                      PlatformPtyBackend,
-	terminal_worker_backend:          PlatformTerminalWorkerBackend,
+	terminal_worker_backend:          PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
 	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
 	render_window_id:                 Option<WindowId>,
@@ -60,6 +60,8 @@ pub struct App {
 
 impl App {
 	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Result<Self, String> {
+		let runtime_event_dispatcher = AppRuntimeEventDispatcher { proxy: runtime_event_proxy };
+
 		let app = Self {
 			workspace_service_state:          WorkspaceServiceState::new(),
 			gshell_service_state:             GShellServiceState::new(),
@@ -70,9 +72,11 @@ impl App {
 				"germinal-workspace.sqlite3",
 				"workspace",
 			)?,
-			runtime_event_dispatcher:         AppRuntimeEventDispatcher { proxy: runtime_event_proxy },
+			runtime_event_dispatcher:         runtime_event_dispatcher.clone(),
 			pty_backend:                      PlatformPtyBackend::new(),
-			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(),
+			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(
+				runtime_event_dispatcher,
+			),
 			render_runtime_factory:           WgpuTerminalWindowRuntimeFactory::new(),
 			render_runtime:                   None,
 			render_window_id:                 None,

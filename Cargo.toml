@@ -40,6 +40,7 @@ portable-pty       = "0.9"
 rusqlite           = { version = "0.31", features = ["bundled"] }
 nix                = { version = "0.31", default-features = false }
 compio             = { version = "0.19", default-features = false }
+rayon              = "1"
 
 [profile.product]
 inherits      = "release"

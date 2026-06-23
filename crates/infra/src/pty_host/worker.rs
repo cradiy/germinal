@@ -1,9 +1,10 @@
 use std::{
 	env,
+	num::NonZeroUsize,
 	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-		mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError},
+		Arc, OnceLock,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+		mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
 	},
 	thread,
 	time::{Duration, Instant},
@@ -27,6 +28,7 @@ use germinal_ports::{
 	},
 	seq::Seq,
 };
+use rayon::ThreadPool;
 
 use crate::pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore};
 
@@ -36,35 +38,195 @@ const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
 const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(2);
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
+const TERMINAL_WORKER_POOL_ENV: &str = "GERMINAL_TERMINAL_WORKER_THREADS";
 
-pub struct TerminalWorker;
+struct TerminalWorkerRegistration<Dispatch> {
+	proxy:                 Dispatch,
+	gshell_id:             GShellId,
+	initial_size:          TerminalGridSize,
+	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
+	snapshot_wake_pending: Arc<AtomicBool>,
+	input_rx:              Receiver<TerminalWorkerInput>,
+}
 
-impl TerminalWorker {
-	pub fn spawn<Dispatch>(
+struct TerminalWorkerHandle<Dispatch> {
+	runtime:  TerminalWorkerRuntime<Dispatch>,
+	input_rx: Receiver<TerminalWorkerInput>,
+}
+
+enum TerminalWorkerTick {
+	Idle,
+	Progressed,
+	Finished,
+}
+
+impl<Dispatch> TerminalWorkerHandle<Dispatch>
+where Dispatch: IRuntimeEventDispatcher
+{
+	fn new(registration: TerminalWorkerRegistration<Dispatch>) -> Self {
+		Self {
+			runtime:  TerminalWorkerRuntime::new(
+				registration.proxy,
+				registration.gshell_id,
+				to_alacritty_term_size(registration.initial_size),
+				registration.surface_snapshot_tx,
+				registration.snapshot_wake_pending,
+			),
+			input_rx: registration.input_rx,
+		}
+	}
+
+	fn tick(&mut self) -> TerminalWorkerTick {
+		let mut progressed = false;
+		let mut disconnected = false;
+
+		match self.input_rx.try_recv() {
+			Ok(first_input) => {
+				self.runtime.process_batch(first_input, &self.input_rx);
+				if self.runtime.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
+					self.runtime.flush_pending_input();
+				}
+				self.runtime.flush_pending_input();
+				progressed = true;
+			}
+			Err(TryRecvError::Empty) => {}
+			Err(TryRecvError::Disconnected) => disconnected = true,
+		}
+
+		let had_unpublished = self.runtime.unpublished_seq.is_some();
+		self.runtime.publish_unpublished_snapshot();
+		progressed |= had_unpublished || self.runtime.unpublished_seq.is_some();
+
+		if disconnected {
+			self.runtime.flush_pending_input();
+			self.runtime.publish_unpublished_snapshot();
+
+			if self.runtime.unpublished_seq.is_none() {
+				self.runtime.perf.maybe_force_log();
+				return TerminalWorkerTick::Finished;
+			}
+
+			progressed = true;
+		}
+
+		self.runtime.perf.maybe_log();
+
+		if progressed { TerminalWorkerTick::Progressed } else { TerminalWorkerTick::Idle }
+	}
+}
+
+struct TerminalWorkerPool<Dispatch> {
+	_thread_pool:     ThreadPool,
+	registration_txs: Vec<Sender<TerminalWorkerRegistration<Dispatch>>>,
+	next_lane:        AtomicUsize,
+}
+
+impl<Dispatch> TerminalWorkerPool<Dispatch>
+where Dispatch: IRuntimeEventDispatcher
+{
+	fn new(worker_count: usize) -> Self {
+		let worker_count = worker_count.max(1);
+		let thread_pool = rayon::ThreadPoolBuilder::new()
+			.num_threads(worker_count)
+			.thread_name(|lane_index| format!("terminal-worker-{lane_index}"))
+			.build()
+			.expect("failed to build terminal worker thread pool");
+		let mut registration_txs = Vec::with_capacity(worker_count);
+
+		for _lane_index in 0..worker_count {
+			let (registration_tx, registration_rx) =
+				mpsc::channel::<TerminalWorkerRegistration<Dispatch>>();
+
+			thread_pool.spawn_fifo(move || run_terminal_worker_lane(registration_rx));
+
+			registration_txs.push(registration_tx);
+		}
+
+		Self { _thread_pool: thread_pool, registration_txs, next_lane: AtomicUsize::new(0) }
+	}
+
+	fn spawn_terminal_worker(
+		&self,
 		proxy: Dispatch,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
-	) -> SyncSender<TerminalWorkerInput>
-	where
-		Dispatch: IRuntimeEventDispatcher,
-	{
+	) -> SyncSender<TerminalWorkerInput> {
 		let (tx, rx) = mpsc::sync_channel::<TerminalWorkerInput>(TERMINAL_INPUT_CHANNEL_CAPACITY);
+		let lane_index = self.next_lane.fetch_add(1, Ordering::Relaxed) % self.registration_txs.len();
+		let registration = TerminalWorkerRegistration {
+			proxy,
+			gshell_id,
+			initial_size,
+			surface_snapshot_tx,
+			snapshot_wake_pending,
+			input_rx: rx,
+		};
 
-		thread::spawn(move || {
-			let mut runtime = TerminalWorkerRuntime::new(
-				proxy,
-				gshell_id,
-				to_alacritty_term_size(initial_size),
-				surface_snapshot_tx,
-				snapshot_wake_pending,
-			);
-
-			runtime.run(rx);
-		});
+		self.registration_txs[lane_index]
+			.send(registration)
+			.expect("terminal worker lane should accept registrations");
 
 		tx
+	}
+}
+
+fn run_terminal_worker_lane<Dispatch>(
+	registration_rx: Receiver<TerminalWorkerRegistration<Dispatch>>,
+) where Dispatch: IRuntimeEventDispatcher {
+	let mut workers = Vec::<TerminalWorkerHandle<Dispatch>>::new();
+	let mut registrations_open = true;
+
+	loop {
+		let mut progressed = false;
+
+		if workers.is_empty() && registrations_open {
+			match registration_rx.recv() {
+				Ok(registration) => {
+					workers.push(TerminalWorkerHandle::new(registration));
+					progressed = true;
+				}
+				Err(_) => break,
+			}
+		}
+
+		loop {
+			match registration_rx.try_recv() {
+				Ok(registration) => {
+					workers.push(TerminalWorkerHandle::new(registration));
+					progressed = true;
+				}
+				Err(TryRecvError::Empty) => break,
+				Err(TryRecvError::Disconnected) => {
+					registrations_open = false;
+					break;
+				}
+			}
+		}
+
+		let mut index = 0;
+		while index < workers.len() {
+			match workers[index].tick() {
+				TerminalWorkerTick::Idle => index += 1,
+				TerminalWorkerTick::Progressed => {
+					progressed = true;
+					index += 1;
+				}
+				TerminalWorkerTick::Finished => {
+					progressed = true;
+					workers.swap_remove(index);
+				}
+			}
+		}
+
+		if !registrations_open && workers.is_empty() {
+			break;
+		}
+
+		if !progressed {
+			thread::park_timeout(PUBLISH_RETRY_INTERVAL);
+		}
 	}
 }
 
@@ -124,40 +286,6 @@ where Dispatch: IRuntimeEventDispatcher
 
 			pty_input_tx: None,
 		}
-	}
-
-	fn run(&mut self, rx: Receiver<TerminalWorkerInput>) {
-		loop {
-			let next_input = if self.unpublished_seq.is_some() {
-				match rx.recv_timeout(PUBLISH_RETRY_INTERVAL) {
-					Ok(input) => Some(input),
-					Err(RecvTimeoutError::Timeout) => None,
-					Err(RecvTimeoutError::Disconnected) => break,
-				}
-			} else {
-				match rx.recv() {
-					Ok(input) => Some(input),
-					Err(_) => break,
-				}
-			};
-
-			if let Some(first_input) = next_input {
-				self.process_batch(first_input, &rx);
-
-				if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
-					self.flush_pending_input();
-				}
-
-				self.flush_pending_input();
-			}
-
-			self.publish_unpublished_snapshot();
-			self.perf.maybe_log();
-		}
-
-		self.flush_pending_input();
-		self.publish_unpublished_snapshot();
-		self.perf.maybe_force_log();
 	}
 
 	fn process_batch(
@@ -512,35 +640,151 @@ fn terminal_worker_perf_logging_enabled() -> bool {
 	)
 }
 
+fn terminal_worker_pool_size() -> usize {
+	let env_size = env::var_os(TERMINAL_WORKER_POOL_ENV)
+		.and_then(|value| value.into_string().ok())
+		.and_then(|value| value.trim().parse::<usize>().ok())
+		.filter(|&value| value > 0);
+
+	env_size.or_else(|| thread::available_parallelism().map(NonZeroUsize::get).ok()).unwrap_or(1)
+}
+
 fn to_alacritty_term_size(size: TerminalGridSize) -> AlacrittyTermSize {
 	AlacrittyTermSize::new(size.columns(), size.rows())
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PlatformTerminalWorkerBackend;
-
-impl PlatformTerminalWorkerBackend {
-	pub fn new() -> Self { Self }
+pub struct PlatformTerminalWorkerBackend<Dispatch> {
+	proxy: Dispatch,
+	pool:  OnceLock<TerminalWorkerPool<Dispatch>>,
 }
 
-impl ITerminalWorkerBackend for PlatformTerminalWorkerBackend {
-	fn spawn_terminal_worker<Dispatch>(
+impl<Dispatch> PlatformTerminalWorkerBackend<Dispatch>
+where Dispatch: IRuntimeEventDispatcher
+{
+	pub fn new(proxy: Dispatch) -> Self { Self { proxy, pool: OnceLock::new() } }
+
+	#[cfg(test)]
+	fn with_worker_count(proxy: Dispatch, worker_count: usize) -> Self {
+		let pool = OnceLock::new();
+		let _ = pool.set(TerminalWorkerPool::new(worker_count));
+		Self { proxy, pool }
+	}
+
+	fn pool(&self) -> &TerminalWorkerPool<Dispatch> {
+		self.pool.get_or_init(|| TerminalWorkerPool::new(terminal_worker_pool_size()))
+	}
+}
+
+impl<Dispatch> ITerminalWorkerBackend for PlatformTerminalWorkerBackend<Dispatch>
+where Dispatch: IRuntimeEventDispatcher
+{
+	fn start_worker_pool(&self) { let _ = self.pool(); }
+
+	fn spawn_terminal_worker(
 		&self,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
-		proxy: Dispatch,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
-	) -> SyncSender<TerminalWorkerInput>
-	where
-		Dispatch: IRuntimeEventDispatcher,
-	{
-		TerminalWorker::spawn(
-			proxy,
+	) -> SyncSender<TerminalWorkerInput> {
+		self.pool().spawn_terminal_worker(
+			self.proxy.clone(),
 			gshell_id,
 			initial_size,
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::{
+		Arc,
+		atomic::AtomicBool,
+		mpsc::{self, Sender},
+	};
+
+	use germinal_domain::{
+		gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize,
+	};
+	use germinal_ports::{
+		event::{
+			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+			runtime_event_dispatcher::IRuntimeEventDispatcher,
+		},
+		pty_host::worker_backend::ITerminalWorkerBackend,
+		rendering::surface_snapshot::RenderSurfaceSnapshot,
+	};
+
+	use super::PlatformTerminalWorkerBackend;
+
+	#[derive(Clone)]
+	struct TestDispatcher {
+		tx: Sender<RuntimeEvent>,
+	}
+
+	impl IRuntimeEventDispatcher for TestDispatcher {
+		fn dispatch(&self, event: RuntimeEvent) -> Result<(), String> {
+			self.tx.send(event).map_err(|error| error.to_string())
+		}
+	}
+
+	#[test]
+	fn pooled_backend_handles_multiple_terminals_on_one_lane() {
+		let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+		let backend =
+			PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+
+		let first_input = backend.spawn_terminal_worker(
+			GShellId::new(1),
+			TerminalGridSize::new(80, 24),
+			snapshot_tx.clone(),
+			Arc::new(AtomicBool::new(false)),
+		);
+		let second_input = backend.spawn_terminal_worker(
+			GShellId::new(2),
+			TerminalGridSize::new(80, 24),
+			snapshot_tx,
+			Arc::new(AtomicBool::new(false)),
+		);
+
+		first_input
+			.send(germinal_ports::pty_host::worker_input::TerminalWorkerInput::Bytes(b"first".to_vec()))
+			.expect("first terminal input should send");
+		second_input
+			.send(germinal_ports::pty_host::worker_input::TerminalWorkerInput::Bytes(b"second".to_vec()))
+			.expect("second terminal input should send");
+
+		let first_snapshot = snapshot_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("first snapshot should arrive");
+		let second_snapshot = snapshot_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("second snapshot should arrive");
+
+		let mut snapshot_targets =
+			vec![first_snapshot.target_id.value(), second_snapshot.target_id.value()];
+		snapshot_targets.sort_unstable();
+		assert_eq!(snapshot_targets, vec![1, 2]);
+
+		let first_event = event_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("first frame-ready event should arrive");
+		let second_event = event_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("second frame-ready event should arrive");
+
+		let mut event_targets = vec![gshell_id_of(first_event), gshell_id_of(second_event)];
+		event_targets.sort_unstable();
+		assert_eq!(event_targets, vec![1, 2]);
+	}
+
+	fn gshell_id_of(event: RuntimeEvent) -> u64 {
+		match event {
+			RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, .. }) => gshell_id.value(),
+			other => panic!("unexpected event: {other:?}"),
+		}
 	}
 }

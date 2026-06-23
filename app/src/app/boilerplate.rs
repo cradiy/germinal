@@ -126,7 +126,8 @@ impl IPtyBackendProvider for App {
 }
 
 impl ITerminalWorkerBackendProvider for App {
-	type TerminalWorkerBackend = germinal_infra::pty_host::worker::PlatformTerminalWorkerBackend;
+	type TerminalWorkerBackend =
+		germinal_infra::pty_host::worker::PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>;
 
 	fn terminal_worker_backend(&self) -> &Self::TerminalWorkerBackend {
 		&self.terminal_worker_backend
