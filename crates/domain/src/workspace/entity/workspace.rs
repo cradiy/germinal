@@ -6,7 +6,7 @@ use crate::{
 	workspace::{entity::workspace_tab::WorkspaceTab, vo::pane_split_direction::PaneSplitDirection},
 };
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
 	active_tab_index: usize,
 	tabs:             Vec<WorkspaceTab>,

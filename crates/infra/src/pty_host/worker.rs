@@ -28,9 +28,7 @@ use germinal_ports::{
 	seq::Seq,
 };
 
-use crate::repositories::alacritty_terminal_repository::{
-	AlacrittyTermSize, AlacrittyTerminalRepository,
-};
+use crate::pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore};
 
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
@@ -74,7 +72,7 @@ struct TerminalWorkerRuntime {
 	target_id: RenderTargetId,
 	seq:       u64,
 
-	terminal_repository: AlacrittyTerminalRepository,
+	terminal_store: AlacrittyTerminalStore,
 
 	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
 	snapshot_wake_pending: Arc<AtomicBool>,
@@ -98,7 +96,7 @@ impl TerminalWorkerRuntime {
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Self {
 		let target_id = RenderTargetId::new(gshell_id.value());
-		let terminal_repository = AlacrittyTerminalRepository::with_size(initial_size);
+		let terminal_store = AlacrittyTerminalStore::with_size(initial_size);
 
 		Self {
 			proxy,
@@ -107,7 +105,7 @@ impl TerminalWorkerRuntime {
 			target_id,
 			seq: 0,
 
-			terminal_repository,
+			terminal_store,
 
 			surface_snapshot_tx,
 			snapshot_wake_pending,
@@ -230,9 +228,9 @@ impl TerminalWorkerRuntime {
 		let started_at = Instant::now();
 
 		for bytes in chunks {
-			self.terminal_repository.apply_bytes(self.target_id, seq, bytes);
+			self.terminal_store.apply_bytes(self.target_id, seq, bytes);
 
-			let pending_pty_writes = self.terminal_repository.take_pending_pty_writes(self.target_id);
+			let pending_pty_writes = self.terminal_store.take_pending_pty_writes(self.target_id);
 			self.forward_pty_writes(pending_pty_writes);
 		}
 
@@ -252,7 +250,7 @@ impl TerminalWorkerRuntime {
 		let seq = Seq::new(self.seq);
 		let started_at = Instant::now();
 
-		self.terminal_repository.resize(self.target_id, seq, size);
+		self.terminal_store.resize(self.target_id, seq, size);
 
 		let elapsed = started_at.elapsed();
 
@@ -280,14 +278,14 @@ impl TerminalWorkerRuntime {
 		let started_at = Instant::now();
 		let snapshot_started_at = Instant::now();
 		let mut snapshot = self
-			.terminal_repository
+			.terminal_store
 			.render_surface_snapshot_of(self.target_id)
 			.expect("surface snapshot should exist");
 		self.perf.publish_snapshot += snapshot_started_at.elapsed();
 
 		let cursor_started_at = Instant::now();
 		snapshot.cursor = self
-			.terminal_repository
+			.terminal_store
 			.cursor_position_0_based(self.target_id)
 			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y, focused: true });
 		self.perf.publish_cursor += cursor_started_at.elapsed();
@@ -299,7 +297,7 @@ impl TerminalWorkerRuntime {
 		self.perf.publish_send += send_started_at.elapsed();
 
 		let clear_started_at = Instant::now();
-		self.terminal_repository.clear_damage_up_to(self.target_id, seq);
+		self.terminal_store.clear_damage_up_to(self.target_id, seq);
 		self.perf.publish_clear += clear_started_at.elapsed();
 
 		let elapsed = started_at.elapsed();

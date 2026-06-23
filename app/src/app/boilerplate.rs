@@ -31,18 +31,11 @@ use germinal_ports::{
 		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
 		window_runtime::IRenderRuntimeStore,
 	},
+	repository::IRepository,
 	service::{
-		gnative_service::IGNativeService,
-		gshell_service::IGShellService,
-		layout_service::ILayoutService,
-		pty_host_service::IPtyHostRuntimeRepositoryProvider,
-		pty_service::IPtyService,
-		render_service::IRenderService,
-		worker_service::IWorkerService,
-		workspace_service::{
-			IWorkspacePersistenceRepositoryProvider, IWorkspaceRuntimeRepositoryProvider,
-			IWorkspaceService,
-		},
+		gnative_service::IGNativeService, gshell_service::IGShellService,
+		layout_service::ILayoutService, pty_service::IPtyService, render_service::IRenderService,
+		worker_service::IWorkerService, workspace_service::IWorkspaceService,
 	},
 };
 
@@ -56,41 +49,33 @@ impl AsMut<WorkspaceServiceState> for App {
 	fn as_mut(&mut self) -> &mut WorkspaceServiceState { &mut self.workspace_service_state }
 }
 
-impl IWorkspaceRuntimeRepositoryProvider for App {
-	type WorkspaceRuntimeRepository =
-		germinal_infra::repositories::hash_map_repository::HashMapRepository<
-			germinal_domain::workspace::entity::workspace::Workspace,
-		>;
-
-	fn workspace_runtime_repository(&self) -> &Self::WorkspaceRuntimeRepository {
-		&self.workspace_runtime_repository
-	}
-}
-
-impl IWorkspacePersistenceRepositoryProvider for App {
-	type WorkspacePersistenceRepository =
-		germinal_infra::repositories::sqlite_repository::SqliteRepository<
-			germinal_domain::workspace::entity::workspace::Workspace,
-		>;
-
-	fn workspace_persistence_repository(&self) -> &Self::WorkspacePersistenceRepository {
-		&self.workspace_persistence_repository
-	}
-}
-
-impl IPtyHostRuntimeRepositoryProvider for App {
-	type PtyHostRuntimeRepository =
-		germinal_infra::repositories::hash_map_repository::HashMapRepository<
-			germinal_domain::pty_host::entity::pty_host::PtyHost,
-		>;
-
-	fn pty_host_runtime_repository(&self) -> &Self::PtyHostRuntimeRepository {
-		&self.pty_host_runtime_repository
-	}
-}
-
 impl AsRef<GShellServiceState> for App {
 	fn as_ref(&self) -> &GShellServiceState { &self.gshell_service_state }
+}
+
+impl IRepository for App {
+	type Aggregate = germinal_domain::workspace::entity::workspace::Workspace;
+	type Id = u64;
+
+	fn get(&self, id: Self::Id) -> Result<Option<Self::Aggregate>, String> {
+		self.workspace_persistence_repository.get(id)
+	}
+
+	fn list(&self) -> Result<Vec<(Self::Id, Self::Aggregate)>, String> {
+		self.workspace_persistence_repository.list()
+	}
+
+	fn insert(&self, aggregate: Self::Aggregate) -> Result<Self::Id, String> {
+		self.workspace_persistence_repository.insert(aggregate)
+	}
+
+	fn update(&self, id: Self::Id, aggregate: Self::Aggregate) -> Result<(), String> {
+		self.workspace_persistence_repository.update(id, aggregate)
+	}
+
+	fn delete(&self, id: Self::Id) -> Result<(), String> {
+		self.workspace_persistence_repository.delete(id)
+	}
 }
 
 impl AsRef<PtyServiceState> for App {

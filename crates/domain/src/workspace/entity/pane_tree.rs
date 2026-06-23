@@ -4,7 +4,7 @@ use crate::{
 	gshell::vo::gshell_id::GShellId, workspace::vo::pane_split_direction::PaneSplitDirection,
 };
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneTree {
 	Pane(GShellId),
 	Split { direction: PaneSplitDirection, first: Box<PaneTree>, second: Box<PaneTree> },

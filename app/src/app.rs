@@ -5,16 +5,14 @@ use germinal_application::service::{
 	render_service::RenderServiceState, worker_service::WorkerServiceState,
 	workspace_service::WorkspaceServiceState,
 };
-use germinal_domain::{
-	pty_host::entity::pty_host::PtyHost, workspace::entity::workspace::Workspace,
-};
+use germinal_domain::workspace::entity::workspace::Workspace;
 use germinal_infra::{
 	pty::PlatformPtyBackend,
 	pty_host::worker::PlatformTerminalWorkerBackend,
 	rendering::pty_surface::window_runtime::{
 		WgpuTerminalWindowRuntime, WgpuTerminalWindowRuntimeFactory,
 	},
-	repositories::{hash_map_repository::HashMapRepository, sqlite_repository::SqliteRepository},
+	repositories::sqlite_repository::SqliteRepository,
 };
 use germinal_ports::{
 	event::{
@@ -47,9 +45,7 @@ pub struct App {
 	worker_service_state:             WorkerServiceState,
 	render_service_state:             RenderServiceState,
 	layout_service_state:             LayoutServiceState,
-	workspace_runtime_repository:     HashMapRepository<Workspace>,
 	workspace_persistence_repository: SqliteRepository<Workspace>,
-	pty_host_runtime_repository:      HashMapRepository<PtyHost>,
 	pty_backend:                      PlatformPtyBackend,
 	terminal_worker_backend:          PlatformTerminalWorkerBackend,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
@@ -69,12 +65,10 @@ impl App {
 			worker_service_state:             WorkerServiceState::new(),
 			render_service_state:             RenderServiceState::new(),
 			layout_service_state:             LayoutServiceState::default(),
-			workspace_runtime_repository:     HashMapRepository::new(),
 			workspace_persistence_repository: SqliteRepository::new(
 				"germinal-workspace.sqlite3",
 				"workspace",
 			)?,
-			pty_host_runtime_repository:      HashMapRepository::new(),
 			pty_backend:                      PlatformPtyBackend::new(),
 			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(),
 			render_runtime_factory:           WgpuTerminalWindowRuntimeFactory::new(),

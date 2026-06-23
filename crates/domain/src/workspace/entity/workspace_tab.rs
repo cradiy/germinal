@@ -5,7 +5,7 @@ use crate::{
 	workspace::{entity::pane_tree::PaneTree, vo::pane_split_direction::PaneSplitDirection},
 };
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTab {
 	focused_gshell: GShellId,
 	next_gshell_id: u64,
