@@ -1,9 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(unix)]
 use std::{
 	io::{BufRead, BufReader, Write},
-	os::unix::net::{UnixListener, UnixStream},
-	path::PathBuf,
+	net::{Shutdown, TcpListener, TcpStream},
+	time::{SystemTime, UNIX_EPOCH},
 };
 
 use germinal_ports::gnative::{
@@ -15,27 +13,24 @@ use germinal_ports::gnative::{
 
 use crate::control_sequence::{GNativeLaunchDescriptor, write_enter_control_sequence};
 
-pub struct LocalGNativeBootstrap {
-	#[cfg(unix)]
-	listener:   LocalListener,
-	descriptor: GNativeLaunchDescriptor,
-}
+const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 
-#[cfg(unix)]
-struct LocalListener {
-	listener:    UnixListener,
-	socket_path: PathBuf,
+pub struct LocalGNativeBootstrap {
+	listener:   TcpListener,
+	descriptor: GNativeLaunchDescriptor,
 }
 
 impl LocalGNativeBootstrap {
 	pub fn bind_temporary(protocol_version: u32) -> Result<Self, String> {
-		let endpoint = unique_socket_path();
 		let token = unique_token();
-		Self::bind(endpoint.to_string_lossy().into_owned(), token, protocol_version)
+		Self::bind("127.0.0.1:0".to_string(), token, protocol_version)
 	}
 
 	pub fn bind(endpoint: String, token: String, protocol_version: u32) -> Result<Self, String> {
-		bind_local(endpoint, token, protocol_version)
+		let bind_addr = strip_tcp_endpoint_prefix(&endpoint);
+		let listener = TcpListener::bind(bind_addr).map_err(|error| error.to_string())?;
+		let endpoint = encode_tcp_endpoint(listener.local_addr().map_err(|error| error.to_string())?);
+		Ok(Self { listener, descriptor: GNativeLaunchDescriptor { endpoint, token, protocol_version } })
 	}
 
 	pub fn descriptor(&self) -> &GNativeLaunchDescriptor { &self.descriptor }
@@ -47,31 +42,65 @@ impl LocalGNativeBootstrap {
 		write_enter_control_sequence(writer, &self.descriptor)
 	}
 
-	pub fn accept(self) -> Result<LocalGNativeSession, String> { accept_local(self) }
+	pub fn accept(self) -> Result<LocalGNativeSession, String> {
+		let (mut stream, _) = self.listener.accept().map_err(|error| error.to_string())?;
+		stream.set_nodelay(true).ok();
+		write_app_message(
+			&mut stream,
+			&GNativeAppToHost::Hello(GNativeAppHello {
+				token:            self.descriptor.token,
+				protocol_version: self.descriptor.protocol_version,
+			}),
+		)?;
+
+		let welcome = read_host_message(&mut BufReader::new(
+			stream.try_clone().map_err(|error| error.to_string())?,
+		))?
+		.ok_or_else(|| "host closed before welcome".to_string())?;
+		let GNativeHostToApp::Welcome(accepted) = welcome else {
+			return Err("expected welcome after gnative hello".to_string());
+		};
+
+		Ok(LocalGNativeSession {
+			accepted,
+			reader: BufReader::new(stream.try_clone().map_err(|error| error.to_string())?),
+			writer: stream,
+		})
+	}
 }
 
 pub struct LocalGNativeSession {
 	accepted: GNativeSessionAccepted,
-	#[cfg(unix)]
-	reader:   BufReader<UnixStream>,
-	#[cfg(unix)]
-	writer:   UnixStream,
+	reader:   BufReader<TcpStream>,
+	writer:   TcpStream,
 }
 
 impl LocalGNativeSession {
 	pub fn accepted(&self) -> &GNativeSessionAccepted { &self.accepted }
 
-	pub fn frame_writer(&self) -> Result<LocalGNativeFrameWriter, String> { frame_writer_of(self) }
+	pub fn frame_writer(&self) -> Result<LocalGNativeFrameWriter, String> {
+		Ok(LocalGNativeFrameWriter {
+			accepted: self.accepted.clone(),
+			stream:   self.writer.try_clone().map_err(|error| error.to_string())?,
+		})
+	}
 
-	pub fn read_input(&mut self) -> Result<Option<GNativeInputEvent>, String> { read_input_of(self) }
+	pub fn read_input(&mut self) -> Result<Option<GNativeInputEvent>, String> {
+		match read_host_message(&mut self.reader)? {
+			Some(GNativeHostToApp::Input(input)) => Ok(Some(input)),
+			Some(GNativeHostToApp::Welcome(_)) => Err("unexpected duplicate welcome message".to_string()),
+			None => Ok(None),
+		}
+	}
 
-	pub fn send_exit(&mut self) -> Result<(), String> { send_exit_of(self) }
+	pub fn send_exit(&mut self) -> Result<(), String> {
+		write_app_message(&mut self.writer, &GNativeAppToHost::Exit)
+	}
 }
 
 pub struct LocalGNativeFrameWriter {
 	accepted: GNativeSessionAccepted,
-	#[cfg(unix)]
-	stream:   UnixStream,
+	stream:   TcpStream,
 }
 
 impl LocalGNativeFrameWriter {
@@ -81,112 +110,21 @@ impl LocalGNativeFrameWriter {
 		}
 		write_app_message(&mut self.stream, &GNativeAppToHost::Frame(frame))
 	}
-}
 
-#[cfg(unix)]
-fn bind_local(
-	endpoint: String,
-	token: String,
-	protocol_version: u32,
-) -> Result<LocalGNativeBootstrap, String> {
-	let socket_path = PathBuf::from(&endpoint);
-	std::fs::remove_file(&socket_path).ok();
-	let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
-	Ok(LocalGNativeBootstrap {
-		listener:   LocalListener { listener, socket_path },
-		descriptor: GNativeLaunchDescriptor { endpoint, token, protocol_version },
-	})
-}
-
-#[cfg(not(unix))]
-fn bind_local(
-	_endpoint: String,
-	_token: String,
-	_protocol_version: u32,
-) -> Result<LocalGNativeBootstrap, String> {
-	Err("local gnative sessions are only implemented for unix targets".to_string())
-}
-
-#[cfg(unix)]
-fn accept_local(bootstrap: LocalGNativeBootstrap) -> Result<LocalGNativeSession, String> {
-	let LocalGNativeBootstrap { listener, descriptor } = bootstrap;
-	let (mut stream, _) = listener.listener.accept().map_err(|error| error.to_string())?;
-	write_app_message(
-		&mut stream,
-		&GNativeAppToHost::Hello(GNativeAppHello {
-			token:            descriptor.token,
-			protocol_version: descriptor.protocol_version,
-		}),
-	)?;
-
-	let welcome =
-		read_host_message(&mut BufReader::new(stream.try_clone().map_err(|error| error.to_string())?))?
-			.ok_or_else(|| "host closed before welcome".to_string())?;
-	let GNativeHostToApp::Welcome(accepted) = welcome else {
-		return Err("expected welcome after gnative hello".to_string());
-	};
-
-	std::fs::remove_file(listener.socket_path).ok();
-	Ok(LocalGNativeSession {
-		accepted,
-		reader: BufReader::new(stream.try_clone().map_err(|error| error.to_string())?),
-		writer: stream,
-	})
-}
-
-#[cfg(not(unix))]
-fn accept_local(_bootstrap: LocalGNativeBootstrap) -> Result<LocalGNativeSession, String> {
-	Err("local gnative sessions are only implemented for unix targets".to_string())
-}
-
-#[cfg(unix)]
-fn frame_writer_of(session: &LocalGNativeSession) -> Result<LocalGNativeFrameWriter, String> {
-	Ok(LocalGNativeFrameWriter {
-		accepted: session.accepted.clone(),
-		stream:   session.writer.try_clone().map_err(|error| error.to_string())?,
-	})
-}
-
-#[cfg(not(unix))]
-fn frame_writer_of(_session: &LocalGNativeSession) -> Result<LocalGNativeFrameWriter, String> {
-	Err("local gnative sessions are only implemented for unix targets".to_string())
-}
-
-#[cfg(unix)]
-fn read_input_of(session: &mut LocalGNativeSession) -> Result<Option<GNativeInputEvent>, String> {
-	match read_host_message(&mut session.reader)? {
-		Some(GNativeHostToApp::Input(input)) => Ok(Some(input)),
-		Some(GNativeHostToApp::Welcome(_)) => Err("unexpected duplicate welcome message".to_string()),
-		None => Ok(None),
+	pub fn send_exit(&mut self) -> Result<(), String> {
+		write_app_message(&mut self.stream, &GNativeAppToHost::Exit)
 	}
 }
 
-#[cfg(not(unix))]
-fn read_input_of(_session: &mut LocalGNativeSession) -> Result<Option<GNativeInputEvent>, String> {
-	Err("local gnative sessions are only implemented for unix targets".to_string())
-}
-
-#[cfg(unix)]
-fn send_exit_of(session: &mut LocalGNativeSession) -> Result<(), String> {
-	write_app_message(&mut session.writer, &GNativeAppToHost::Exit)
-}
-
-#[cfg(not(unix))]
-fn send_exit_of(_session: &mut LocalGNativeSession) -> Result<(), String> {
-	Err("local gnative sessions are only implemented for unix targets".to_string())
-}
-
-#[cfg(unix)]
-fn write_app_message(stream: &mut UnixStream, message: &GNativeAppToHost) -> Result<(), String> {
+fn write_app_message(stream: &mut TcpStream, message: &GNativeAppToHost) -> Result<(), String> {
 	let payload = serde_json::to_string(message).map_err(|error| error.to_string())?;
 	stream.write_all(payload.as_bytes()).map_err(|error| error.to_string())?;
 	stream.write_all(b"\n").map_err(|error| error.to_string())?;
 	stream.flush().map_err(|error| error.to_string())
 }
 
-#[cfg(unix)]
 fn read_host_message(
-	reader: &mut BufReader<UnixStream>,
+	reader: &mut BufReader<TcpStream>,
 ) -> Result<Option<GNativeHostToApp>, String> {
 	let mut line = String::new();
 	let bytes_read = reader.read_line(&mut line).map_err(|error| error.to_string())?;
@@ -196,16 +134,22 @@ fn read_host_message(
 	serde_json::from_str(line.trim_end()).map(Some).map_err(|error| error.to_string())
 }
 
-fn unique_socket_path() -> std::path::PathBuf {
-	let timestamp =
-		SystemTime::now().duration_since(UNIX_EPOCH).expect("clock should be after epoch").as_nanos();
-	std::env::temp_dir().join(format!("germinal-gnative-sdk-{timestamp}.sock"))
+fn encode_tcp_endpoint(addr: std::net::SocketAddr) -> String {
+	format!("{TCP_ENDPOINT_PREFIX}{addr}")
+}
+
+fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
+	endpoint.strip_prefix(TCP_ENDPOINT_PREFIX).unwrap_or(endpoint)
 }
 
 fn unique_token() -> String {
 	let timestamp =
 		SystemTime::now().duration_since(UNIX_EPOCH).expect("clock should be after epoch").as_nanos();
 	format!("gnative-{timestamp:x}")
+}
+
+impl Drop for LocalGNativeSession {
+	fn drop(&mut self) { self.writer.shutdown(Shutdown::Both).ok(); }
 }
 
 #[cfg(test)]
@@ -238,7 +182,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn bootstrap_accepts_host_handshake_and_reads_input() {
 		let bootstrap = LocalGNativeBootstrap::bind_temporary(1).expect("bootstrap should bind");
@@ -268,7 +211,6 @@ mod tests {
 		);
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn frame_writer_sends_frame_back_to_host() {
 		let bootstrap = LocalGNativeBootstrap::bind_temporary(1).expect("bootstrap should bind");
