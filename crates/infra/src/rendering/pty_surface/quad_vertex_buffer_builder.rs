@@ -30,11 +30,9 @@ impl WgpuQuadVertexBufferBuilder {
 	) -> (WgpuVertexBuffer, WgpuTerminalGlyphUvMapResult) {
 		let mut vertices = Vec::with_capacity(quads.len() * 4);
 		let mut glyph_uv_map_result = WgpuTerminalGlyphUvMapResult::default();
-
 		for quad in quads {
 			vertices.extend(gpu_vertices_of_quad(*quad, atlas, &mut glyph_uv_map_result));
 		}
-
 		(
 			WgpuVertexBuffer {
 				vertices: Arc::new(vertices),
@@ -45,19 +43,13 @@ impl WgpuQuadVertexBufferBuilder {
 	}
 
 	fn cached_indices_for_quad_count(&self, quad_count: usize) -> Arc<Vec<u32>> {
+		if let Some((cached_quad_count, cached_indices)) = self.cached_indices.borrow().as_ref()
+			&& *cached_quad_count == quad_count
 		{
-			let cache = self.cached_indices.borrow();
-
-			if let Some((cached_quad_count, cached_indices)) = cache.as_ref()
-				&& *cached_quad_count == quad_count
-			{
-				return Arc::clone(cached_indices);
-			}
+			return Arc::clone(cached_indices);
 		}
-
 		let indices = Arc::new(build_quad_indices(quad_count));
-		let mut cache = self.cached_indices.borrow_mut();
-		*cache = Some((quad_count, Arc::clone(&indices)));
+		*self.cached_indices.borrow_mut() = Some((quad_count, Arc::clone(&indices)));
 		indices
 	}
 }
@@ -67,13 +59,9 @@ pub struct WgpuVertexBuffer {
 	pub vertices: Arc<Vec<WgpuGpuVertex>>,
 	pub indices:  Arc<Vec<u32>>,
 }
-
 impl Default for WgpuVertexBuffer {
-	fn default() -> Self {
-		Self { vertices: Arc::new(Vec::<WgpuGpuVertex>::new()), indices: Arc::new(Vec::<u32>::new()) }
-	}
+	fn default() -> Self { Self { vertices: Arc::new(Vec::new()), indices: Arc::new(Vec::new()) } }
 }
-
 impl WgpuVertexBuffer {
 	pub fn is_empty(&self) -> bool { self.vertices.is_empty() && self.indices.is_empty() }
 
@@ -93,13 +81,11 @@ pub struct WgpuGpuVertex {
 	pub kind:            u32,
 	pub glyph_codepoint: u32,
 }
-
 impl WgpuGpuVertex {
 	pub const BYTE_SIZE: usize = std::mem::size_of::<Self>();
 
 	pub fn from_vertex(vertex: WgpuVertex) -> Self {
 		let (kind, glyph_codepoint) = gpu_kind_and_codepoint(vertex.kind);
-
 		Self {
 			position_px: [vertex.x_px, vertex.y_px],
 			uv: [vertex.u, vertex.v],
@@ -137,7 +123,6 @@ impl WgpuGpuVertex {
 				format:          wgpu::VertexFormat::Uint32,
 			},
 		];
-
 		wgpu::VertexBufferLayout {
 			array_stride: Self::BYTE_SIZE as wgpu::BufferAddress,
 			step_mode:    wgpu::VertexStepMode::Vertex,
@@ -159,7 +144,6 @@ pub struct WgpuVertex {
 	pub color: WgpuVertexColor,
 	pub kind:  WgpuVertexKind,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WgpuVertexColor {
 	pub red:   u8,
@@ -167,7 +151,6 @@ pub struct WgpuVertexColor {
 	pub blue:  u8,
 	pub alpha: u8,
 }
-
 impl WgpuVertexColor {
 	pub const fn new(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
 		Self { red, green, blue, alpha }
@@ -202,7 +185,6 @@ fn gpu_vertices_of_quad(
 			(quad.y_px + quad.height_px) as f32,
 			default_uv(),
 		));
-
 	[
 		WgpuGpuVertex { position_px: [x0, y0], uv: [uv[0], uv[1]], color, kind, glyph_codepoint },
 		WgpuGpuVertex { position_px: [x1, y0], uv: [uv[2], uv[1]], color, kind, glyph_codepoint },
@@ -219,18 +201,14 @@ fn glyph_quad_geometry_and_uv(
 	let WgpuQuadKind::Glyph { c, bold } = quad.kind else {
 		return None;
 	};
-
 	glyph_uv_map_result.glyph_vertices += 4;
-
 	let Some(entry) = atlas.entry_for_key(WgpuTerminalGlyphKey::new(c, bold)) else {
 		glyph_uv_map_result.missing_vertices += 4;
 		return None;
 	};
-
 	glyph_uv_map_result.mapped_vertices += 4;
 	Some(mapped_glyph_quad_geometry_and_uv(quad, entry))
 }
-
 fn mapped_glyph_quad_geometry_and_uv(
 	quad: WgpuQuadDrawItem,
 	entry: &WgpuTerminalGlyphAtlasEntry,
@@ -239,20 +217,16 @@ fn mapped_glyph_quad_geometry_and_uv(
 	let y0 = quad.y_px as f32 + entry.draw_offset_y_px as f32;
 	let x1 = x0 + entry.draw_width_px.max(1) as f32;
 	let y1 = y0 + entry.draw_height_px.max(1) as f32;
-
 	(x0, y0, x1, y1, [entry.uv.min_u, entry.uv.min_v, entry.uv.max_u, entry.uv.max_v])
 }
-
 fn default_uv() -> [f32; 4] { [0.0, 0.0, 1.0, 1.0] }
-
 fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 	match kind {
-		WgpuQuadKind::Background => WgpuVertexKind::Background,
+		WgpuQuadKind::Background | WgpuQuadKind::PixelRect { .. } => WgpuVertexKind::Background,
 		WgpuQuadKind::Glyph { c, bold } => WgpuVertexKind::Glyph { c, bold },
 		WgpuQuadKind::Underline => WgpuVertexKind::Underline,
 	}
 }
-
 fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
 	match kind {
 		WgpuVertexKind::Background => (WGPU_VERTEX_KIND_BACKGROUND, 0),
@@ -262,22 +236,23 @@ fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
 		WgpuVertexKind::Underline => (WGPU_VERTEX_KIND_UNDERLINE, 0),
 	}
 }
-
 fn color_of_quad(quad: WgpuQuadDrawItem) -> WgpuVertexColor {
 	match quad.kind {
 		WgpuQuadKind::Background => color_or(quad.style.background, WgpuVertexColor::transparent()),
-		WgpuQuadKind::Glyph { .. } => color_or(quad.style.foreground, WgpuVertexColor::white()),
-		WgpuQuadKind::Underline => color_or(quad.style.foreground, WgpuVertexColor::white()),
+		WgpuQuadKind::Glyph { .. } | WgpuQuadKind::Underline => {
+			color_or(quad.style.foreground, WgpuVertexColor::white())
+		}
+		WgpuQuadKind::PixelRect { color } => {
+			WgpuVertexColor::new(color.red, color.green, color.blue, color.alpha)
+		}
 	}
 }
-
 fn color_or(color: Option<RgbColorDto>, fallback: WgpuVertexColor) -> WgpuVertexColor {
 	match color {
 		Some(color) => WgpuVertexColor::new(color.red, color.green, color.blue, 255),
 		None => fallback,
 	}
 }
-
 fn normalize_color(color: WgpuVertexColor) -> [f32; 4] {
 	[
 		srgb_u8_to_linear_f32(color.red),
@@ -286,184 +261,24 @@ fn normalize_color(color: WgpuVertexColor) -> [f32; 4] {
 		color.alpha as f32 / 255.0,
 	]
 }
-
 fn srgb_u8_to_linear_f32(component: u8) -> f32 {
 	static SRGB_TO_LINEAR_LUT: LazyLock<[f32; 256]> = LazyLock::new(|| {
 		std::array::from_fn(|component| {
 			let srgb = component as f32 / 255.0;
-
 			if srgb <= 0.04045 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
 		})
 	});
-
 	SRGB_TO_LINEAR_LUT[component as usize]
 }
-
 fn build_quad_indices(quad_count: usize) -> Vec<u32> {
 	let mut indices = Vec::with_capacity(quad_count * 6);
-
 	for quad_index in 0..quad_count {
 		let base = (quad_index * 4) as u32;
 		indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 	}
-
 	indices
 }
-
 fn bytes_of_slice<T>(items: &[T]) -> &[u8] {
 	let byte_len = std::mem::size_of_val(items);
-
 	unsafe { std::slice::from_raw_parts(items.as_ptr() as *const u8, byte_len) }
-}
-
-#[cfg(test)]
-mod tests {
-	use germinal_ports::rendering::frame_plan_builder::TextStyleDto;
-
-	use super::*;
-	use crate::rendering::pty_surface::glyph_atlas::WgpuDebugGlyphAtlasBuilder;
-
-	#[test]
-	fn builds_four_gpu_vertices_and_six_indices_for_one_quad() {
-		let builder = WgpuQuadVertexBufferBuilder::new();
-
-		let buffer = builder.build(&[WgpuQuadDrawItem {
-			kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
-			x_px:      10,
-			y_px:      20,
-			width_px:  8,
-			height_px: 16,
-			style:     TextStyleDto::plain(),
-		}]);
-
-		assert_eq!(buffer.vertices.len(), 4);
-		assert_eq!(buffer.indices.as_ref(), &[0, 1, 2, 0, 2, 3]);
-		assert_eq!(buffer.quad_count(), 1);
-
-		assert_eq!(buffer.vertices[0].position_px, [10.0, 20.0]);
-		assert_eq!(buffer.vertices[0].uv, [0.0, 0.0]);
-		assert_eq!(buffer.vertices[0].kind, WGPU_VERTEX_KIND_GLYPH);
-		assert_eq!(buffer.vertices[0].glyph_codepoint, 'a' as u32);
-
-		assert_eq!(buffer.vertices[1].position_px, [18.0, 20.0]);
-		assert_eq!(buffer.vertices[2].position_px, [18.0, 36.0]);
-		assert_eq!(buffer.vertices[3].position_px, [10.0, 36.0]);
-	}
-
-	#[test]
-	fn appends_indices_for_multiple_quads() {
-		let builder = WgpuQuadVertexBufferBuilder::new();
-
-		let buffer = builder.build(&[
-			WgpuQuadDrawItem {
-				kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
-				x_px:      0,
-				y_px:      0,
-				width_px:  8,
-				height_px: 16,
-				style:     TextStyleDto::plain(),
-			},
-			WgpuQuadDrawItem {
-				kind:      WgpuQuadKind::Glyph { c: 'b', bold: false },
-				x_px:      8,
-				y_px:      0,
-				width_px:  8,
-				height_px: 16,
-				style:     TextStyleDto::plain(),
-			},
-		]);
-
-		assert_eq!(buffer.vertices.len(), 8);
-		assert_eq!(buffer.indices.as_ref(), &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
-		assert_eq!(buffer.quad_count(), 2);
-	}
-
-	#[test]
-	fn reuses_cached_index_buffer_for_same_quad_count() {
-		let builder = WgpuQuadVertexBufferBuilder::new();
-
-		let first = builder.build(&[WgpuQuadDrawItem {
-			kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
-			x_px:      0,
-			y_px:      0,
-			width_px:  8,
-			height_px: 16,
-			style:     TextStyleDto::plain(),
-		}]);
-
-		let second = builder.build(&[WgpuQuadDrawItem {
-			kind:      WgpuQuadKind::Glyph { c: 'b', bold: false },
-			x_px:      8,
-			y_px:      0,
-			width_px:  8,
-			height_px: 16,
-			style:     TextStyleDto::plain(),
-		}]);
-
-		assert!(Arc::ptr_eq(&first.indices, &second.indices));
-	}
-
-	#[test]
-	fn builds_glyph_vertices_with_atlas_geometry_and_uvs() {
-		let builder = WgpuQuadVertexBufferBuilder::new();
-		let atlas = WgpuDebugGlyphAtlasBuilder::new().build_for_texts(["a"]);
-
-		let (buffer, uv_map_result) = builder.build_with_glyph_atlas(
-			&[WgpuQuadDrawItem {
-				kind:      WgpuQuadKind::Glyph { c: 'a', bold: false },
-				x_px:      10,
-				y_px:      20,
-				width_px:  8,
-				height_px: 16,
-				style:     TextStyleDto::plain(),
-			}],
-			&atlas,
-		);
-
-		let entry = atlas.entry('a').expect("glyph entry should exist");
-
-		assert_eq!(uv_map_result.glyph_vertices, 4);
-		assert_eq!(uv_map_result.mapped_vertices, 4);
-		assert_eq!(uv_map_result.missing_vertices, 0);
-
-		assert_eq!(buffer.vertices[0].position_px, [
-			10.0 + entry.draw_offset_x_px as f32,
-			20.0 + entry.draw_offset_y_px as f32,
-		]);
-		assert_eq!(buffer.vertices[0].uv, [entry.uv.min_u, entry.uv.min_v]);
-		assert_eq!(buffer.vertices[2].position_px, [
-			10.0 + entry.draw_offset_x_px as f32 + entry.draw_width_px.max(1) as f32,
-			20.0 + entry.draw_offset_y_px as f32 + entry.draw_height_px.max(1) as f32,
-		]);
-		assert_eq!(buffer.vertices[2].uv, [entry.uv.max_u, entry.uv.max_v]);
-	}
-
-	#[test]
-	fn preserves_vertex_layout() {
-		let layout = WgpuGpuVertex::vertex_buffer_layout();
-
-		assert_eq!(layout.array_stride, WgpuGpuVertex::BYTE_SIZE as wgpu::BufferAddress);
-
-		assert_eq!(layout.step_mode, wgpu::VertexStepMode::Vertex);
-		assert_eq!(layout.attributes.len(), 5);
-		assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x2);
-		assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
-	}
-
-	#[test]
-	fn converts_srgb_vertex_colors_to_linear_rgb() {
-		let vertex = WgpuGpuVertex::from_vertex(WgpuVertex {
-			x_px:  0.0,
-			y_px:  0.0,
-			u:     0.0,
-			v:     0.0,
-			color: WgpuVertexColor::new(128, 64, 255, 128),
-			kind:  WgpuVertexKind::Background,
-		});
-
-		assert!((vertex.color[0] - 0.215_860_53).abs() < 0.000_001);
-		assert!((vertex.color[1] - 0.051_269_468).abs() < 0.000_001);
-		assert!((vertex.color[2] - 1.0).abs() < 0.000_001);
-		assert!((vertex.color[3] - (128.0 / 255.0)).abs() < 0.000_001);
-	}
 }

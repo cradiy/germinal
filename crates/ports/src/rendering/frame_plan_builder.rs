@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{rendering::render_target_id::RenderTargetId, seq::Seq};
 
+pub const PIXEL_FILL_RECT_MARKER: &str = "\u{E000}germinal.pixel_fill_rect:";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildFramePlanTask {
 	pub target_id: RenderTargetId,
@@ -18,9 +20,27 @@ pub struct BuiltFramePlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderCommandDto {
 	Clear,
-	ClearLine { y: u32 },
-	TextRun { x: u32, y: u32, text: String },
-	StyledTextRun { x: u32, y: u32, text: String, style: TextStyleDto },
+	ClearLine {
+		y: u32,
+	},
+	TextRun {
+		x:    u32,
+		y:    u32,
+		text: String,
+	},
+	StyledTextRun {
+		x:     u32,
+		y:     u32,
+		text:  String,
+		style: TextStyleDto,
+	},
+	PixelFillRect {
+		x_px:      u32,
+		y_px:      u32,
+		width_px:  u32,
+		height_px: u32,
+		color:     RgbaColorDto,
+	},
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +79,76 @@ impl RgbColorDto {
 	pub const fn new(red: u8, green: u8, blue: u8) -> Self { Self { red, green, blue } }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RgbaColorDto {
+	pub red:   u8,
+	pub green: u8,
+	pub blue:  u8,
+	pub alpha: u8,
+}
+
+impl RgbaColorDto {
+	pub const fn new(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+		Self { red, green, blue, alpha }
+	}
+
+	pub const fn opaque(red: u8, green: u8, blue: u8) -> Self { Self::new(red, green, blue, 255) }
+}
+
+pub fn encode_pixel_fill_rect_command(command: &RenderCommandDto) -> Option<String> {
+	let RenderCommandDto::PixelFillRect { x_px, y_px, width_px, height_px, color } = command else {
+		return None;
+	};
+
+	Some(format!(
+		"{PIXEL_FILL_RECT_MARKER}{x_px},{y_px},{width_px},{height_px},{},{},{},{}",
+		color.red, color.green, color.blue, color.alpha
+	))
+}
+
+pub fn decode_pixel_fill_rect_command(text: &str) -> Option<RenderCommandDto> {
+	let payload = text.strip_prefix(PIXEL_FILL_RECT_MARKER)?;
+	let mut parts = payload.split(',');
+	let x_px = parts.next()?.parse().ok()?;
+	let y_px = parts.next()?.parse().ok()?;
+	let width_px = parts.next()?.parse().ok()?;
+	let height_px = parts.next()?.parse().ok()?;
+	let red = parts.next()?.parse().ok()?;
+	let green = parts.next()?.parse().ok()?;
+	let blue = parts.next()?.parse().ok()?;
+	let alpha = parts.next()?.parse().ok()?;
+	if parts.next().is_some() {
+		return None;
+	}
+
+	Some(RenderCommandDto::PixelFillRect {
+		x_px,
+		y_px,
+		width_px,
+		height_px,
+		color: RgbaColorDto::new(red, green, blue, alpha),
+	})
+}
+
 pub trait FramePlanBuilder {
 	fn build(&self, task: BuildFramePlanTask) -> BuiltFramePlan;
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pixel_fill_rect_round_trips_through_marker_text() {
+		let command = RenderCommandDto::PixelFillRect {
+			x_px:      12,
+			y_px:      34,
+			width_px:  56,
+			height_px: 78,
+			color:     RgbaColorDto::new(1, 2, 3, 4),
+		};
+
+		let encoded = encode_pixel_fill_rect_command(&command).expect("pixel command should encode");
+		assert_eq!(decode_pixel_fill_rect_command(&encoded), Some(command));
+	}
 }
