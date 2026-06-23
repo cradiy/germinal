@@ -15,7 +15,7 @@ use germinal_domain::{
 use germinal_ports::{
 	event::{
 		gshell_input::GShellInputEvent,
-		runtime_event_dispatcher::RuntimeEventDispatcher,
+		runtime_event_dispatcher::IRuntimeEventDispatcherProvider,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
@@ -59,6 +59,7 @@ impl Default for PtyServiceState {
 
 impl<Deps> IPtyService for PtyService<Deps>
 where Deps: AsRef<PtyServiceState>
+		+ IRuntimeEventDispatcherProvider
 		+ IPtyBackendProvider
 		+ IWorkerService<TerminalWorkerSender = SyncSender<TerminalWorkerInput>>
 {
@@ -66,7 +67,6 @@ where Deps: AsRef<PtyServiceState>
 		&self,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
@@ -77,10 +77,10 @@ where Deps: AsRef<PtyServiceState>
 			return;
 		}
 
+		let proxy = self.prj_ref().runtime_event_dispatcher().clone();
 		let Some(terminal_worker_sender) = self.prj_ref().spawn_terminal_worker(
 			gshell_id,
 			term_size,
-			proxy.clone(),
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		) else {

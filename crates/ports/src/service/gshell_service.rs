@@ -3,8 +3,7 @@ use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 
 use crate::{
-	event::{gshell_input::GShellInput, runtime_event_dispatcher::RuntimeEventDispatcher},
-	pty_host::terminal_size::TerminalPtySize,
+	event::gshell_input::GShellInput, pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
@@ -12,7 +11,6 @@ pub trait IGShellService {
 	fn ensure_gshell(
 		&self,
 		gshell_id: GShellId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,

@@ -2,7 +2,7 @@ use std::sync::mpsc::SyncSender;
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
-	event::runtime_event_dispatcher::RuntimeEventDispatcher,
+	event::runtime_event_dispatcher::IRuntimeEventDispatcher,
 	pty_host::{
 		pty_backend::IPtyBackend, pty_input::PtyInputSender, terminal_size::TerminalPtySize,
 		worker_input::TerminalWorkerInput,
@@ -19,14 +19,17 @@ impl PlatformPtyBackend {
 }
 
 impl IPtyBackend for PlatformPtyBackend {
-	fn spawn_pty(
+	fn spawn_pty<Dispatch>(
 		&self,
-		proxy: RuntimeEventDispatcher,
+		proxy: Dispatch,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
 		terminal_worker_sender: SyncSender<TerminalWorkerInput>,
-	) -> PtyInputSender {
+	) -> PtyInputSender
+	where
+		Dispatch: IRuntimeEventDispatcher,
+	{
 		PtyBridge::spawn(proxy, gshell_id, pty_host_id, initial_size, terminal_worker_sender)
 	}
 }

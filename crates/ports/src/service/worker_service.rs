@@ -2,10 +2,7 @@ use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 
-use crate::{
-	event::runtime_event_dispatcher::RuntimeEventDispatcher,
-	rendering::surface_snapshot::RenderSurfaceSnapshot,
-};
+use crate::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 pub trait IWorkerService {
 	type TerminalWorkerSender;
@@ -15,7 +12,6 @@ pub trait IWorkerService {
 		&self,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
-		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<Self::TerminalWorkerSender>;

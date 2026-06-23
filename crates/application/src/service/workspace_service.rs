@@ -1,29 +1,22 @@
 use std::cell::{Cell, RefCell};
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, workspace::entity::workspace::Workspace};
-use germinal_ports::{
-	event::runtime_event_dispatcher::RuntimeEventDispatcher, repository::IRepository,
-	service::workspace_service::IWorkspaceService,
-};
+use germinal_ports::{repository::IRepository, service::workspace_service::IWorkspaceService};
 
 #[derive(kudi::DepInj)]
 #[target(WorkspaceService)]
 pub struct WorkspaceServiceState {
-	runtime_event_proxy:      RuntimeEventDispatcher,
 	persistence_workspace_id: Cell<Option<u64>>,
 	workspace:                RefCell<Workspace>,
 }
 
 impl WorkspaceServiceState {
-	pub fn new(runtime_event_proxy: RuntimeEventDispatcher) -> Self {
+	pub fn new() -> Self {
 		Self {
-			runtime_event_proxy,
 			persistence_workspace_id: Cell::new(None),
-			workspace: RefCell::new(Workspace::main()),
+			workspace:                RefCell::new(Workspace::main()),
 		}
 	}
-
-	pub fn runtime_event_proxy(&self) -> RuntimeEventDispatcher { self.runtime_event_proxy.clone() }
 
 	pub fn focused_gshell(&self) -> GShellId { self.workspace.borrow().focused_gshell() }
 
@@ -42,10 +35,6 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 {
 	fn focused_gshell(&self) -> GShellId {
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focused_gshell()
-	}
-
-	fn runtime_event_proxy(&self) -> RuntimeEventDispatcher {
-		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).runtime_event_proxy()
 	}
 
 	fn restore_workspace(&self) -> Result<(), String> {

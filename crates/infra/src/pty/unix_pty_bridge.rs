@@ -13,7 +13,7 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::Pt
 use germinal_ports::{
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
-		runtime_event_dispatcher::RuntimeEventDispatcher,
+		runtime_event_dispatcher::IRuntimeEventDispatcher,
 	},
 	pty_host::{
 		pty_input::{PtyInput, PtyInputReceiver, PtyInputSender},
@@ -29,15 +29,17 @@ use portable_pty::{CommandBuilder, native_pty_system};
 
 use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
 
-pub(crate) fn spawn_compio_bridge_thread(
-	proxy: RuntimeEventDispatcher,
+pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
+	proxy: Dispatch,
 	gshell_id: GShellId,
 	_pty_host_id: PtyHostId,
 	config: PtyBridgeConfig,
 	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	shutdown_tx: PtyInputSender,
 	input_rx: PtyInputReceiver,
-) {
+) where
+	Dispatch: IRuntimeEventDispatcher,
+{
 	thread::spawn(move || {
 		let runtime = compio::runtime::Runtime::new().expect("failed to create compio runtime");
 		runtime.block_on(run_compio_bridge(
@@ -51,14 +53,16 @@ pub(crate) fn spawn_compio_bridge_thread(
 	});
 }
 
-async fn run_compio_bridge(
-	proxy: RuntimeEventDispatcher,
+async fn run_compio_bridge<Dispatch>(
+	proxy: Dispatch,
 	gshell_id: GShellId,
 	config: PtyBridgeConfig,
 	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	shutdown_tx: PtyInputSender,
 	input_rx: PtyInputReceiver,
-) {
+) where
+	Dispatch: IRuntimeEventDispatcher,
+{
 	let pty_system = native_pty_system();
 	let pair =
 		pty_system.openpty(to_portable_pty_size(config.initial_size)).expect("failed to open pty");

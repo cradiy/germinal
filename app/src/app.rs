@@ -18,7 +18,6 @@ use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
-		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
@@ -39,6 +38,11 @@ use winit::{
 	window::WindowId,
 };
 
+#[derive(Clone)]
+pub struct AppRuntimeEventDispatcher {
+	proxy: EventLoopProxy<RuntimeEvent>,
+}
+
 pub struct App {
 	workspace_service_state:          WorkspaceServiceState,
 	gshell_service_state:             GShellServiceState,
@@ -46,6 +50,7 @@ pub struct App {
 	render_service_state:             RenderServiceState,
 	layout_service_state:             LayoutServiceState,
 	workspace_persistence_repository: SqliteRepository<Workspace>,
+	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
 	pty_backend:                      PlatformPtyBackend,
 	terminal_worker_backend:          PlatformTerminalWorkerBackend,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
@@ -55,12 +60,8 @@ pub struct App {
 
 impl App {
 	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Result<Self, String> {
-		let runtime_event_dispatcher = RuntimeEventDispatcher::new(move |event| {
-			runtime_event_proxy.send_event(event).map_err(|error| error.to_string())
-		});
-
 		let app = Self {
-			workspace_service_state:          WorkspaceServiceState::new(runtime_event_dispatcher),
+			workspace_service_state:          WorkspaceServiceState::new(),
 			gshell_service_state:             GShellServiceState::new(),
 			worker_service_state:             WorkerServiceState::new(),
 			render_service_state:             RenderServiceState::new(),
@@ -69,6 +70,7 @@ impl App {
 				"germinal-workspace.sqlite3",
 				"workspace",
 			)?,
+			runtime_event_dispatcher:         AppRuntimeEventDispatcher { proxy: runtime_event_proxy },
 			pty_backend:                      PlatformPtyBackend::new(),
 			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(),
 			render_runtime_factory:           WgpuTerminalWindowRuntimeFactory::new(),
@@ -123,7 +125,6 @@ impl App {
 
 impl ApplicationHandler<RuntimeEvent> for App {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-		let proxy = self.runtime_event_proxy();
 		let focused_gshell = self.focused_gshell();
 
 		if self.ensure_window_runtime(event_loop).is_err() {
@@ -139,7 +140,6 @@ impl ApplicationHandler<RuntimeEvent> for App {
 
 		self.ensure_gshell(
 			focused_gshell,
-			proxy,
 			pty_size,
 			term_size,
 			surface_snapshot_tx,

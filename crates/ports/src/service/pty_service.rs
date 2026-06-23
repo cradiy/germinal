@@ -6,8 +6,7 @@ use germinal_domain::{
 };
 
 use crate::{
-	event::{gshell_input::GShellInputEvent, runtime_event_dispatcher::RuntimeEventDispatcher},
-	pty_host::terminal_size::TerminalPtySize,
+	event::gshell_input::GShellInputEvent, pty_host::terminal_size::TerminalPtySize,
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
@@ -16,7 +15,6 @@ pub trait IPtyService {
 		&self,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,

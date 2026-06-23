@@ -14,7 +14,6 @@ use germinal_domain::{
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
-		runtime_event_dispatcher::RuntimeEventDispatcher,
 		window_input_event::WindowInputEvent,
 	},
 	pty_host::terminal_size::TerminalPtySize,
@@ -86,7 +85,6 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 	fn ensure_gshell(
 		&self,
 		gshell_id: GShellId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
@@ -103,7 +101,6 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		self.prj_ref().ensure_gshell_pty(
 			gshell_id,
 			pty_host_id,
-			proxy,
 			pty_size,
 			term_size,
 			surface_snapshot_tx,

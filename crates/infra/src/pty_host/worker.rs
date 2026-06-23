@@ -13,7 +13,7 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::
 use germinal_ports::{
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
-		runtime_event_dispatcher::RuntimeEventDispatcher,
+		runtime_event_dispatcher::IRuntimeEventDispatcher,
 	},
 	pty_host::{
 		pty_input::{PtyInput, PtyInputSender},
@@ -40,13 +40,16 @@ const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
 pub struct TerminalWorker;
 
 impl TerminalWorker {
-	pub fn spawn(
-		proxy: RuntimeEventDispatcher,
+	pub fn spawn<Dispatch>(
+		proxy: Dispatch,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
-	) -> SyncSender<TerminalWorkerInput> {
+	) -> SyncSender<TerminalWorkerInput>
+	where
+		Dispatch: IRuntimeEventDispatcher,
+	{
 		let (tx, rx) = mpsc::sync_channel::<TerminalWorkerInput>(TERMINAL_INPUT_CHANNEL_CAPACITY);
 
 		thread::spawn(move || {
@@ -65,8 +68,8 @@ impl TerminalWorker {
 	}
 }
 
-struct TerminalWorkerRuntime {
-	proxy: RuntimeEventDispatcher,
+struct TerminalWorkerRuntime<Dispatch> {
+	proxy: Dispatch,
 
 	gshell_id: GShellId,
 	target_id: RenderTargetId,
@@ -87,9 +90,11 @@ struct TerminalWorkerRuntime {
 	pty_input_tx: Option<PtyInputSender>,
 }
 
-impl TerminalWorkerRuntime {
+impl<Dispatch> TerminalWorkerRuntime<Dispatch>
+where Dispatch: IRuntimeEventDispatcher
+{
 	fn new(
-		proxy: RuntimeEventDispatcher,
+		proxy: Dispatch,
 		gshell_id: GShellId,
 		initial_size: AlacrittyTermSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
@@ -519,14 +524,17 @@ impl PlatformTerminalWorkerBackend {
 }
 
 impl ITerminalWorkerBackend for PlatformTerminalWorkerBackend {
-	fn spawn_terminal_worker(
+	fn spawn_terminal_worker<Dispatch>(
 		&self,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
-		proxy: RuntimeEventDispatcher,
+		proxy: Dispatch,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
-	) -> SyncSender<TerminalWorkerInput> {
+	) -> SyncSender<TerminalWorkerInput>
+	where
+		Dispatch: IRuntimeEventDispatcher,
+	{
 		TerminalWorker::spawn(
 			proxy,
 			gshell_id,

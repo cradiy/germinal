@@ -20,7 +20,7 @@ use germinal_domain::{
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
-		runtime_event_dispatcher::RuntimeEventDispatcher,
+		runtime_event_dispatcher::{IRuntimeEventDispatcher, IRuntimeEventDispatcherProvider},
 	},
 	pty_host::{
 		pty_backend::IPtyBackendProvider, size_info::TerminalSizeInfo, terminal_size::TerminalPtySize,
@@ -39,7 +39,24 @@ use germinal_ports::{
 	},
 };
 
-use crate::app::App;
+use crate::app::{App, AppRuntimeEventDispatcher};
+
+impl IRuntimeEventDispatcher for AppRuntimeEventDispatcher {
+	fn dispatch(
+		&self,
+		event: germinal_ports::event::runtime_event::RuntimeEvent,
+	) -> Result<(), String> {
+		self.proxy.send_event(event).map_err(|error| error.to_string())
+	}
+}
+
+impl IRuntimeEventDispatcherProvider for App {
+	type RuntimeEventDispatcher = AppRuntimeEventDispatcher;
+
+	fn runtime_event_dispatcher(&self) -> &Self::RuntimeEventDispatcher {
+		&self.runtime_event_dispatcher
+	}
+}
 
 impl AsRef<WorkspaceServiceState> for App {
 	fn as_ref(&self) -> &WorkspaceServiceState { &self.workspace_service_state }
@@ -135,7 +152,6 @@ impl IGShellService for App {
 	fn ensure_gshell(
 		&self,
 		gshell_id: GShellId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
@@ -143,7 +159,6 @@ impl IGShellService for App {
 	) {
 		GShellService::inj_ref(self).ensure_gshell(
 			gshell_id,
-			proxy,
 			pty_size,
 			term_size,
 			surface_snapshot_tx,
@@ -170,7 +185,6 @@ impl IPtyService for App {
 		&self,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
-		proxy: RuntimeEventDispatcher,
 		pty_size: TerminalPtySize,
 		term_size: TerminalGridSize,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
@@ -179,7 +193,6 @@ impl IPtyService for App {
 		PtyService::inj_ref(self).ensure_gshell_pty(
 			gshell_id,
 			pty_host_id,
-			proxy,
 			pty_size,
 			term_size,
 			surface_snapshot_tx,
@@ -216,14 +229,12 @@ impl IWorkerService for App {
 		&self,
 		gshell_id: GShellId,
 		initial_size: TerminalGridSize,
-		proxy: RuntimeEventDispatcher,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	) -> Option<SyncSender<TerminalWorkerInput>> {
 		WorkerService::inj_ref(self).spawn_terminal_worker(
 			gshell_id,
 			initial_size,
-			proxy,
 			surface_snapshot_tx,
 			snapshot_wake_pending,
 		)
@@ -272,11 +283,6 @@ impl IWorkspaceService for App {
 	fn focused_gshell(&self) -> GShellId {
 		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
 			.focused_gshell()
-	}
-
-	fn runtime_event_proxy(&self) -> RuntimeEventDispatcher {
-		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
-			.runtime_event_proxy()
 	}
 
 	fn restore_workspace(&self) -> Result<(), String> {

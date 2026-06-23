@@ -2,7 +2,7 @@ use std::sync::mpsc::SyncSender;
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
-	event::runtime_event_dispatcher::RuntimeEventDispatcher,
+	event::runtime_event_dispatcher::IRuntimeEventDispatcher,
 	pty_host::{
 		pty_input::{PtyInputSender, pty_input_channel},
 		terminal_size::TerminalPtySize,
@@ -32,13 +32,16 @@ impl PtyBridgeConfig {
 pub struct PtyBridge;
 
 impl PtyBridge {
-	pub fn spawn(
-		proxy: RuntimeEventDispatcher,
+	pub fn spawn<Dispatch>(
+		proxy: Dispatch,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
 		terminal_worker_tx: SyncSender<TerminalWorkerInput>,
-	) -> PtyInputSender {
+	) -> PtyInputSender
+	where
+		Dispatch: IRuntimeEventDispatcher,
+	{
 		Self::spawn_with_config(
 			proxy,
 			gshell_id,
@@ -48,13 +51,16 @@ impl PtyBridge {
 		)
 	}
 
-	pub(crate) fn spawn_with_config(
-		proxy: RuntimeEventDispatcher,
+	pub(crate) fn spawn_with_config<Dispatch>(
+		proxy: Dispatch,
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		config: PtyBridgeConfig,
 		terminal_worker_tx: SyncSender<TerminalWorkerInput>,
-	) -> PtyInputSender {
+	) -> PtyInputSender
+	where
+		Dispatch: IRuntimeEventDispatcher,
+	{
 		let (input_tx, input_rx) = pty_input_channel();
 
 		#[cfg(unix)]
