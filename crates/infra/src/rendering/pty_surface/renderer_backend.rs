@@ -5,7 +5,8 @@ use std::{
 
 use germinal_ports::{
 	pty_host::{
-		render_viewport::TerminalRenderViewport, size_info::TerminalSizeInfo,
+		cell_size::TerminalCellSize, render_viewport::TerminalRenderViewport,
+		size_info::TerminalSizeInfo, terminal_geometric_glyph::TerminalGeometricGlyph,
 		width::terminal_char_cell_width,
 	},
 	rendering::{
@@ -124,13 +125,13 @@ fn append_pixel_rect_quads_from_row(
 			decode_pixel_fill_rect_command(&run.text)
 		{
 			let x_px = config.content_origin_x
-				+ scale_virtual_px(x_px, config.cell_width_px, PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX);
+				+ scale_virtual_px(x_px, config.content_width_px, config.pixel_virtual_width_px());
 			let y_px = config.content_origin_y
-				+ scale_virtual_px(y_px, config.cell_height_px, PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX);
+				+ scale_virtual_px(y_px, config.content_height_px, config.pixel_virtual_height_px());
 			let width_px =
-				scale_virtual_px(width_px, config.cell_width_px, PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX);
+				scale_virtual_px(width_px, config.content_width_px, config.pixel_virtual_width_px());
 			let height_px =
-				scale_virtual_px(height_px, config.cell_height_px, PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX);
+				scale_virtual_px(height_px, config.content_height_px, config.pixel_virtual_height_px());
 			quads.push(WgpuQuadDrawItem::pixel_rect(x_px, y_px, width_px, height_px, color));
 			found = true;
 		}
@@ -138,9 +139,9 @@ fn append_pixel_rect_quads_from_row(
 	found
 }
 
-fn scale_virtual_px(value: u32, actual_cell_px: u32, virtual_cell_px: u32) -> u32 {
-	let scaled = u64::from(value) * u64::from(actual_cell_px);
-	let rounded = (scaled + u64::from(virtual_cell_px / 2)) / u64::from(virtual_cell_px.max(1));
+fn scale_virtual_px(value: u32, actual_content_px: u32, virtual_content_px: u32) -> u32 {
+	let scaled = u64::from(value) * u64::from(actual_content_px);
+	let rounded = (scaled + u64::from(virtual_content_px / 2)) / u64::from(virtual_content_px.max(1));
 	rounded.min(u64::from(u32::MAX)) as u32
 }
 
@@ -163,7 +164,9 @@ fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> Wgp
 				background_quads
 					.push(WgpuQuadDrawItem::background(x, row.y, cell_width, config, run.style));
 			}
-			if c != ' ' {
+			if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(c) {
+				append_terminal_geometric_glyph_quads(&mut glyph_quads, glyph, config, geometric_glyph);
+			} else if c != ' ' {
 				glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
 			}
 			if run.style.underline {
@@ -173,6 +176,25 @@ fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> Wgp
 		}
 	}
 	WgpuRenderedRow { draw_row, background_quads, glyph_quads, underline_quads }
+}
+
+fn append_terminal_geometric_glyph_quads(
+	quads: &mut Vec<WgpuQuadDrawItem>,
+	glyph: WgpuGlyphDrawItem,
+	config: WgpuRendererConfig,
+	geometric_glyph: TerminalGeometricGlyph,
+) {
+	let glyph_x = glyph.pixel_x(config);
+	let glyph_y = glyph.pixel_y(config);
+	for rect in geometric_glyph.pixel_rects(config.cell_size(), glyph.cell_width) {
+		quads.push(WgpuQuadDrawItem::solid_rect(
+			glyph_x + rect.x_px(),
+			glyph_y + rect.y_px(),
+			rect.width_px(),
+			rect.height_px(),
+			glyph.style,
+		));
+	}
 }
 
 fn append_cursor_quads(
@@ -204,33 +226,75 @@ fn append_cursor_quads(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WgpuRendererConfig {
-	pub cell_width_px:    u32,
-	pub cell_height_px:   u32,
-	pub content_origin_x: u32,
-	pub content_origin_y: u32,
+	pub cell_width_px:     u32,
+	pub cell_height_px:    u32,
+	pub content_origin_x:  u32,
+	pub content_origin_y:  u32,
+	pub content_width_px:  u32,
+	pub content_height_px: u32,
+	pub grid_columns:      u32,
+	pub grid_rows:         u32,
 }
 impl WgpuRendererConfig {
 	pub fn from_render_viewport(viewport: TerminalRenderViewport) -> Self {
 		let cell_size = viewport.cell_size();
 		Self {
-			cell_width_px:    cell_size.width_px(),
-			cell_height_px:   cell_size.height_px(),
-			content_origin_x: viewport.origin_x_px(),
-			content_origin_y: viewport.origin_y_px(),
+			cell_width_px:     cell_size.width_px(),
+			cell_height_px:    cell_size.height_px(),
+			content_origin_x:  viewport.origin_x_px(),
+			content_origin_y:  viewport.origin_y_px(),
+			content_width_px:  viewport.grid_width_px(),
+			content_height_px: viewport.grid_height_px(),
+			grid_columns:      viewport.columns() as u32,
+			grid_rows:         viewport.rows() as u32,
 		}
+	}
+
+	pub fn from_size_info(size_info: TerminalSizeInfo) -> Self {
+		let viewport = size_info.render_viewport();
+		let cell_size = viewport.cell_size();
+		Self {
+			cell_width_px:     cell_size.width_px(),
+			cell_height_px:    cell_size.height_px(),
+			content_origin_x:  viewport.origin_x_px(),
+			content_origin_y:  viewport.origin_y_px(),
+			content_width_px:  size_info.content_width_px(),
+			content_height_px: size_info.content_height_px(),
+			grid_columns:      viewport.columns() as u32,
+			grid_rows:         viewport.rows() as u32,
+		}
+	}
+
+	fn pixel_virtual_width_px(self) -> u32 {
+		self.grid_columns.saturating_mul(PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX).max(1)
+	}
+
+	fn pixel_virtual_height_px(self) -> u32 {
+		self.grid_rows.saturating_mul(PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX).max(1)
+	}
+
+	fn cell_size(self) -> TerminalCellSize {
+		TerminalCellSize::new(self.cell_width_px, self.cell_height_px)
 	}
 }
 impl From<TerminalRenderViewport> for WgpuRendererConfig {
 	fn from(viewport: TerminalRenderViewport) -> Self { Self::from_render_viewport(viewport) }
 }
 impl From<TerminalSizeInfo> for WgpuRendererConfig {
-	fn from(size_info: TerminalSizeInfo) -> Self {
-		Self::from_render_viewport(size_info.render_viewport())
-	}
+	fn from(size_info: TerminalSizeInfo) -> Self { Self::from_size_info(size_info) }
 }
 impl Default for WgpuRendererConfig {
 	fn default() -> Self {
-		Self { cell_width_px: 8, cell_height_px: 16, content_origin_x: 0, content_origin_y: 0 }
+		Self {
+			cell_width_px:     8,
+			cell_height_px:    16,
+			content_origin_x:  0,
+			content_origin_y:  0,
+			content_width_px:  8,
+			content_height_px: 16,
+			grid_columns:      1,
+			grid_rows:         1,
+		}
 	}
 }
 
@@ -270,6 +334,10 @@ impl WgpuRendererState {
 
 	pub fn underline_quads(&self) -> Vec<WgpuQuadDrawItem> {
 		self.quads.iter().copied().filter(|quad| quad.kind == WgpuQuadKind::Underline).collect()
+	}
+
+	pub fn geometric_quads(&self) -> Vec<WgpuQuadDrawItem> {
+		self.quads.iter().copied().filter(|quad| quad.kind == WgpuQuadKind::Geometric).collect()
 	}
 
 	pub fn pixel_rect_quads(&self) -> Vec<WgpuQuadDrawItem> {
@@ -406,7 +474,7 @@ impl WgpuQuadDrawItem {
 		style: TextStyleDto,
 	) -> Self {
 		Self {
-			kind: WgpuQuadKind::Underline,
+			kind: WgpuQuadKind::Geometric,
 			x_px,
 			y_px,
 			width_px: width_px.max(1),
@@ -438,5 +506,210 @@ pub enum WgpuQuadKind {
 	Background,
 	Glyph { c: char, bold: bool },
 	Underline,
+	Geometric,
 	PixelRect { color: RgbaColorDto },
+}
+
+#[cfg(test)]
+mod tests {
+	use germinal_ports::{
+		pty_host::{
+			cell_size::TerminalCellSize,
+			size_info::{TerminalPadding, TerminalSizeInfo},
+			window_size::TerminalWindowSize,
+		},
+		rendering::{
+			frame_plan_builder::{
+				RenderCommandDto, RgbaColorDto, TextStyleDto, encode_pixel_fill_rect_command,
+			},
+			render_target_id::RenderTargetId,
+			renderer_backend::RendererBackend,
+			surface_snapshot::{
+				RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+			},
+		},
+		seq::Seq,
+	};
+
+	use super::{
+		WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
+		append_pixel_rect_quads_from_row,
+	};
+
+	fn pixel_row(command: RenderCommandDto) -> RenderSurfaceRowSnapshot {
+		let text = encode_pixel_fill_rect_command(&command).expect("pixel command should encode");
+		RenderSurfaceRowSnapshot {
+			y:    0,
+			runs: vec![RenderSurfaceRunSnapshot { x: 0, text, style: Default::default() }],
+		}
+	}
+
+	#[test]
+	fn pixel_rects_fill_full_content_size_when_window_has_partial_cells() {
+		let size_info = TerminalSizeInfo::new(
+			TerminalWindowSize::new(1000, 610),
+			TerminalCellSize::new(12, 24),
+			TerminalPadding::ZERO,
+		);
+		let config = WgpuRendererConfig::from(size_info);
+		let row = pixel_row(RenderCommandDto::PixelFillRect {
+			x_px:      0,
+			y_px:      0,
+			width_px:  size_info.grid_size().columns() as u32 * 8,
+			height_px: size_info.grid_size().rows() as u32 * 16,
+			color:     RgbaColorDto::opaque(1, 2, 3),
+		});
+		let mut quads = Vec::new();
+
+		assert!(append_pixel_rect_quads_from_row(&mut quads, &row, config));
+		assert_eq!(quads.len(), 1);
+		assert_eq!(quads[0].kind, WgpuQuadKind::PixelRect { color: RgbaColorDto::opaque(1, 2, 3) });
+		assert_eq!(quads[0].x_px, 0);
+		assert_eq!(quads[0].y_px, 0);
+		assert_eq!(quads[0].width_px, 1000);
+		assert_eq!(quads[0].height_px, 610);
+	}
+
+	#[test]
+	fn pixel_rects_respect_padding_origin_while_filling_content_area() {
+		let size_info = TerminalSizeInfo::new(
+			TerminalWindowSize::new(1000, 610),
+			TerminalCellSize::new(12, 24),
+			TerminalPadding::new(10, 6),
+		);
+		let config = WgpuRendererConfig::from(size_info);
+		let row = pixel_row(RenderCommandDto::PixelFillRect {
+			x_px:      0,
+			y_px:      0,
+			width_px:  size_info.grid_size().columns() as u32 * 8,
+			height_px: size_info.grid_size().rows() as u32 * 16,
+			color:     RgbaColorDto::opaque(9, 8, 7),
+		});
+		let mut quads = Vec::new();
+
+		assert!(append_pixel_rect_quads_from_row(&mut quads, &row, config));
+		assert_eq!(quads.len(), 1);
+		assert_eq!(quads[0].x_px, 10);
+		assert_eq!(quads[0].y_px, 6);
+		assert_eq!(quads[0].width_px, 980);
+		assert_eq!(quads[0].height_px, 598);
+	}
+
+	#[test]
+	fn renders_block_elements_as_geometry_instead_of_font_glyphs() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+			cell_width_px:     8,
+			cell_height_px:    16,
+			content_origin_x:  0,
+			content_origin_y:  0,
+			content_width_px:  8,
+			content_height_px: 16,
+			grid_columns:      1,
+			grid_rows:         1,
+		});
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id:  RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows:       vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x:     0,
+					text:  "▄".to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			dirty_rows: Vec::new(),
+			cursor:     None,
+		});
+
+		let state = backend.state();
+		assert!(state.glyph_quads().is_empty());
+
+		let block_quads = state.geometric_quads();
+		assert_eq!(block_quads.len(), 1);
+		assert_eq!(block_quads[0].x_px, 0);
+		assert_eq!(block_quads[0].y_px, 8);
+		assert_eq!(block_quads[0].width_px, 8);
+		assert_eq!(block_quads[0].height_px, 8);
+	}
+
+	#[test]
+	fn renders_box_drawing_as_geometry_instead_of_font_glyphs() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+			cell_width_px:     8,
+			cell_height_px:    16,
+			content_origin_x:  0,
+			content_origin_y:  0,
+			content_width_px:  8,
+			content_height_px: 16,
+			grid_columns:      1,
+			grid_rows:         1,
+		});
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id:  RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows:       vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x:     0,
+					text:  "│".to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			dirty_rows: Vec::new(),
+			cursor:     None,
+		});
+
+		let state = backend.state();
+		assert!(state.glyph_quads().is_empty());
+
+		let line_quads = state.geometric_quads();
+		assert_eq!(line_quads.len(), 2);
+		assert!(line_quads.iter().all(|quad| quad.width_px == 1));
+		assert_eq!(line_quads[0].x_px, 4);
+		assert_eq!(line_quads[0].y_px, 0);
+	}
+
+	#[test]
+	fn renders_sextants_as_geometry_instead_of_font_glyphs() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+			cell_width_px:     8,
+			cell_height_px:    16,
+			content_origin_x:  0,
+			content_origin_y:  0,
+			content_width_px:  8,
+			content_height_px: 16,
+			grid_columns:      1,
+			grid_rows:         1,
+		});
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id:  RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows:       vec![RenderSurfaceRowSnapshot {
+				y:    0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x:     0,
+					text:  "\u{1FB02}".to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			dirty_rows: Vec::new(),
+			cursor:     None,
+		});
+
+		let state = backend.state();
+		assert!(state.glyph_quads().is_empty());
+
+		let sextant_quads = state.geometric_quads();
+		assert_eq!(sextant_quads, vec![WgpuQuadDrawItem::solid_rect(
+			0,
+			0,
+			8,
+			5,
+			TextStyleDto::plain()
+		)]);
+	}
 }

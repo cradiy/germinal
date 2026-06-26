@@ -168,6 +168,7 @@ pub enum WgpuVertexKind {
 	Background,
 	Glyph { c: char, bold: bool },
 	Underline,
+	Geometric,
 }
 
 fn gpu_vertices_of_quad(
@@ -225,6 +226,7 @@ fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 		WgpuQuadKind::Background | WgpuQuadKind::PixelRect { .. } => WgpuVertexKind::Background,
 		WgpuQuadKind::Glyph { c, bold } => WgpuVertexKind::Glyph { c, bold },
 		WgpuQuadKind::Underline => WgpuVertexKind::Underline,
+		WgpuQuadKind::Geometric => WgpuVertexKind::Geometric,
 	}
 }
 fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
@@ -234,12 +236,13 @@ fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
 			(WGPU_VERTEX_KIND_GLYPH, WgpuTerminalGlyphKey::new(c, bold).packed_id())
 		}
 		WgpuVertexKind::Underline => (WGPU_VERTEX_KIND_UNDERLINE, 0),
+		WgpuVertexKind::Geometric => (WGPU_VERTEX_KIND_UNDERLINE, 0),
 	}
 }
 fn color_of_quad(quad: WgpuQuadDrawItem) -> WgpuVertexColor {
 	match quad.kind {
 		WgpuQuadKind::Background => color_or(quad.style.background, WgpuVertexColor::transparent()),
-		WgpuQuadKind::Glyph { .. } | WgpuQuadKind::Underline => {
+		WgpuQuadKind::Glyph { .. } | WgpuQuadKind::Underline | WgpuQuadKind::Geometric => {
 			color_or(quad.style.foreground, WgpuVertexColor::white())
 		}
 		WgpuQuadKind::PixelRect { color } => {
