@@ -18,7 +18,9 @@ use germinal_ports::{
 };
 use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
 
-use crate::pty::portable_pty_bridge::{PtyBridgeConfig, to_portable_pty_size};
+use crate::pty::portable_pty_bridge::{
+	PtyBridgeConfig, apply_default_terminal_env, to_portable_pty_size,
+};
 
 pub(crate) fn spawn_blocking_bridge_thread<Dispatch>(
 	proxy: Dispatch,
@@ -40,6 +42,7 @@ pub(crate) fn spawn_blocking_bridge_thread<Dispatch>(
 		for arg in &config.shell.args {
 			command.arg(arg);
 		}
+		apply_default_terminal_env(&mut command);
 
 		let mut child =
 			pair.slave.spawn_command(command).expect("failed to spawn interactive shell in pty");
