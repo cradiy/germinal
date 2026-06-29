@@ -6,6 +6,7 @@ use crate::{
 pub trait ITerminalWindowRuntime {
 	fn request_window_redraw(&self);
 	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot);
+	fn surface_snapshot_mut(&mut self) -> &mut RenderSurfaceSnapshot;
 	fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;
 	fn take_redraw_request(&mut self) -> bool;
 	fn terminal_size_info(&self) -> TerminalSizeInfo;

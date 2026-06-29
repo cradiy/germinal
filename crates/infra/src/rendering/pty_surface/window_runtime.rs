@@ -146,6 +146,10 @@ impl WgpuTerminalWindowRuntime {
 		self.request_redraw();
 	}
 
+	pub fn surface_snapshot_mut(&mut self) -> &mut RenderSurfaceSnapshot {
+		&mut self.surface_snapshot
+	}
+
 	pub fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		if window_size.is_empty() {
 			return self.terminal_size_info();
@@ -517,6 +521,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 
 	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
 		WgpuTerminalWindowRuntime::set_surface_snapshot(self, snapshot);
+	}
+
+	fn surface_snapshot_mut(&mut self) -> &mut RenderSurfaceSnapshot {
+		WgpuTerminalWindowRuntime::surface_snapshot_mut(self)
 	}
 
 	fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {

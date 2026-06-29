@@ -18,7 +18,7 @@ impl WgpuTerminalFrameEncoder {
 
 	pub fn encode_upload_plan<E>(
 		&self,
-		upload_plan: &WgpuTerminalFrameUploadPlan,
+		upload_plan: &WgpuTerminalFrameUploadPlan<'_>,
 		encoder: &mut E,
 	) -> WgpuTerminalFrameEncodeResult
 	where
@@ -27,14 +27,14 @@ impl WgpuTerminalFrameEncoder {
 		self.encode_optional_plan(
 			upload_plan.target_id,
 			upload_plan.seq,
-			upload_plan.render_pass_plan.as_ref(),
+			upload_plan.render_pass_plan,
 			encoder,
 		)
 	}
 
 	pub fn encode_uploaded_frame<E>(
 		&self,
-		uploaded_frame: &WgpuTerminalUploadedFrame,
+		uploaded_frame: &WgpuTerminalUploadedFrame<'_>,
 		encoder: &mut E,
 	) -> WgpuTerminalFrameEncodeResult
 	where
@@ -43,7 +43,7 @@ impl WgpuTerminalFrameEncoder {
 		self.encode_optional_plan(
 			uploaded_frame.target_id,
 			uploaded_frame.seq,
-			uploaded_frame.render_pass_plan.as_ref(),
+			uploaded_frame.render_pass_plan,
 			encoder,
 		)
 	}
@@ -52,7 +52,7 @@ impl WgpuTerminalFrameEncoder {
 		&self,
 		render_pass: &mut wgpu::RenderPass<'resource>,
 		pipeline: &'resource WgpuTerminalPipeline,
-		uploaded_frame: &'resource WgpuTerminalUploadedFrame,
+		uploaded_frame: &'resource WgpuTerminalUploadedFrame<'resource>,
 	) -> WgpuTerminalFrameEncodeResult {
 		let mut adapter = WgpuTerminalRenderPassAdapter::new(
 			render_pass,

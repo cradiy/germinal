@@ -103,8 +103,12 @@ impl WgpuTerminalFrameBuilder {
 	) -> WgpuTerminalPreparedFrame {
 		let total_started_at = Instant::now();
 
+		let atlas_build_started_at = Instant::now();
+		let glyph_atlas_frame = self.glyph_atlas_frame_builder.build(surface_snapshot);
+		let atlas_build_time = atlas_build_started_at.elapsed();
+
 		let render_surface_started_at = Instant::now();
-		let (render_surface_time, quads, quads_clone_time) = {
+		let (render_surface_time, vertex_buffer, glyph_uv_map_result, vertex_build_time) = {
 			let mut renderer = self.renderer_backend.borrow_mut();
 
 			if renderer.config() != renderer_config {
@@ -113,22 +117,16 @@ impl WgpuTerminalFrameBuilder {
 
 			renderer.render_surface(surface_snapshot);
 			let render_surface_time = render_surface_started_at.elapsed();
+			let (vertex_buffer, glyph_uv_map_result, vertex_build_time) = renderer.with_quads(|quads| {
+				let vertex_build_started_at = Instant::now();
+				let (vertex_buffer, glyph_uv_map_result) =
+					self.vertex_buffer_builder.build_with_glyph_atlas(quads, &glyph_atlas_frame.atlas);
+				let vertex_build_time = vertex_build_started_at.elapsed();
+				(vertex_buffer, glyph_uv_map_result, vertex_build_time)
+			});
 
-			let quads_clone_started_at = Instant::now();
-			let quads = renderer.quads();
-			let quads_clone_time = quads_clone_started_at.elapsed();
-
-			(render_surface_time, quads, quads_clone_time)
+			(render_surface_time, vertex_buffer, glyph_uv_map_result, vertex_build_time)
 		};
-
-		let atlas_build_started_at = Instant::now();
-		let glyph_atlas_frame = self.glyph_atlas_frame_builder.build(surface_snapshot);
-		let atlas_build_time = atlas_build_started_at.elapsed();
-
-		let vertex_build_started_at = Instant::now();
-		let (vertex_buffer, glyph_uv_map_result) =
-			self.vertex_buffer_builder.build_with_glyph_atlas(&quads, &glyph_atlas_frame.atlas);
-		let vertex_build_time = vertex_build_started_at.elapsed();
 
 		let uv_map_started_at = Instant::now();
 		let uv_map_time = uv_map_started_at.elapsed();
@@ -154,7 +152,7 @@ impl WgpuTerminalFrameBuilder {
 
 		let timings = WgpuTerminalPreparedFrameTimings {
 			render_surface:  render_surface_time,
-			quads_clone:     quads_clone_time,
+			quads_clone:     Duration::ZERO,
 			vertex_build:    vertex_build_time,
 			atlas_build:     atlas_build_time,
 			uv_map:          uv_map_time,

@@ -19,7 +19,7 @@ impl WgpuTerminalCommandEncoderAdapter {
 		target_view: &wgpu::TextureView,
 		render_target_plan: WgpuTerminalRenderTargetPlan,
 		pipeline: &WgpuTerminalPipeline,
-		uploaded_frame: &WgpuTerminalUploadedFrame,
+		uploaded_frame: &WgpuTerminalUploadedFrame<'_>,
 	) -> WgpuTerminalCommandEncoderResult {
 		if render_target_plan.is_empty() {
 			return WgpuTerminalCommandEncoderResult {

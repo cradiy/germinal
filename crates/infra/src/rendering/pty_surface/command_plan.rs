@@ -15,7 +15,7 @@ pub struct WgpuTerminalCommandPlan {
 impl WgpuTerminalCommandPlan {
 	pub fn new(
 		render_target_plan: WgpuTerminalRenderTargetPlan,
-		upload_plan: &WgpuTerminalFrameUploadPlan,
+		upload_plan: &WgpuTerminalFrameUploadPlan<'_>,
 	) -> Self {
 		let mut commands = Vec::new();
 
@@ -142,36 +142,38 @@ mod tests {
 	fn builds_command_plan_for_draw_frame() {
 		let target_id = RenderTargetId::new(1);
 		let seq = Seq::new(9);
+		let vertex_upload = crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
+			vertex_data:  Arc::from(vec![
+				crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
+			]),
+			index_data:   Arc::from(vec![0_u32]),
+			vertex_count: 4,
+			index_count:  42,
+		};
+		let viewport_upload =
+			crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
+				bytes:     vec![0; 8],
+				width_px:  1280.0,
+				height_px: 720.0,
+			};
+		let render_pass_plan =
+			crate::rendering::pty_surface::render_pass_plan::WgpuTerminalRenderPassPlan::new(
+				crate::rendering::pty_surface::draw_indexed::WgpuDrawIndexedPlan {
+					vertex_slot:    0,
+					index_format:   wgpu::IndexFormat::Uint32,
+					index_count:    42,
+					base_vertex:    0,
+					first_instance: 0,
+					instance_count: 1,
+				},
+			);
 
 		let upload_plan = WgpuTerminalFrameUploadPlan {
 			target_id,
 			seq,
-			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_data:  Arc::from(vec![
-					crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
-				]),
-				index_data:   Arc::from(vec![0_u32]),
-				vertex_count: 4,
-				index_count:  42,
-			},
-			viewport_upload:
-				crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
-					bytes:     vec![0; 8],
-					width_px:  1280.0,
-					height_px: 720.0,
-				},
-			render_pass_plan: Some(
-				crate::rendering::pty_surface::render_pass_plan::WgpuTerminalRenderPassPlan::new(
-					crate::rendering::pty_surface::draw_indexed::WgpuDrawIndexedPlan {
-						vertex_slot:    0,
-						index_format:   wgpu::IndexFormat::Uint32,
-						index_count:    42,
-						base_vertex:    0,
-						first_instance: 0,
-						instance_count: 1,
-					},
-				),
-			),
+			vertex_upload: &vertex_upload,
+			viewport_upload: &viewport_upload,
+			render_pass_plan: Some(&render_pass_plan),
 		};
 
 		let command_plan =
@@ -200,24 +202,26 @@ mod tests {
 	fn empty_render_target_builds_empty_command_plan() {
 		let target_id = RenderTargetId::new(1);
 		let seq = Seq::new(9);
+		let vertex_upload = crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
+			vertex_data:  Arc::from(
+				Vec::<crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex>::new(),
+			),
+			index_data:   Arc::from(Vec::<u32>::new()),
+			vertex_count: 0,
+			index_count:  0,
+		};
+		let viewport_upload =
+			crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
+				bytes:     vec![0; 8],
+				width_px:  0.0,
+				height_px: 0.0,
+			};
 
 		let upload_plan = WgpuTerminalFrameUploadPlan {
 			target_id,
 			seq,
-			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_data:  Arc::from(
-					Vec::<crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex>::new(),
-				),
-				index_data:   Arc::from(Vec::<u32>::new()),
-				vertex_count: 0,
-				index_count:  0,
-			},
-			viewport_upload:
-				crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
-					bytes:     vec![0; 8],
-					width_px:  0.0,
-					height_px: 0.0,
-				},
+			vertex_upload: &vertex_upload,
+			viewport_upload: &viewport_upload,
 			render_pass_plan: None,
 		};
 
@@ -234,36 +238,38 @@ mod tests {
 	fn recorder_records_command_plan() {
 		let target_id = RenderTargetId::new(1);
 		let seq = Seq::new(9);
+		let vertex_upload = crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
+			vertex_data:  Arc::from(vec![
+				crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
+			]),
+			index_data:   Arc::from(vec![0_u32]),
+			vertex_count: 4,
+			index_count:  6,
+		};
+		let viewport_upload =
+			crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
+				bytes:     vec![0; 8],
+				width_px:  1280.0,
+				height_px: 720.0,
+			};
+		let render_pass_plan =
+			crate::rendering::pty_surface::render_pass_plan::WgpuTerminalRenderPassPlan::new(
+				crate::rendering::pty_surface::draw_indexed::WgpuDrawIndexedPlan {
+					vertex_slot:    0,
+					index_format:   wgpu::IndexFormat::Uint32,
+					index_count:    6,
+					base_vertex:    0,
+					first_instance: 0,
+					instance_count: 1,
+				},
+			);
 
 		let upload_plan = WgpuTerminalFrameUploadPlan {
 			target_id,
 			seq,
-			vertex_upload: crate::rendering::pty_surface::buffer_uploader::WgpuBufferUploadBytes {
-				vertex_data:  Arc::from(vec![
-					crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex::default(),
-				]),
-				index_data:   Arc::from(vec![0_u32]),
-				vertex_count: 4,
-				index_count:  6,
-			},
-			viewport_upload:
-				crate::rendering::pty_surface::viewport_bind_group::WgpuViewportUploadBytes {
-					bytes:     vec![0; 8],
-					width_px:  1280.0,
-					height_px: 720.0,
-				},
-			render_pass_plan: Some(
-				crate::rendering::pty_surface::render_pass_plan::WgpuTerminalRenderPassPlan::new(
-					crate::rendering::pty_surface::draw_indexed::WgpuDrawIndexedPlan {
-						vertex_slot:    0,
-						index_format:   wgpu::IndexFormat::Uint32,
-						index_count:    6,
-						base_vertex:    0,
-						first_instance: 0,
-						instance_count: 1,
-					},
-				),
-			),
+			vertex_upload: &vertex_upload,
+			viewport_upload: &viewport_upload,
+			render_pass_plan: Some(&render_pass_plan),
 		};
 
 		let command_plan =

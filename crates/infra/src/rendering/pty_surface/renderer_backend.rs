@@ -1,6 +1,7 @@
 use std::{
 	cell::RefCell,
 	collections::{BTreeMap, BTreeSet},
+	sync::Arc,
 };
 
 use germinal_ports::{
@@ -39,7 +40,10 @@ impl WgpuRendererBackend {
 
 	pub fn config(&self) -> WgpuRendererConfig { self.inner.borrow().config }
 
-	pub fn quads(&self) -> Vec<WgpuQuadDrawItem> { self.inner.borrow().quads.clone() }
+	pub fn with_quads<T>(&self, f: impl FnOnce(&[WgpuQuadDrawItem]) -> T) -> T {
+		let inner = self.inner.borrow();
+		f(inner.quads())
+	}
 
 	pub fn state(&self) -> WgpuRendererState { self.inner.borrow().clone() }
 }
@@ -76,7 +80,7 @@ impl RendererBackend for WgpuRendererBackend {
 		for row_y in dirty_rows {
 			if let Some(row) = snapshot_rows.get(&row_y) {
 				let rendered_row = render_row(row, config);
-				inner.draw_rows.insert(row_y, rendered_row.draw_row.clone());
+				inner.draw_rows.insert(row_y, Arc::clone(&rendered_row.draw_row));
 				inner.rendered_rows.insert(row_y, rendered_row);
 			} else {
 				inner.draw_rows.remove(&row_y);
@@ -175,7 +179,7 @@ fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> Wgp
 			x += cell_width;
 		}
 	}
-	WgpuRenderedRow { draw_row, background_quads, glyph_quads, underline_quads }
+	WgpuRenderedRow { draw_row: Arc::new(draw_row), background_quads, glyph_quads, underline_quads }
 }
 
 fn append_terminal_geometric_glyph_quads(
@@ -305,13 +309,13 @@ pub struct WgpuRendererState {
 	pub last_target_id: Option<RenderTargetId>,
 	pub last_seq:       Option<Seq>,
 	rendered_rows:      BTreeMap<u32, WgpuRenderedRow>,
-	draw_rows:          BTreeMap<u32, WgpuDrawRow>,
+	draw_rows:          BTreeMap<u32, Arc<WgpuDrawRow>>,
 	quads:              Vec<WgpuQuadDrawItem>,
 }
 impl WgpuRendererState {
-	pub fn row(&self, y: u32) -> Option<&WgpuDrawRow> { self.draw_rows.get(&y) }
+	pub fn row(&self, y: u32) -> Option<&WgpuDrawRow> { self.draw_rows.get(&y).map(Arc::as_ref) }
 
-	pub fn rows(&self) -> &BTreeMap<u32, WgpuDrawRow> { &self.draw_rows }
+	pub fn rows(&self) -> &BTreeMap<u32, Arc<WgpuDrawRow>> { &self.draw_rows }
 
 	pub fn glyphs(&self) -> Vec<WgpuGlyphDrawItem> {
 		self.draw_rows.values().flat_map(|row| row.glyphs.iter().copied()).collect()
@@ -356,7 +360,7 @@ impl WgpuRendererState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WgpuRenderedRow {
-	draw_row:         WgpuDrawRow,
+	draw_row:         Arc<WgpuDrawRow>,
 	background_quads: Vec<WgpuQuadDrawItem>,
 	glyph_quads:      Vec<WgpuQuadDrawItem>,
 	underline_quads:  Vec<WgpuQuadDrawItem>,

@@ -17,13 +17,12 @@ use germinal_ports::{
 #[derive(kudi::DepInj)]
 #[target(RenderService)]
 pub struct RenderServiceState {
-	redraw_pending:          bool,
-	window_focused:          bool,
-	focused_render_target:   Option<RenderTargetId>,
-	latest_surface_snapshot: Option<RenderSurfaceSnapshot>,
-	surface_snapshot_tx:     Sender<RenderSurfaceSnapshot>,
-	surface_snapshot_rx:     Receiver<RenderSurfaceSnapshot>,
-	snapshot_wake_pending:   Arc<AtomicBool>,
+	redraw_pending:        bool,
+	window_focused:        bool,
+	focused_render_target: Option<RenderTargetId>,
+	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
+	surface_snapshot_rx:   Receiver<RenderSurfaceSnapshot>,
+	snapshot_wake_pending: Arc<AtomicBool>,
 }
 
 impl RenderServiceState {
@@ -34,7 +33,6 @@ impl RenderServiceState {
 			redraw_pending: false,
 			window_focused: true,
 			focused_render_target: None,
-			latest_surface_snapshot: None,
 			surface_snapshot_tx,
 			surface_snapshot_rx,
 			snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -75,13 +73,11 @@ impl RenderServiceState {
 		true
 	}
 
-	fn with_cursor_focus(&self, mut snapshot: RenderSurfaceSnapshot) -> RenderSurfaceSnapshot {
+	fn apply_cursor_focus(&self, snapshot: &mut RenderSurfaceSnapshot) {
 		if let Some(cursor) = snapshot.cursor.as_mut() {
 			cursor.focused =
 				self.window_focused && self.focused_render_target == Some(snapshot.target_id);
 		}
-
-		snapshot
 	}
 
 	fn request_redraw(&mut self) { self.redraw_pending = true; }
@@ -119,19 +115,19 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 			return;
 		};
 
-		let snapshot = {
+		let mut snapshot = snapshot;
+		{
 			let state: &RenderServiceState = self.prj_ref().as_ref();
-			state.with_cursor_focus(snapshot)
-		};
+			state.apply_cursor_focus(&mut snapshot);
+		}
 
 		self
 			.prj_ref_mut()
 			.window_runtime_mut()
 			.expect("window runtime must be initialized before use")
-			.set_surface_snapshot(snapshot.clone());
+			.set_surface_snapshot(snapshot);
 
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-		state.latest_surface_snapshot = Some(snapshot);
 		state.redraw_pending = true;
 	}
 
@@ -216,24 +212,19 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 
 fn refresh_cursor_focus<Deps>(deps: &mut Deps)
 where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRuntimeStore {
-	let Some(snapshot) = ({
+	let (window_focused, focused_render_target) = {
 		let state: &RenderServiceState = deps.as_ref();
-		state.latest_surface_snapshot.clone()
-	}) else {
-		return;
+		(state.window_focused, state.focused_render_target)
 	};
 
-	let snapshot = {
-		let state: &RenderServiceState = deps.as_ref();
-		state.with_cursor_focus(snapshot)
-	};
+	let runtime = deps.window_runtime_mut().expect("window runtime must be initialized before use");
 
-	deps
-		.window_runtime_mut()
-		.expect("window runtime must be initialized before use")
-		.set_surface_snapshot(snapshot.clone());
+	let snapshot = runtime.surface_snapshot_mut();
+	let target_id = snapshot.target_id;
 
-	let state: &mut RenderServiceState = deps.as_mut();
-	state.latest_surface_snapshot = Some(snapshot);
-	state.redraw_pending = true;
+	if let Some(cursor) = snapshot.cursor.as_mut() {
+		cursor.focused = window_focused && focused_render_target == Some(target_id);
+	}
+
+	deps.as_mut().redraw_pending = true;
 }

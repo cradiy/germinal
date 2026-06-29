@@ -69,20 +69,20 @@ impl WgpuTerminalFrameRenderer {
 		)
 	}
 
-	pub fn build_upload_plan(
+	pub fn build_upload_plan<'a>(
 		&self,
-		prepared: &WgpuTerminalPreparedFrame,
-	) -> WgpuTerminalFrameUploadPlan {
+		prepared: &'a WgpuTerminalPreparedFrame,
+	) -> WgpuTerminalFrameUploadPlan<'a> {
 		WgpuTerminalFrameUploadPlan::from_prepared_frame(prepared)
 	}
 
-	pub fn upload(
+	pub fn upload<'a>(
 		&self,
 		gpu: WgpuTerminalGpuContext<'_>,
 		pipeline: &WgpuTerminalPipeline,
-		prepared: &WgpuTerminalPreparedFrame,
-		upload_plan: &WgpuTerminalFrameUploadPlan,
-	) -> WgpuTerminalUploadedFrame {
+		prepared: &'a WgpuTerminalPreparedFrame,
+		upload_plan: &WgpuTerminalFrameUploadPlan<'a>,
+	) -> WgpuTerminalUploadedFrame<'a> {
 		upload_plan.upload(WgpuTerminalUploadContext {
 			device: gpu.device,
 			queue: gpu.queue,
@@ -101,7 +101,7 @@ impl WgpuTerminalFrameRenderer {
 		target_view: &wgpu::TextureView,
 		render_target_plan: WgpuTerminalRenderTargetPlan,
 		pipeline: &WgpuTerminalPipeline,
-		uploaded_frame: &WgpuTerminalUploadedFrame,
+		uploaded_frame: &WgpuTerminalUploadedFrame<'_>,
 	) -> WgpuTerminalCommandEncoderResult {
 		self.command_encoder_adapter.encode_frame(
 			command_encoder,

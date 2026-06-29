@@ -16,23 +16,23 @@ use crate::rendering::pty_surface::{
 	},
 };
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct WgpuTerminalFrameUploadPlan {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WgpuTerminalFrameUploadPlan<'a> {
 	pub target_id:        RenderTargetId,
 	pub seq:              Seq,
-	pub vertex_upload:    WgpuBufferUploadBytes,
-	pub viewport_upload:  WgpuViewportUploadBytes,
-	pub render_pass_plan: Option<WgpuTerminalRenderPassPlan>,
+	pub vertex_upload:    &'a WgpuBufferUploadBytes,
+	pub viewport_upload:  &'a WgpuViewportUploadBytes,
+	pub render_pass_plan: Option<&'a WgpuTerminalRenderPassPlan>,
 }
 
-impl WgpuTerminalFrameUploadPlan {
-	pub fn from_prepared_frame(prepared: &WgpuTerminalPreparedFrame) -> Self {
+impl<'a> WgpuTerminalFrameUploadPlan<'a> {
+	pub fn from_prepared_frame(prepared: &'a WgpuTerminalPreparedFrame) -> Self {
 		Self {
 			target_id:        prepared.target_id,
 			seq:              prepared.seq,
-			vertex_upload:    prepared.upload_bytes.clone(),
-			viewport_upload:  prepared.viewport_upload_bytes.clone(),
-			render_pass_plan: prepared.render_pass_plan.clone(),
+			vertex_upload:    &prepared.upload_bytes,
+			viewport_upload:  &prepared.viewport_upload_bytes,
+			render_pass_plan: prepared.render_pass_plan.as_ref(),
 		}
 	}
 
@@ -46,9 +46,12 @@ impl WgpuTerminalFrameUploadPlan {
 
 	pub fn viewport_byte_len(&self) -> usize { self.viewport_upload.byte_len() }
 
-	pub fn upload(&self, context: WgpuTerminalUploadContext<'_>) -> WgpuTerminalUploadedFrame {
+	pub fn upload(
+		&self,
+		context: WgpuTerminalUploadContext<'_, 'a>,
+	) -> WgpuTerminalUploadedFrame<'a> {
 		let uploaded_buffers =
-			context.buffer_uploader.upload_bytes(context.device, context.queue, &self.vertex_upload);
+			context.buffer_uploader.upload_bytes(context.device, context.queue, self.vertex_upload);
 
 		let viewport_factory = WgpuViewportBindGroupFactory::new();
 
@@ -83,35 +86,35 @@ impl WgpuTerminalFrameUploadPlan {
 			glyph_atlas_texture: glyph_atlas_gpu.texture,
 			glyph_atlas_bind_group: glyph_atlas_gpu.bind_group,
 			glyph_atlas_gpu_cache_hit: glyph_atlas_gpu.cache_hit,
-			render_pass_plan: self.render_pass_plan.clone(),
+			render_pass_plan: self.render_pass_plan,
 		}
 	}
 }
 
 #[derive(Clone, Copy)]
-pub struct WgpuTerminalUploadContext<'a> {
-	pub device:                        &'a wgpu::Device,
-	pub queue:                         &'a wgpu::Queue,
-	pub buffer_uploader:               &'a WgpuBufferUploader,
-	pub viewport_bind_group_layout:    &'a wgpu::BindGroupLayout,
+pub struct WgpuTerminalUploadContext<'gpu, 'frame> {
+	pub device:                        &'gpu wgpu::Device,
+	pub queue:                         &'gpu wgpu::Queue,
+	pub buffer_uploader:               &'gpu WgpuBufferUploader,
+	pub viewport_bind_group_layout:    &'gpu wgpu::BindGroupLayout,
 	pub viewport_binding:              u32,
-	pub glyph_atlas_bind_group_layout: &'a wgpu::BindGroupLayout,
-	pub prepared:                      &'a WgpuTerminalPreparedFrame,
-	pub glyph_atlas_gpu_cache:         Option<&'a WgpuTerminalGlyphAtlasGpuCache>,
+	pub glyph_atlas_bind_group_layout: &'gpu wgpu::BindGroupLayout,
+	pub prepared:                      &'frame WgpuTerminalPreparedFrame,
+	pub glyph_atlas_gpu_cache:         Option<&'gpu WgpuTerminalGlyphAtlasGpuCache>,
 }
 
-pub struct WgpuTerminalUploadedFrame {
+pub struct WgpuTerminalUploadedFrame<'a> {
 	pub target_id:                 RenderTargetId,
 	pub seq:                       Seq,
 	pub uploaded_buffers:          WgpuUploadedBuffers,
 	pub viewport_bind_group:       WgpuViewportBindGroup,
-	pub glyph_atlas_texture:       Option<Arc<WgpuTerminalGlyphAtlasTexture>>,
-	pub glyph_atlas_bind_group:    Option<Arc<WgpuTerminalGlyphAtlasBindGroup>>,
+	pub glyph_atlas_texture:       Option<std::sync::Arc<WgpuTerminalGlyphAtlasTexture>>,
+	pub glyph_atlas_bind_group:    Option<std::sync::Arc<WgpuTerminalGlyphAtlasBindGroup>>,
 	pub glyph_atlas_gpu_cache_hit: bool,
-	pub render_pass_plan:          Option<WgpuTerminalRenderPassPlan>,
+	pub render_pass_plan:          Option<&'a WgpuTerminalRenderPassPlan>,
 }
 
-impl WgpuTerminalUploadedFrame {
+impl WgpuTerminalUploadedFrame<'_> {
 	pub fn has_draw_work(&self) -> bool {
 		self.uploaded_buffers.vertex_count > 0
 			&& self.uploaded_buffers.index_count > 0
