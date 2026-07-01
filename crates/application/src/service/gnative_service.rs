@@ -1,17 +1,23 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_gnative_protocol::gnative::{
+	input::{
+		GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
+		GNativeInputNamedKey,
+	},
+	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+};
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		window_input_event::{WindowInputEvent, WindowInputModifiers},
 	},
-	gnative::{
-		input::{GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers},
-		rpc::{IGNativeRpcClient, IGNativeRpcClientProvider},
-		session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+	service::{
+		gnative_rpc_client::{IGNativeRpcClient, IGNativeRpcClientProvider},
+		gnative_service::IGNativeService,
+		worker_service::IWorkerService,
 	},
-	service::{gnative_service::IGNativeService, worker_service::IWorkerService},
 };
 
 #[derive(kudi::DepInj)]
@@ -124,10 +130,10 @@ fn gnative_input_event_from(
 		GShellInputEvent::Window(window_event) => match window_event {
 			WindowInputEvent::ModifiersChanged(_) => None,
 			WindowInputEvent::Key { state, logical_key, text } => Some(GNativeInputEvent::Key {
-				state:       GNativeInputElementState::from(state),
-				logical_key: GNativeInputKey::from(&logical_key),
+				state:       gnative_input_state_from(state),
+				logical_key: gnative_input_key_from(&logical_key),
 				text:        text.as_deref().map(ToOwned::to_owned),
-				modifiers:   GNativeInputModifiers::from(modifiers),
+				modifiers:   gnative_input_modifiers_from(modifiers),
 			}),
 			WindowInputEvent::Ime(text) => Some(GNativeInputEvent::Ime(text)),
 			WindowInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
@@ -135,21 +141,84 @@ fn gnative_input_event_from(
 	}
 }
 
+fn gnative_input_state_from(
+	state: germinal_ports::event::window_input_event::WindowInputElementState,
+) -> GNativeInputElementState {
+	match state {
+		germinal_ports::event::window_input_event::WindowInputElementState::Pressed => {
+			GNativeInputElementState::Pressed
+		}
+		germinal_ports::event::window_input_event::WindowInputElementState::Released => {
+			GNativeInputElementState::Released
+		}
+	}
+}
+
+fn gnative_input_modifiers_from(modifiers: WindowInputModifiers) -> GNativeInputModifiers {
+	GNativeInputModifiers { control: modifiers.control_key(), alt: modifiers.alt_key() }
+}
+
+fn gnative_input_key_from(
+	key: &germinal_ports::event::window_input_event::WindowInputKey,
+) -> GNativeInputKey {
+	match key {
+		germinal_ports::event::window_input_event::WindowInputKey::Named(named) => {
+			GNativeInputKey::Named(match named {
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Enter => {
+					GNativeInputNamedKey::Enter
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Tab => {
+					GNativeInputNamedKey::Tab
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Backspace => {
+					GNativeInputNamedKey::Backspace
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Escape => {
+					GNativeInputNamedKey::Escape
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::ArrowUp => {
+					GNativeInputNamedKey::ArrowUp
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::ArrowDown => {
+					GNativeInputNamedKey::ArrowDown
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::ArrowRight => {
+					GNativeInputNamedKey::ArrowRight
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::ArrowLeft => {
+					GNativeInputNamedKey::ArrowLeft
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Home => {
+					GNativeInputNamedKey::Home
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::End => {
+					GNativeInputNamedKey::End
+				}
+				germinal_ports::event::window_input_event::WindowInputNamedKey::Delete => {
+					GNativeInputNamedKey::Delete
+				}
+			})
+		}
+		germinal_ports::event::window_input_event::WindowInputKey::Character(text) => {
+			GNativeInputKey::Character(text.to_string())
+		}
+		germinal_ports::event::window_input_event::WindowInputKey::Unidentified => {
+			GNativeInputKey::Unidentified
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
-	use germinal_ports::{
-		event::{
-			gshell_input::{GShellInput, GShellInputEvent},
-			window_input_event::{
-				WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-			},
-		},
-		gnative::{
-			input::{
-				GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
-			},
-			session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+	use germinal_gnative_protocol::gnative::{
+		input::{GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers},
+		session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+	};
+	use germinal_ports::event::{
+		gshell_input::{GShellInput, GShellInputEvent},
+		window_input_event::{
+			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 		},
 	};
 

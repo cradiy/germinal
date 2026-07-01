@@ -1,5 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use germinal_ports::gnative::input::{
+use germinal_gnative_protocol::gnative::input::{
 	GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputNamedKey,
 };
 
@@ -21,8 +21,8 @@ pub fn try_to_crossterm_event(
 			u16::try_from(columns).unwrap_or(u16::MAX),
 			u16::try_from(rows).unwrap_or(u16::MAX),
 		)),
-		GNativeInputEvent::Key { state, logical_key, text: _, modifiers } => Ok(Event::Key(KeyEvent {
-			code:      key_code_of(logical_key)?,
+		GNativeInputEvent::Key { state, logical_key, text, modifiers } => Ok(Event::Key(KeyEvent {
+			code:      key_code_of(logical_key, text.as_deref())?,
 			modifiers: modifiers_of(modifiers.control, modifiers.alt),
 			kind:      key_event_kind_of(state),
 			state:     KeyEventState::empty(),
@@ -30,7 +30,10 @@ pub fn try_to_crossterm_event(
 	}
 }
 
-fn key_code_of(key: GNativeInputKey) -> Result<KeyCode, UnsupportedCrosstermEvent> {
+fn key_code_of(
+	key: GNativeInputKey,
+	text: Option<&str>,
+) -> Result<KeyCode, UnsupportedCrosstermEvent> {
 	match key {
 		GNativeInputKey::Named(named) => Ok(match named {
 			GNativeInputNamedKey::Enter => KeyCode::Enter,
@@ -45,18 +48,26 @@ fn key_code_of(key: GNativeInputKey) -> Result<KeyCode, UnsupportedCrosstermEven
 			GNativeInputNamedKey::End => KeyCode::End,
 			GNativeInputNamedKey::Delete => KeyCode::Delete,
 		}),
-		GNativeInputKey::Character(text) => {
-			let mut chars = text.chars();
-			let Some(first) = chars.next() else {
-				return Err(UnsupportedCrosstermEvent::Character(text));
-			};
-			if chars.next().is_some() {
-				return Err(UnsupportedCrosstermEvent::Character(text));
+		GNativeInputKey::Character(text) => single_char_key_code(&text),
+		GNativeInputKey::Unidentified => {
+			if let Some(text) = text {
+				single_char_key_code(text)
+			} else {
+				Ok(KeyCode::Null)
 			}
-			Ok(KeyCode::Char(first))
 		}
-		GNativeInputKey::Unidentified => Ok(KeyCode::Null),
 	}
+}
+
+fn single_char_key_code(text: &str) -> Result<KeyCode, UnsupportedCrosstermEvent> {
+	let mut chars = text.chars();
+	let Some(first) = chars.next() else {
+		return Err(UnsupportedCrosstermEvent::Character(text.to_string()));
+	};
+	if chars.next().is_some() {
+		return Err(UnsupportedCrosstermEvent::Character(text.to_string()));
+	}
+	Ok(KeyCode::Char(first))
 }
 
 fn modifiers_of(control: bool, alt: bool) -> KeyModifiers {
@@ -80,7 +91,7 @@ fn key_event_kind_of(state: GNativeInputElementState) -> KeyEventKind {
 #[cfg(test)]
 mod tests {
 	use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-	use germinal_ports::gnative::input::{
+	use germinal_gnative_protocol::gnative::input::{
 		GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
 		GNativeInputNamedKey,
 	};
@@ -137,5 +148,24 @@ mod tests {
 			}),
 			Err(UnsupportedCrosstermEvent::Character("ab".to_string()))
 		);
+	}
+
+	#[test]
+	fn falls_back_to_text_for_unidentified_single_char_keys() {
+		let event = try_to_crossterm_event(GNativeInputEvent::Key {
+			state:       GNativeInputElementState::Pressed,
+			logical_key: GNativeInputKey::Unidentified,
+			text:        Some(" ".to_string()),
+			modifiers:   GNativeInputModifiers { control: false, alt: false },
+		})
+		.expect("text fallback should convert");
+
+		assert!(matches!(
+			event,
+			Event::Key(key)
+				if key.code == KeyCode::Char(' ')
+					&& key.kind == KeyEventKind::Press
+					&& key.modifiers == KeyModifiers::empty()
+		));
 	}
 }

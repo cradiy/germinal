@@ -4,7 +4,7 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
-use germinal_ports::gnative::{
+use germinal_gnative_protocol::gnative::{
 	frame::GNativeFrame,
 	input::GNativeInputEvent,
 	rpc::{GNativeAppToHost, GNativeHostToApp},
@@ -157,15 +157,15 @@ mod tests {
 	use std::{sync::mpsc, thread, time::Duration};
 
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
+	use germinal_gnative_protocol::{
+		gnative::{frame::GNativeFrame, input::GNativeInputEvent, session::GNativeSessionDescriptor},
+		rendering::frame_plan_builder::{RenderCommandDto, TextStyleDto},
+		seq::Seq,
+	};
 	use germinal_infra::gnative::local_rpc::LocalGNativeRpcClient;
 	use germinal_ports::{
 		event::runtime_event_dispatcher::IRuntimeEventDispatcher,
-		gnative::{
-			frame::GNativeFrame, input::GNativeInputEvent, rpc::IGNativeRpcClient,
-			session::GNativeSessionDescriptor,
-		},
-		rendering::frame_plan_builder::{RenderCommandDto, TextStyleDto},
-		seq::Seq,
+		service::gnative_rpc_client::IGNativeRpcClient,
 	};
 
 	use super::LocalGNativeBootstrap;

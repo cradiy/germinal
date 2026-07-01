@@ -1,5 +1,5 @@
 [package]
-name                 = "germinal-gnative-ui"
+name                 = "germinal-gnative-core"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -7,4 +7,5 @@ repository.workspace = true
 authors.workspace    = true
 
 [dependencies]
-germinal-gnative-core.workspace = true
+germinal-gnative-protocol.workspace = true
+unicode-width.workspace = true

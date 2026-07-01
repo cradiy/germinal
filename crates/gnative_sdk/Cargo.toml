@@ -7,9 +7,9 @@ repository.workspace = true
 authors.workspace    = true
 
 [dependencies]
-germinal-ports.workspace = true
-serde_json.workspace     = true
-crossterm.workspace      = true
+germinal-gnative-protocol.workspace = true
+serde_json.workspace                = true
+crossterm.workspace                 = true
 
 [dev-dependencies]
 germinal-domain.workspace = true

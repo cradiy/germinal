@@ -1,5 +1,5 @@
 [package]
-name                 = "germinal-gnative-ratatui-backend"
+name                 = "germinal-gnative-widgets"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -7,6 +7,4 @@ repository.workspace = true
 authors.workspace    = true
 
 [dependencies]
-germinal-domain.workspace = true
-germinal-ports.workspace  = true
-ratatui-core.workspace    = true
+germinal-gnative-ui.workspace = true

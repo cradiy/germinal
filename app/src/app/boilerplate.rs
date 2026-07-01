@@ -17,12 +17,12 @@ use germinal_domain::{
 	gshell::vo::gshell_id::GShellId,
 	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
+use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		runtime_event_dispatcher::{IRuntimeEventDispatcher, IRuntimeEventDispatcherProvider},
 	},
-	gnative::{rpc::IGNativeRpcClientProvider, session::GNativeSessionDescriptor},
 	pty_host::{
 		pty_backend::IPtyBackendProvider, size_info::TerminalSizeInfo, terminal_size::TerminalPtySize,
 		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
@@ -34,9 +34,10 @@ use germinal_ports::{
 	},
 	repository::IRepository,
 	service::{
-		gnative_service::IGNativeService, gshell_service::IGShellService,
-		layout_service::ILayoutService, pty_service::IPtyService, render_service::IRenderService,
-		worker_service::IWorkerService, workspace_service::IWorkspaceService,
+		gnative_rpc_client::IGNativeRpcClientProvider, gnative_service::IGNativeService,
+		gshell_service::IGShellService, layout_service::ILayoutService, pty_service::IPtyService,
+		render_service::IRenderService, worker_service::IWorkerService,
+		workspace_service::IWorkspaceService,
 	},
 };
 

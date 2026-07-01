@@ -1,24 +1,8 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
-use serde::{Deserialize, Serialize};
-
-use crate::gnative::{
-	frame::GNativeFrame,
+use germinal_gnative_protocol::gnative::{
 	input::GNativeInputEvent,
-	session::{GNativeAppHello, GNativeSessionAccepted, GNativeSessionDescriptor},
+	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GNativeHostToApp {
-	Welcome(GNativeSessionAccepted),
-	Input(GNativeInputEvent),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GNativeAppToHost {
-	Hello(GNativeAppHello),
-	Frame(GNativeFrame),
-	Exit,
-}
 
 pub trait IGNativeRpcClient {
 	fn connect_and_handshake(

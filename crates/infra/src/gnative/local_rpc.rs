@@ -8,16 +8,16 @@ use std::{
 };
 
 use germinal_domain::gshell::vo::gshell_id::GShellId;
+use germinal_gnative_protocol::gnative::{
+	frame::{GNativeFrame, GNativeFrameCursor},
+	input::GNativeInputEvent,
+	rpc::{GNativeAppToHost, GNativeHostToApp},
+	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+};
 use germinal_ports::{
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::IRuntimeEventDispatcher,
-	},
-	gnative::{
-		frame::{GNativeFrame, GNativeFrameCursor},
-		input::GNativeInputEvent,
-		rpc::{GNativeAppToHost, GNativeHostToApp, IGNativeRpcClient},
-		session::{GNativeSessionAccepted, GNativeSessionDescriptor},
 	},
 	rendering::{
 		frame_plan_builder::BuiltFramePlan,
@@ -27,6 +27,7 @@ use germinal_ports::{
 			RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
 		},
 	},
+	service::gnative_rpc_client::IGNativeRpcClient,
 };
 
 use crate::rendering::text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter;

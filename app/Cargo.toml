@@ -10,5 +10,6 @@ authors.workspace    = true
 germinal-application.workspace = true
 germinal-domain.workspace      = true
 germinal-infra.workspace       = true
+germinal-gnative-protocol.workspace = true
 germinal-ports.workspace       = true
 winit.workspace                = true

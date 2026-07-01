@@ -1,6 +1,5 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
-
-use crate::{gnative::session::GNativeSessionDescriptor, seq::Seq};
+use germinal_gnative_protocol::{gnative::session::GNativeSessionDescriptor, seq::Seq};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {

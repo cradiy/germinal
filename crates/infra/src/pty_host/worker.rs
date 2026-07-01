@@ -11,12 +11,12 @@ use std::{
 };
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 use germinal_ports::{
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::IRuntimeEventDispatcher,
 	},
-	gnative::session::GNativeSessionDescriptor,
 	pty_host::{
 		pty_input::{PtyInput, PtyInputSender},
 		snapshot::TerminalSnapshotProvider,
@@ -736,12 +736,12 @@ mod tests {
 	use germinal_domain::{
 		gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize,
 	};
+	use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 	use germinal_ports::{
 		event::{
 			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 			runtime_event_dispatcher::IRuntimeEventDispatcher,
 		},
-		gnative::session::GNativeSessionDescriptor,
 		pty_host::worker_backend::ITerminalWorkerBackend,
 		rendering::surface_snapshot::RenderSurfaceSnapshot,
 	};
