@@ -5,6 +5,7 @@ members = [
   "crates/ports",
   "crates/application",
   "crates/infra",
+  "crates/gnative_ui",
   "crates/gnative_sdk",
   "crates/gnative_ratatui_backend",
   "crates/gnative_demo",
@@ -23,6 +24,7 @@ germinal-domain                  = { path = "crates/domain" }
 germinal-ports                   = { path = "crates/ports" }
 germinal-application             = { path = "crates/application" }
 germinal-infra                   = { path = "crates/infra" }
+germinal-gnative-ui              = { path = "crates/gnative_ui" }
 germinal-gnative-sdk             = { path = "crates/gnative_sdk" }
 germinal-gnative-ratatui-backend = { path = "crates/gnative_ratatui_backend" }
 

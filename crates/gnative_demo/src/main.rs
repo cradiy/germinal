@@ -1,27 +1,27 @@
 use std::{
 	collections::VecDeque,
-	io::{self, stdout},
+	io::stdout,
 	sync::mpsc::{self, RecvTimeoutError},
 	thread,
 	time::{Duration, Instant},
 };
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use germinal_gnative_ratatui_backend::GerminalBackend;
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_sdk::{
 	input::{UnsupportedCrosstermEvent, try_to_crossterm_event},
-	local_session::{LocalGNativeBootstrap, LocalGNativeSession},
+	local_session::{LocalGNativeBootstrap, LocalGNativeFrameWriter, LocalGNativeSession},
+};
+use germinal_gnative_ui::{
+	CompiledUi, Element, GridSize, GroupBox, IntoElementNode, UiTree, div, h_flex, px, rgb, rgba,
+	styled_text_input, v_flex,
 };
 use germinal_ports::{
-	gnative::{frame::GNativeFrame, input::GNativeInputEvent},
-	rendering::frame_plan_builder::{RenderCommandDto, RgbaColorDto},
-};
-use ratatui::{
-	Frame, Terminal,
-	layout::{Constraint, Layout, Rect, Size},
-	style::{Color, Modifier, Style, Stylize},
-	text::{Line, Span},
-	widgets::{Block, Borders, Paragraph, Wrap},
+	gnative::{
+		frame::{GNativeFrame, GNativeFrameCursor},
+		input::GNativeInputEvent,
+	},
+	seq::Seq,
 };
 
 const COMMAND_ANIMATION_DURATION: Duration = Duration::from_secs(10);
@@ -30,26 +30,18 @@ const MAX_ACTIVITY_EVENTS: usize = 8;
 const MAX_SUBMISSIONS: usize = 6;
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 
-type FrameEmitter = Box<dyn FnMut(GNativeFrame) -> io::Result<()>>;
-type DemoTerminal = Terminal<GerminalBackend<FrameEmitter>>;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), String> {
 	let bootstrap = LocalGNativeBootstrap::bind_temporary(1)?;
 	eprintln!("germinal-gnative-demo waiting for host at {}", bootstrap.descriptor().endpoint);
 	let mut terminal_stdout = stdout();
-	bootstrap.write_enter_control_sequence(&mut terminal_stdout)?;
+	bootstrap
+		.write_enter_control_sequence(&mut terminal_stdout)
+		.map_err(|error| error.to_string())?;
 
 	let mut session = bootstrap.accept()?;
 	let accepted = session.accepted().clone();
 	let initial_size = wait_for_initial_size(&mut session)?;
-	let frame_writer = session.frame_writer()?;
-	let emitter: FrameEmitter = Box::new({
-		let mut frame_writer = frame_writer;
-		move |frame| frame_writer.send_frame(frame).map_err(io::Error::other)
-	});
-
-	let backend = GerminalBackend::new(accepted.gshell_id, initial_size, emitter);
-	let mut terminal = Terminal::new(backend)?;
+	let mut emitter = DemoFrameEmitter::new(accepted.gshell_id, session.frame_writer()?);
 	let mut app = DemoApp::new(initial_size);
 	app.push_event(format!(
 		"connected gshell={} protocol=v{}",
@@ -60,14 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 	let (input_tx, input_rx) = mpsc::channel();
 	spawn_input_reader(session, input_tx);
-	draw_app(&mut app, &mut terminal)?;
+	draw_app(&mut app, &mut emitter)?;
 
 	loop {
 		let frame_started_at = Instant::now();
 		let mut needs_draw = false;
 
 		while let Ok(message) = input_rx.try_recv() {
-			if !handle_session_message(&mut app, &mut terminal, message)? {
+			if !handle_session_message(&mut app, message) {
 				app.should_quit = true;
 			}
 			needs_draw = true;
@@ -82,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		}
 
 		if needs_draw {
-			draw_app(&mut app, &mut terminal)?;
+			draw_app(&mut app, &mut emitter)?;
 		}
 
 		let wait = if app.is_animating() {
@@ -93,10 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 		match input_rx.recv_timeout(wait) {
 			Ok(message) => {
-				if !handle_session_message(&mut app, &mut terminal, message)? {
+				if !handle_session_message(&mut app, message) {
 					app.should_quit = true;
 				}
-				draw_app(&mut app, &mut terminal)?;
+				draw_app(&mut app, &mut emitter)?;
 			}
 			Err(RecvTimeoutError::Timeout) => {}
 			Err(RecvTimeoutError::Disconnected) => break,
@@ -128,35 +120,31 @@ fn spawn_input_reader(mut session: LocalGNativeSession, tx: mpsc::Sender<Session
 	});
 }
 
-fn handle_session_message(
-	app: &mut DemoApp,
-	terminal: &mut DemoTerminal,
-	message: SessionMessage,
-) -> io::Result<bool> {
+fn handle_session_message(app: &mut DemoApp, message: SessionMessage) -> bool {
 	match message {
 		SessionMessage::Input(input) => {
-			handle_input(app, terminal, input)?;
-			Ok(true)
+			handle_input(app, input);
+			true
 		}
 		SessionMessage::Closed => {
 			app.push_event("host closed the GNative session".to_string());
-			Ok(false)
+			false
 		}
 		SessionMessage::Error(error) => {
 			app.push_event(format!("session error: {error}"));
-			Ok(false)
+			false
 		}
 	}
 }
 
-fn draw_app(app: &mut DemoApp, terminal: &mut DemoTerminal) -> io::Result<()> {
-	terminal.backend_mut().set_pixel_commands(app.pixel_commands());
-	terminal.draw(|frame| app.render(frame))?;
+fn draw_app(app: &mut DemoApp, emitter: &mut DemoFrameEmitter) -> Result<(), String> {
+	let compiled = app.ui_tree().compile(app.size);
+	emitter.send(compiled)?;
 	app.record_presented_frame(Instant::now());
 	Ok(())
 }
 
-fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<Size, String> {
+fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<GridSize, String> {
 	while let Some(input) = session.read_input()? {
 		if let GNativeInputEvent::Resize { columns, rows } = input {
 			return Ok(clamped_size(columns, rows));
@@ -165,31 +153,19 @@ fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<Size, Stri
 	Err("host closed before initial resize".to_string())
 }
 
-fn handle_input(
-	app: &mut DemoApp,
-	terminal: &mut DemoTerminal,
-	input: GNativeInputEvent,
-) -> io::Result<()> {
+fn handle_input(app: &mut DemoApp, input: GNativeInputEvent) {
 	match try_to_crossterm_event(input) {
-		Ok(event) => handle_crossterm_event(app, terminal, event),
+		Ok(event) => handle_crossterm_event(app, event),
 		Err(unsupported) => {
 			app.push_event(format!("unsupported input: {}", describe_unsupported(&unsupported)));
-			Ok(())
 		}
 	}
 }
 
-fn handle_crossterm_event(
-	app: &mut DemoApp,
-	terminal: &mut DemoTerminal,
-	event: Event,
-) -> io::Result<()> {
+fn handle_crossterm_event(app: &mut DemoApp, event: Event) {
 	match event {
 		Event::Resize(columns, rows) => {
-			let size = Size::new(columns, rows);
-			terminal.backend_mut().resize(size);
-			terminal.autoresize()?;
-			app.size = size;
+			app.size = GridSize::new(columns, rows);
 			app.push_event(format!("resize {}x{}", columns, rows));
 		}
 		Event::Paste(text) => {
@@ -218,11 +194,10 @@ fn handle_crossterm_event(
 		}
 		_ => {}
 	}
-	Ok(())
 }
 
-fn clamped_size(columns: u32, rows: u32) -> Size {
-	Size::new(
+fn clamped_size(columns: u32, rows: u32) -> GridSize {
+	GridSize::new(
 		u16::try_from(columns).unwrap_or(u16::MAX).max(1),
 		u16::try_from(rows).unwrap_or(u16::MAX).max(1),
 	)
@@ -267,8 +242,30 @@ enum SessionMessage {
 	Error(String),
 }
 
+struct DemoFrameEmitter {
+	gshell_id: GShellId,
+	frame_seq: u64,
+	writer:    LocalGNativeFrameWriter,
+}
+
+impl DemoFrameEmitter {
+	fn new(gshell_id: GShellId, writer: LocalGNativeFrameWriter) -> Self {
+		Self { gshell_id, frame_seq: 0, writer }
+	}
+
+	fn send(&mut self, compiled: CompiledUi) -> Result<(), String> {
+		self.frame_seq += 1;
+		self.writer.send_frame(GNativeFrame {
+			gshell_id: self.gshell_id,
+			seq:       Seq::new(self.frame_seq),
+			commands:  compiled.commands,
+			cursor:    compiled.cursor.map(|cursor| GNativeFrameCursor { x: cursor.x, y: cursor.y }),
+		})
+	}
+}
+
 struct DemoApp {
-	size:                 Size,
+	size:                 GridSize,
 	input:                String,
 	submissions:          VecDeque<String>,
 	events:               VecDeque<String>,
@@ -281,7 +278,7 @@ struct DemoApp {
 }
 
 impl DemoApp {
-	fn new(size: Size) -> Self {
+	fn new(size: GridSize) -> Self {
 		Self {
 			size,
 			input: String::new(),
@@ -349,9 +346,105 @@ impl DemoApp {
 
 	fn animation_t(&self) -> f32 { self.animation_elapsed.as_secs_f32() }
 
-	fn pixel_commands(&self) -> Vec<RenderCommandDto> {
-		let width_px = u32::from(self.size.width).max(1) * 8;
-		let height_px = u32::from(self.size.height).max(1) * 16;
+	fn ui_tree(&self) -> UiTree {
+		UiTree::new(
+			div().size_full().child(self.pixel_scene()).child(
+				v_flex()
+					.size_full()
+					.child(
+						div().h(px(8.0)).child(
+							GroupBox::new().title("Status").child(
+								v_flex()
+									.h(px(6.0))
+									.gap_1()
+									.child(div().text_color(rgb(80, 220, 255)).font_bold().child(self.status_title()))
+									.child("Input is read on a dedicated thread; rendering owns frame emission.")
+									.child(
+										"Type 'animation' and press Enter to play the full-GShell pixel animation.",
+									),
+							),
+						),
+					)
+					.child(
+						div().flex_1().child(GroupBox::new().title("Workspace").child(self.workspace_body())),
+					)
+					.child(
+						div().h(px(8.0)).child(
+							GroupBox::new().title("Composer").child(
+								v_flex()
+									.h(px(6.0))
+									.gap_1()
+									.child("Current input")
+									.child(styled_text_input(self.input.clone(), true, yellow_style()))
+									.child("Enter submits. Type animation to play. q exits."),
+							),
+						),
+					),
+			),
+		)
+	}
+
+	fn workspace_body(&self) -> Element {
+		h_flex()
+			.flex_1()
+			.child(
+				v_flex()
+					.flex_1()
+					.gap_1()
+					.child(div().text_color(rgb(80, 220, 255)).font_bold().child("Activity"))
+					.child(div().flex_1().child(self.activity_text())),
+			)
+			.child(div().w(px(1.0)).child(self.main_separator_text()))
+			.child(
+				v_flex()
+					.flex_1()
+					.gap_1()
+					.child(div().text_color(rgb(80, 220, 255)).font_bold().child("Pixel Layer"))
+					.child(div().flex_1().child(self.pixel_text())),
+			)
+			.into_element()
+	}
+
+	fn status_title(&self) -> String {
+		format!(
+			"GNative UI Tree Demo  viewport={}x{}  frame={} fps={:.1}",
+			self.size.columns, self.size.rows, self.frame_count, self.fps
+		)
+	}
+
+	fn activity_text(&self) -> String {
+		let mut lines = vec!["Submitted lines".to_string()];
+		if self.submissions.is_empty() {
+			lines.push("  <type animation + Enter>".to_string());
+		} else {
+			lines.extend(self.submissions.iter().map(|line| format!("  {line}")));
+		}
+		lines.push(String::new());
+		lines.push("Recent events".to_string());
+		if self.events.is_empty() {
+			lines.push("  <waiting>".to_string());
+		} else {
+			lines.extend(self.events.iter().map(|event| format!("  {event}")));
+		}
+		lines.join("\n")
+	}
+
+	fn pixel_text(&self) -> String {
+		let status = if self.is_animating() { "playing" } else { "idle" };
+		format!(
+			"Pixel animation status: {status}\nThe card, glow, and beam are expressed as gpui-like \
+			 absolute divs.\nThe visible DSL is now aligned toward gpui-component style."
+		)
+	}
+
+	fn main_separator_text(&self) -> String {
+		let main_height = self.size.rows.saturating_sub(14).max(1);
+		std::iter::repeat_n("|", main_height as usize).collect::<Vec<_>>().join("\n")
+	}
+
+	fn pixel_scene(&self) -> Element {
+		let width_px = u32::from(self.size.columns).max(1) * 8;
+		let height_px = u32::from(self.size.rows).max(1) * 16;
 		let t = self.animation_t();
 		let card_w = width_px.clamp(96, 240).min(width_px.max(1));
 		let card_h = height_px.clamp(48, 120).min(height_px.max(1));
@@ -364,124 +457,72 @@ impl DemoApp {
 		} else {
 			0
 		};
-		vec![
-			fill(0, 0, width_px, height_px, rgba(6, 9, 20, 255)),
-			fill(beam_x.saturating_sub(160), 0, 96, height_px, rgba(54, 94, 210, 42)),
-			fill(
-				x.saturating_sub(18),
-				y.saturating_sub(18),
-				card_w + 36,
-				card_h + 36,
-				rgba(82, 142, 255, pulse),
-			),
-			fill(x, y, card_w, card_h, rgba(20, 32, 72, 230)),
-			fill(x + 8, y + 8, card_w.saturating_sub(16), 6, rgba(80, 220, 255, 210)),
-			fill(width_px.saturating_sub(180), 20, 150, 18, rgba(255, 86, 170, 190)),
-		]
-	}
-
-	fn render(&self, frame: &mut Frame) {
-		let area = frame.area();
-		let vertical =
-			Layout::vertical([Constraint::Length(4), Constraint::Min(10), Constraint::Length(5)])
-				.split(area);
-		let main = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
-			.split(vertical[1]);
-		frame.render_widget(self.header(), vertical[0]);
-		frame.render_widget(self.activity_panel(), main[0]);
-		frame.render_widget(self.pixel_panel(), main[1]);
-		frame.render_widget(self.footer(), vertical[2]);
-		let cursor_area = input_area(vertical[2]);
-		if cursor_area.width > 0 {
-			let cursor_x = cursor_area.x.saturating_add(self.input.chars().count() as u16);
-			frame
-				.set_cursor_position((cursor_x.min(cursor_area.right().saturating_sub(1)), cursor_area.y));
-		}
-	}
-
-	fn header(&self) -> Paragraph<'static> {
-		Paragraph::new(vec![
-			Line::from(vec![
-				Span::styled(
-					"GNative Pixel Demo",
-					Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-				),
-				Span::raw("  "),
-				Span::raw(format!("viewport={}x{}", self.size.width, self.size.height)),
-				Span::raw("  "),
-				Span::styled(
-					format!("frame={} fps={:.1}", self.frame_count, self.fps),
-					Style::default().fg(Color::Green),
-				),
-			]),
-			Line::from("Input is read on a dedicated thread; rendering keeps its own frame loop."),
-			Line::from("Type 'animation' and press Enter to play the full-GShell pixel animation."),
-		])
-		.block(Block::default().borders(Borders::ALL).title("Status"))
-	}
-
-	fn activity_panel(&self) -> Paragraph<'static> {
-		let mut lines = Vec::new();
-		lines.push(Line::from(Span::styled(
-			"Submitted lines",
-			Style::default().add_modifier(Modifier::BOLD),
-		)));
-		if self.submissions.is_empty() {
-			lines.push(Line::from("  <type animation + Enter>"));
-		} else {
-			for line in &self.submissions {
-				lines.push(Line::from(format!("  {line}")));
-			}
-		}
-		lines.push(Line::default());
-		lines.push(Line::from(Span::styled(
-			"Recent events",
-			Style::default().add_modifier(Modifier::BOLD),
-		)));
-		if self.events.is_empty() {
-			lines.push(Line::from("  <waiting>"));
-		} else {
-			for event in &self.events {
-				lines.push(Line::from(format!("  {event}")));
-			}
-		}
-		Paragraph::new(lines)
-			.block(Block::default().borders(Borders::ALL).title("Activity"))
-			.wrap(Wrap { trim: false })
-	}
-
-	fn pixel_panel(&self) -> Paragraph<'static> {
-		let status = if self.is_animating() { "playing" } else { "idle" };
-		Paragraph::new(vec![
-			Line::from(format!("Pixel animation status: {status}")),
-			Line::from("The card/glow/beam are RenderCommandDto::PixelFillRect commands."),
-			Line::from("The pixel layer is scaled to the full GShell viewport."),
-		])
-		.block(Block::default().borders(Borders::ALL).title("Pixel Layer"))
-	}
-
-	fn footer(&self) -> Paragraph<'static> {
-		Paragraph::new(vec![
-			Line::from("Current input"),
-			Line::from(self.input.clone().yellow()),
-			Line::from("Enter submits. Type animation to play. q exits."),
-		])
-		.block(Block::default().borders(Borders::ALL).title("Composer"))
+		div()
+			.size_full()
+			.child(
+				div()
+					.absolute()
+					.left(px(0.0))
+					.top(px(0.0))
+					.w(px(width_px as f32))
+					.h(px(height_px as f32))
+					.bg(rgba(6, 9, 20, 255)),
+			)
+			.child(
+				div()
+					.absolute()
+					.left(px(beam_x.saturating_sub(160) as f32))
+					.top(px(0.0))
+					.w(px(96.0))
+					.h(px(height_px as f32))
+					.bg(rgba(54, 94, 210, 42)),
+			)
+			.child(
+				div()
+					.absolute()
+					.left(px(x.saturating_sub(18) as f32))
+					.top(px(y.saturating_sub(18) as f32))
+					.w(px((card_w + 36) as f32))
+					.h(px((card_h + 36) as f32))
+					.bg(rgba(82, 142, 255, pulse)),
+			)
+			.child(
+				div()
+					.absolute()
+					.left(px(x as f32))
+					.top(px(y as f32))
+					.w(px(card_w as f32))
+					.h(px(card_h as f32))
+					.bg(rgba(20, 32, 72, 230)),
+			)
+			.child(
+				div()
+					.absolute()
+					.left(px((x + 8) as f32))
+					.top(px((y + 8) as f32))
+					.w(px(card_w.saturating_sub(16) as f32))
+					.h(px(6.0))
+					.bg(rgba(80, 220, 255, 210)),
+			)
+			.child(
+				div()
+					.absolute()
+					.left(px(width_px.saturating_sub(180) as f32))
+					.top(px(20.0))
+					.w(px(150.0))
+					.h(px(18.0))
+					.bg(rgba(255, 86, 170, 190)),
+			)
+			.into_element()
 	}
 }
 
-fn fill(
-	x_px: u32,
-	y_px: u32,
-	width_px: u32,
-	height_px: u32,
-	color: RgbaColorDto,
-) -> RenderCommandDto {
-	RenderCommandDto::PixelFillRect { x_px, y_px, width_px, height_px, color }
-}
-fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> RgbaColorDto {
-	RgbaColorDto::new(red, green, blue, alpha)
-}
-fn input_area(area: Rect) -> Rect {
-	Rect::new(area.x + 1, area.y + 2, area.width.saturating_sub(2), 1)
+fn yellow_style() -> germinal_ports::rendering::frame_plan_builder::TextStyleDto {
+	germinal_ports::rendering::frame_plan_builder::TextStyleDto {
+		foreground: Some(rgb(255, 214, 92)),
+		background: None,
+		bold:       false,
+		italic:     false,
+		underline:  false,
+	}
 }
