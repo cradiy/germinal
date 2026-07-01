@@ -12,6 +12,7 @@ use germinal_domain::{
 	gshell::vo::gshell_id::GShellId,
 	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
+use germinal_gnative_protocol::gnative::session::GNATIVE_PROTOCOL_VERSION;
 use germinal_ports::{
 	event::{
 		gshell_input::GShellInputEvent,
@@ -28,7 +29,11 @@ use germinal_ports::{
 		worker_input::TerminalWorkerInput,
 	},
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
-	service::{pty_service::IPtyService, worker_service::IWorkerService},
+	service::{
+		gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
+		pty_service::IPtyService,
+		worker_service::IWorkerService,
+	},
 };
 
 #[derive(Debug, Clone)]
@@ -60,6 +65,7 @@ impl Default for PtyServiceState {
 impl<Deps> IPtyService for PtyService<Deps>
 where Deps: AsRef<PtyServiceState>
 		+ IRuntimeEventDispatcherProvider
+		+ IGNativeTunnelProvider
 		+ IPtyBackendProvider
 		+ IWorkerService<TerminalWorkerSender = SyncSender<TerminalWorkerInput>>
 {
@@ -86,12 +92,24 @@ where Deps: AsRef<PtyServiceState>
 		) else {
 			return;
 		};
+		let shell_env = match self
+			.prj_ref()
+			.gnative_tunnel()
+			.ensure_session_descriptor(gshell_id, GNATIVE_PROTOCOL_VERSION)
+		{
+			Ok(descriptor) => descriptor.tunnel_env(),
+			Err(error) => {
+				eprintln!("failed to prepare gnative tunnel for {}: {error}", gshell_id.value());
+				return;
+			}
+		};
 
 		let pty_input_sender = self.prj_ref().pty_backend().spawn_pty(
 			proxy,
 			gshell_id,
 			pty_host_id,
 			pty_size,
+			shell_env,
 			terminal_worker_sender.clone(),
 		);
 

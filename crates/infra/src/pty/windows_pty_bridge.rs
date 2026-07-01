@@ -4,6 +4,7 @@ use std::{
 	thread,
 };
 
+use compio::runtime::{ResumeUnwind, Runtime, spawn_blocking};
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_ports::{
 	event::{
@@ -19,10 +20,10 @@ use germinal_ports::{
 use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
 
 use crate::pty::portable_pty_bridge::{
-	PtyBridgeConfig, apply_default_terminal_env, to_portable_pty_size,
+	PtyBridgeConfig, apply_default_terminal_env, apply_shell_env, to_portable_pty_size,
 };
 
-pub(crate) fn spawn_blocking_bridge_thread<Dispatch>(
+pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
 	proxy: Dispatch,
 	gshell_id: GShellId,
 	_pty_host_id: PtyHostId,
@@ -33,48 +34,70 @@ pub(crate) fn spawn_blocking_bridge_thread<Dispatch>(
 	Dispatch: IRuntimeEventDispatcher,
 {
 	thread::spawn(move || {
-		let pty_system = native_pty_system();
+		let runtime = Runtime::new().expect("failed to create compio runtime");
+		runtime.block_on(run_compio_bridge(proxy, gshell_id, config, terminal_worker_tx, input_rx));
+	});
+}
 
-		let pair =
-			pty_system.openpty(to_portable_pty_size(config.initial_size)).expect("failed to open pty");
+async fn run_compio_bridge<Dispatch>(
+	proxy: Dispatch,
+	gshell_id: GShellId,
+	config: PtyBridgeConfig,
+	terminal_worker_tx: SyncSender<TerminalWorkerInput>,
+	input_rx: PtyInputReceiver,
+) where
+	Dispatch: IRuntimeEventDispatcher,
+{
+	let pty_system = native_pty_system();
 
-		let mut command = CommandBuilder::new(&config.shell.program);
-		for arg in &config.shell.args {
-			command.arg(arg);
-		}
-		apply_default_terminal_env(&mut command);
+	let pair =
+		pty_system.openpty(to_portable_pty_size(config.initial_size)).expect("failed to open pty");
 
-		let mut child =
-			pair.slave.spawn_command(command).expect("failed to spawn interactive shell in pty");
+	let mut command = CommandBuilder::new(&config.shell.program);
+	for arg in &config.shell.args {
+		command.arg(arg);
+	}
+	apply_default_terminal_env(&mut command);
+	apply_shell_env(&mut command, &config.shell_env);
 
-		drop(pair.slave);
+	let mut child =
+		pair.slave.spawn_command(command).expect("failed to spawn interactive shell in pty");
 
-		let master = pair.master;
-		let mut reader = master.try_clone_reader().expect("failed to clone pty reader");
-		let mut writer = master.take_writer().expect("failed to take pty writer");
+	drop(pair.slave);
 
-		let _input_thread = thread::spawn(move || {
-			while let Some(input) = input_rx.recv_blocking() {
-				match input {
-					PtyInput::Bytes(bytes) => {
-						if writer.write_all(&bytes).is_err() {
-							break;
-						}
+	let master = pair.master;
+	let mut reader = master.try_clone_reader().expect("failed to clone pty reader");
+	let mut writer = master.take_writer().expect("failed to take pty writer");
 
-						let _ = writer.flush();
+	let input_task = spawn_blocking(move || {
+		while let Some(input) = input_rx.recv_blocking() {
+			match input {
+				PtyInput::Bytes(bytes) => {
+					if writer.write_all(&bytes).is_err() {
+						break;
 					}
-					PtyInput::Resize(size) => {
-						let _ = master.resize(to_portable_pty_size(size));
+
+					if writer.flush().is_err() {
+						break;
+					}
+				}
+				PtyInput::Resize(size) => {
+					if master.resize(to_portable_pty_size(size)).is_err() {
+						break;
 					}
 				}
 			}
-		});
-
-		read_pty_to_terminal_worker(&mut reader, &terminal_worker_tx);
-
-		let _ = child.wait();
-		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		}
 	});
+
+	let read_task = spawn_blocking(move || {
+		read_pty_to_terminal_worker(&mut reader, &terminal_worker_tx);
+	});
+
+	let _ = read_task.await.resume_unwind();
+	let _ = input_task.await.resume_unwind();
+	let _ = child.wait();
+	let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
 }
 
 fn read_pty_to_terminal_worker<R>(

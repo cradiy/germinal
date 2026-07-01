@@ -52,8 +52,7 @@ pub struct App {
 	workspace_persistence_repository: SqliteRepository<Workspace>,
 	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
 	pty_backend:                      PlatformPtyBackend,
-	gnative_rpc_client:
-		germinal_infra::gnative::local_rpc::LocalGNativeRpcClient<AppRuntimeEventDispatcher>,
+	gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>,
 	terminal_worker_backend:          PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
 	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
@@ -76,8 +75,7 @@ impl App {
 			)?,
 			runtime_event_dispatcher:         runtime_event_dispatcher.clone(),
 			pty_backend:                      PlatformPtyBackend::new(),
-			gnative_rpc_client:
-				germinal_infra::gnative::local_rpc::LocalGNativeRpcClient::new(),
+			gnative_tunnel:                   germinal_infra::gnative::tunnel::GNativeTunnel::new(),
 			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(
 				runtime_event_dispatcher,
 			),
@@ -87,7 +85,7 @@ impl App {
 		};
 
 		app
-			.gnative_rpc_client
+			.gnative_tunnel
 			.configure(app.runtime_event_dispatcher.clone(), app.surface_snapshot_sender());
 
 		app.restore_workspace()?;
@@ -163,16 +161,13 @@ impl ApplicationHandler<RuntimeEvent> for App {
 
 	fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
 		match event {
-			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { descriptor }) => {
-				if let Err(error) = self.enter_gnative_session(descriptor.clone()) {
-					eprintln!(
-						"failed to enter gnative session for {}: {error}",
-						descriptor.gshell_id.value()
-					);
+			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id }) => {
+				if let Err(error) = self.enter_gnative_session(gshell_id) {
+					eprintln!("failed to enter gnative session for {}: {error}", gshell_id.value());
 				} else {
-					self.enter_gnative_mode(descriptor.gshell_id);
+					self.enter_gnative_mode(gshell_id);
 					let size_info = self.current_terminal_size_info();
-					self.resize_gshell(descriptor.gshell_id, size_info.pty_size(), size_info.grid_size());
+					self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
 				}
 			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }) => {

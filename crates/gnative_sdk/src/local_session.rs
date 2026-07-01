@@ -1,55 +1,48 @@
 use std::{
 	io::{BufRead, BufReader, Write},
-	net::{Shutdown, TcpListener, TcpStream},
-	time::{SystemTime, UNIX_EPOCH},
+	net::{Shutdown, TcpStream},
 };
 
 use germinal_gnative_protocol::gnative::{
 	frame::GNativeFrame,
 	input::GNativeInputEvent,
-	rpc::{GNativeAppToHost, GNativeHostToApp},
 	session::{GNativeAppHello, GNativeSessionAccepted},
+	tunnel::{GNativeAppToHost, GNativeHostToApp},
 };
 
-use crate::control_sequence::{GNativeLaunchDescriptor, write_enter_control_sequence};
+use crate::control_sequence::{GNativeTunnelEnv, write_enter_control_sequence};
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 
-pub struct LocalGNativeBootstrap {
-	listener:   TcpListener,
-	descriptor: GNativeLaunchDescriptor,
+pub struct LocalGNativeTunnelBootstrap {
+	tunnel_env: GNativeTunnelEnv,
 }
 
-impl LocalGNativeBootstrap {
-	pub fn bind_temporary(protocol_version: u32) -> Result<Self, String> {
-		let token = unique_token();
-		Self::bind("127.0.0.1:0".to_string(), token, protocol_version)
+impl LocalGNativeTunnelBootstrap {
+	pub fn from_env() -> Result<Self, String> {
+		Ok(Self { tunnel_env: GNativeTunnelEnv::from_env()? })
 	}
 
-	pub fn bind(endpoint: String, token: String, protocol_version: u32) -> Result<Self, String> {
-		let bind_addr = strip_tcp_endpoint_prefix(&endpoint);
-		let listener = TcpListener::bind(bind_addr).map_err(|error| error.to_string())?;
-		let endpoint = encode_tcp_endpoint(listener.local_addr().map_err(|error| error.to_string())?);
-		Ok(Self { listener, descriptor: GNativeLaunchDescriptor { endpoint, token, protocol_version } })
-	}
+	pub fn from_tunnel_env(tunnel_env: GNativeTunnelEnv) -> Self { Self { tunnel_env } }
 
-	pub fn descriptor(&self) -> &GNativeLaunchDescriptor { &self.descriptor }
+	pub fn tunnel_env(&self) -> &GNativeTunnelEnv { &self.tunnel_env }
 
 	pub fn write_enter_control_sequence<W: std::io::Write>(
 		&self,
 		writer: &mut W,
 	) -> std::io::Result<()> {
-		write_enter_control_sequence(writer, &self.descriptor)
+		write_enter_control_sequence(writer, &self.tunnel_env)
 	}
 
-	pub fn accept(self) -> Result<LocalGNativeSession, String> {
-		let (mut stream, _) = self.listener.accept().map_err(|error| error.to_string())?;
+	pub fn connect(self) -> Result<LocalGNativeSession, String> {
+		let mut stream = TcpStream::connect(strip_tcp_endpoint_prefix(&self.tunnel_env.endpoint))
+			.map_err(|error| error.to_string())?;
 		stream.set_nodelay(true).ok();
 		write_app_message(
 			&mut stream,
 			&GNativeAppToHost::Hello(GNativeAppHello {
-				token:            self.descriptor.token,
-				protocol_version: self.descriptor.protocol_version,
+				token:            self.tunnel_env.token,
+				protocol_version: self.tunnel_env.protocol_version,
 			}),
 		)?;
 
@@ -134,18 +127,8 @@ fn read_host_message(
 	serde_json::from_str(line.trim_end()).map(Some).map_err(|error| error.to_string())
 }
 
-fn encode_tcp_endpoint(addr: std::net::SocketAddr) -> String {
-	format!("{TCP_ENDPOINT_PREFIX}{addr}")
-}
-
 fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
 	endpoint.strip_prefix(TCP_ENDPOINT_PREFIX).unwrap_or(endpoint)
-}
-
-fn unique_token() -> String {
-	let timestamp =
-		SystemTime::now().duration_since(UNIX_EPOCH).expect("clock should be after epoch").as_nanos();
-	format!("gnative-{timestamp:x}")
 }
 
 impl Drop for LocalGNativeSession {
@@ -158,17 +141,18 @@ mod tests {
 
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::{
-		gnative::{frame::GNativeFrame, input::GNativeInputEvent, session::GNativeSessionDescriptor},
+		gnative::{frame::GNativeFrame, input::GNativeInputEvent},
 		rendering::frame_plan_builder::{RenderCommandDto, TextStyleDto},
 		seq::Seq,
 	};
-	use germinal_infra::gnative::local_rpc::LocalGNativeRpcClient;
+	use germinal_infra::gnative::tunnel::GNativeTunnel;
 	use germinal_ports::{
 		event::runtime_event_dispatcher::IRuntimeEventDispatcher,
-		service::gnative_rpc_client::IGNativeRpcClient,
+		service::gnative_tunnel::IGNativeTunnel,
 	};
 
-	use super::LocalGNativeBootstrap;
+	use super::LocalGNativeTunnelBootstrap;
+	use crate::control_sequence::GNativeTunnelEnv;
 
 	#[derive(Clone)]
 	struct TestDispatcher;
@@ -183,25 +167,25 @@ mod tests {
 	}
 
 	#[test]
-	fn bootstrap_accepts_host_handshake_and_reads_input() {
-		let bootstrap = LocalGNativeBootstrap::bind_temporary(1).expect("bootstrap should bind");
-		let descriptor = GNativeSessionDescriptor {
-			gshell_id:        GShellId::new(31),
-			endpoint:         bootstrap.descriptor().endpoint.clone(),
-			token:            bootstrap.descriptor().token.clone(),
-			protocol_version: bootstrap.descriptor().protocol_version,
-		};
+	fn bootstrap_connects_to_host_tunnel_and_reads_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
-		let client = LocalGNativeRpcClient::new();
-		client.configure(TestDispatcher, snapshot_tx);
+		let tunnel = GNativeTunnel::new();
+		tunnel.configure(TestDispatcher, snapshot_tx);
+		let descriptor =
+			tunnel.ensure_session_descriptor(GShellId::new(31), 1).expect("descriptor should exist");
+		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
+			endpoint:         descriptor.endpoint.clone(),
+			token:            descriptor.token.clone(),
+			protocol_version: descriptor.protocol_version,
+		});
 
 		let app = thread::spawn(move || {
-			let mut session = bootstrap.accept().expect("session should accept host");
+			let mut session = bootstrap.connect().expect("session should connect host");
 			session.read_input().expect("input should read")
 		});
 
-		client.connect_and_handshake(&descriptor).expect("handshake should complete");
-		client
+		tunnel.accept_session(GShellId::new(31)).expect("handshake should complete");
+		tunnel
 			.send_input(GShellId::new(31), GNativeInputEvent::Paste("hello".to_string()))
 			.expect("host should send input");
 
@@ -213,19 +197,19 @@ mod tests {
 
 	#[test]
 	fn frame_writer_sends_frame_back_to_host() {
-		let bootstrap = LocalGNativeBootstrap::bind_temporary(1).expect("bootstrap should bind");
-		let descriptor = GNativeSessionDescriptor {
-			gshell_id:        GShellId::new(32),
-			endpoint:         bootstrap.descriptor().endpoint.clone(),
-			token:            bootstrap.descriptor().token.clone(),
-			protocol_version: bootstrap.descriptor().protocol_version,
-		};
 		let (snapshot_tx, snapshot_rx) = mpsc::channel();
-		let client = LocalGNativeRpcClient::new();
-		client.configure(TestDispatcher, snapshot_tx);
+		let tunnel = GNativeTunnel::new();
+		tunnel.configure(TestDispatcher, snapshot_tx);
+		let descriptor =
+			tunnel.ensure_session_descriptor(GShellId::new(32), 1).expect("descriptor should exist");
+		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
+			endpoint:         descriptor.endpoint.clone(),
+			token:            descriptor.token.clone(),
+			protocol_version: descriptor.protocol_version,
+		});
 
 		let app = thread::spawn(move || {
-			let session = bootstrap.accept().expect("session should accept host");
+			let session = bootstrap.connect().expect("session should connect host");
 			let mut writer = session.frame_writer().expect("frame writer should clone stream");
 			writer
 				.send_frame(GNativeFrame {
@@ -242,7 +226,7 @@ mod tests {
 				.expect("frame should send");
 		});
 
-		client.connect_and_handshake(&descriptor).expect("handshake should complete");
+		tunnel.accept_session(GShellId::new(32)).expect("handshake should complete");
 		let snapshot =
 			snapshot_rx.recv_timeout(Duration::from_secs(1)).expect("frame snapshot should arrive");
 		assert_eq!(snapshot.target_id.value(), 32);

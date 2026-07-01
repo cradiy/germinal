@@ -28,7 +28,7 @@ use nix::{
 use portable_pty::{CommandBuilder, native_pty_system};
 
 use crate::pty::portable_pty_bridge::{
-	PtyBridgeConfig, apply_default_terminal_env, to_portable_pty_size,
+	PtyBridgeConfig, apply_default_terminal_env, apply_shell_env, to_portable_pty_size,
 };
 
 pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
@@ -74,6 +74,7 @@ async fn run_compio_bridge<Dispatch>(
 		command.arg(arg);
 	}
 	apply_default_terminal_env(&mut command);
+	apply_shell_env(&mut command, &config.shell_env);
 
 	let mut child =
 		pair.slave.spawn_command(command).expect("failed to spawn interactive shell in pty");

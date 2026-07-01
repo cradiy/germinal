@@ -11,7 +11,6 @@ use std::{
 };
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
-use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 use germinal_ports::{
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -366,18 +365,11 @@ where Dispatch: IRuntimeEventDispatcher
 		let seq = Seq::new(self.seq);
 		let started_at = Instant::now();
 		let mut applied_visible_bytes = false;
-		let mut session_descriptor = None;
+		let mut enter_gnative = false;
 
 		for bytes in chunks {
 			let decode_result = self.gnative_enter_decoder.decode(bytes);
-			if let Some(parsed_descriptor) = decode_result.descriptor {
-				session_descriptor = Some(GNativeSessionDescriptor {
-					gshell_id:        self.gshell_id,
-					endpoint:         parsed_descriptor.endpoint,
-					token:            parsed_descriptor.token,
-					protocol_version: parsed_descriptor.protocol_version,
-				});
-			}
+			enter_gnative |= decode_result.enter_gnative;
 
 			if decode_result.visible_bytes.is_empty() {
 				continue;
@@ -390,9 +382,10 @@ where Dispatch: IRuntimeEventDispatcher
 			self.forward_pty_writes(pending_pty_writes);
 		}
 
-		if let Some(descriptor) = session_descriptor {
-			let _ =
-				self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { descriptor }));
+		if enter_gnative {
+			let _ = self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative {
+				gshell_id: self.gshell_id,
+			}));
 		}
 
 		let elapsed = started_at.elapsed();
@@ -736,7 +729,6 @@ mod tests {
 	use germinal_domain::{
 		gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize,
 	};
-	use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 	use germinal_ports::{
 		event::{
 			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -825,7 +817,7 @@ mod tests {
 
 		input
 			.send(germinal_ports::pty_host::worker_input::TerminalWorkerInput::Bytes(
-				b"left\x1bPgerminal-gnative;version=1;endpoint=test;token=secret\x1b\\right".to_vec(),
+				b"left\x1bPgerminal-gnative;\x1b\\right".to_vec(),
 			))
 			.expect("terminal input should send");
 
@@ -841,14 +833,7 @@ mod tests {
 			.expect("enter-gnative event should arrive");
 		assert_eq!(
 			first_event,
-			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative {
-				descriptor: GNativeSessionDescriptor {
-					gshell_id:        GShellId::new(3),
-					endpoint:         "test".to_string(),
-					token:            "secret".to_string(),
-					protocol_version: 1,
-				},
-			})
+			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id: GShellId::new(3) })
 		);
 
 		let second_event = event_rx

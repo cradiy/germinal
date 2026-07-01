@@ -6,7 +6,7 @@ use germinal_gnative_protocol::gnative::{
 		GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
 		GNativeInputNamedKey,
 	},
-	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+	session::GNativeSessionAccepted,
 };
 use germinal_ports::{
 	event::{
@@ -14,8 +14,8 @@ use germinal_ports::{
 		window_input_event::{WindowInputEvent, WindowInputModifiers},
 	},
 	service::{
-		gnative_rpc_client::{IGNativeRpcClient, IGNativeRpcClientProvider},
 		gnative_service::IGNativeService,
+		gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
 		worker_service::IWorkerService,
 	},
 };
@@ -29,8 +29,7 @@ pub struct GNativeServiceState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GNativeSessionRuntime {
-	pub descriptor: GNativeSessionDescriptor,
-	pub accepted:   GNativeSessionAccepted,
+	pub accepted: GNativeSessionAccepted,
 }
 
 impl GNativeServiceState {
@@ -39,7 +38,7 @@ impl GNativeServiceState {
 	}
 
 	pub fn upsert_session(&self, runtime: GNativeSessionRuntime) {
-		self.sessions.borrow_mut().insert(runtime.descriptor.gshell_id, runtime);
+		self.sessions.borrow_mut().insert(runtime.accepted.gshell_id, runtime);
 	}
 
 	pub fn remove_session(&self, gshell_id: GShellId) -> Option<GNativeSessionRuntime> {
@@ -70,13 +69,13 @@ impl Default for GNativeServiceState {
 }
 
 impl<Deps> IGNativeService for GNativeService<Deps>
-where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeRpcClientProvider
+where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 {
 	fn ensure_gshell_gnative(&self, _gshell_id: GShellId) { self.prj_ref().start_worker_pool(); }
 
-	fn enter_gnative_session(&self, descriptor: GNativeSessionDescriptor) -> Result<(), String> {
-		let accepted = self.prj_ref().gnative_rpc_client().connect_and_handshake(&descriptor)?;
-		let runtime = GNativeSessionRuntime { descriptor, accepted };
+	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), String> {
+		let accepted = self.prj_ref().gnative_tunnel().accept_session(gshell_id)?;
+		let runtime = GNativeSessionRuntime { accepted };
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
 		state.upsert_session(runtime);
 		Ok(())
@@ -85,7 +84,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeRpcClientProvi
 	fn exit_gnative_session(&self, gshell_id: GShellId) {
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
 		state.remove_session(gshell_id);
-		if let Err(error) = self.prj_ref().gnative_rpc_client().close_session(gshell_id) {
+		if let Err(error) = self.prj_ref().gnative_tunnel().close_session(gshell_id) {
 			eprintln!("failed to close gnative session for {}: {error}", gshell_id.value());
 		}
 	}
@@ -103,7 +102,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeRpcClientProvi
 			return;
 		};
 
-		if let Err(error) = self.prj_ref().gnative_rpc_client().send_input(gshell_id, event) {
+		if let Err(error) = self.prj_ref().gnative_tunnel().send_input(gshell_id, event) {
 			eprintln!("failed to send gnative input for {}: {error}", gshell_id.value());
 		}
 	}
@@ -114,7 +113,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeRpcClientProvi
 			rows:    term_size.rows() as u32,
 		};
 
-		if let Err(error) = self.prj_ref().gnative_rpc_client().send_input(gshell_id, event) {
+		if let Err(error) = self.prj_ref().gnative_tunnel().send_input(gshell_id, event) {
 			eprintln!("failed to send gnative resize for {}: {error}", gshell_id.value());
 		}
 	}
@@ -213,7 +212,7 @@ mod tests {
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::gnative::{
 		input::{GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers},
-		session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+		session::GNativeSessionAccepted,
 	};
 	use germinal_ports::event::{
 		gshell_input::{GShellInput, GShellInputEvent},
@@ -228,16 +227,7 @@ mod tests {
 	fn state_stores_session_runtime_by_gshell_id() {
 		let state = GNativeServiceState::new();
 		let runtime = GNativeSessionRuntime {
-			descriptor: GNativeSessionDescriptor {
-				gshell_id:        GShellId::new(9),
-				endpoint:         "unix:///tmp/test.sock".to_string(),
-				token:            "secret".to_string(),
-				protocol_version: 1,
-			},
-			accepted:   GNativeSessionAccepted {
-				gshell_id:        GShellId::new(9),
-				protocol_version: 1,
-			},
+			accepted: GNativeSessionAccepted { gshell_id: GShellId::new(9), protocol_version: 1 },
 		};
 
 		state.upsert_session(runtime.clone());
@@ -250,13 +240,7 @@ mod tests {
 		let state = GNativeServiceState::new();
 		let gshell_id = GShellId::new(10);
 		state.upsert_session(GNativeSessionRuntime {
-			descriptor: GNativeSessionDescriptor {
-				gshell_id,
-				endpoint: "unix:///tmp/test.sock".to_string(),
-				token: "secret".to_string(),
-				protocol_version: 1,
-			},
-			accepted:   GNativeSessionAccepted { gshell_id, protocol_version: 1 },
+			accepted: GNativeSessionAccepted { gshell_id, protocol_version: 1 },
 		});
 		state.set_modifiers(gshell_id, WindowInputModifiers::new(true, true));
 

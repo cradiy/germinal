@@ -17,7 +17,6 @@ use germinal_domain::{
 	gshell::vo::gshell_id::GShellId,
 	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
-use germinal_gnative_protocol::gnative::session::GNativeSessionDescriptor;
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
@@ -34,7 +33,7 @@ use germinal_ports::{
 	},
 	repository::IRepository,
 	service::{
-		gnative_rpc_client::IGNativeRpcClientProvider, gnative_service::IGNativeService,
+		gnative_service::IGNativeService, gnative_tunnel::IGNativeTunnelProvider,
 		gshell_service::IGShellService, layout_service::ILayoutService, pty_service::IPtyService,
 		render_service::IRenderService, worker_service::IWorkerService,
 		workspace_service::IWorkspaceService,
@@ -136,11 +135,10 @@ impl ITerminalWorkerBackendProvider for App {
 	}
 }
 
-impl IGNativeRpcClientProvider for App {
-	type GNativeRpcClient =
-		germinal_infra::gnative::local_rpc::LocalGNativeRpcClient<AppRuntimeEventDispatcher>;
+impl IGNativeTunnelProvider for App {
+	type GNativeTunnel = germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>;
 
-	fn gnative_rpc_client(&self) -> &Self::GNativeRpcClient { &self.gnative_rpc_client }
+	fn gnative_tunnel(&self) -> &Self::GNativeTunnel { &self.gnative_tunnel }
 }
 
 impl IRenderRuntimeStore for App {
@@ -237,8 +235,8 @@ impl IGNativeService for App {
 		GNativeService::inj_ref(self).ensure_gshell_gnative(gshell_id)
 	}
 
-	fn enter_gnative_session(&self, descriptor: GNativeSessionDescriptor) -> Result<(), String> {
-		GNativeService::inj_ref(self).enter_gnative_session(descriptor)
+	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), String> {
+		GNativeService::inj_ref(self).enter_gnative_session(gshell_id)
 	}
 
 	fn exit_gnative_session(&self, gshell_id: GShellId) {

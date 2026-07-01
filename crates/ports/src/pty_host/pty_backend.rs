@@ -16,6 +16,7 @@ pub trait IPtyBackend {
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
+		shell_env: Vec<(String, String)>,
 		terminal_worker_sender: SyncSender<TerminalWorkerInput>,
 	) -> PtyInputSender
 	where

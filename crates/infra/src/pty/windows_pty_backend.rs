@@ -25,11 +25,12 @@ impl IPtyBackend for PlatformPtyBackend {
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
+		shell_env: Vec<(String, String)>,
 		terminal_worker_sender: SyncSender<TerminalWorkerInput>,
 	) -> PtyInputSender
 	where
 		Dispatch: IRuntimeEventDispatcher,
 	{
-		PtyBridge::spawn(proxy, gshell_id, pty_host_id, initial_size, terminal_worker_sender)
+		PtyBridge::spawn(proxy, gshell_id, pty_host_id, initial_size, shell_env, terminal_worker_sender)
 	}
 }

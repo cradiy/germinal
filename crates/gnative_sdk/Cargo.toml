@@ -13,3 +13,4 @@ serde_json.workspace                = true
 [dev-dependencies]
 germinal-domain.workspace = true
 germinal-infra.workspace  = true
+germinal-ports.workspace  = true

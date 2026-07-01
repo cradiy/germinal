@@ -1,5 +1,5 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
-use germinal_gnative_protocol::{gnative::session::GNativeSessionDescriptor, seq::Seq};
+use germinal_gnative_protocol::seq::Seq;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -20,7 +20,7 @@ pub enum WorkspaceRuntimeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GShellRuntimeEvent {
-	EnterGNative { descriptor: GNativeSessionDescriptor },
+	EnterGNative { gshell_id: GShellId },
 	ExitGNative { gshell_id: GShellId },
 	FrameReady { gshell_id: GShellId, seq: Seq },
 	Closed { gshell_id: GShellId },

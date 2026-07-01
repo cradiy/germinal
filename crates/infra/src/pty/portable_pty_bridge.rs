@@ -19,7 +19,7 @@ use crate::pty::shell_command::{ShellCommand, default_shell_command};
 #[cfg(unix)]
 use crate::pty::unix_pty_bridge::spawn_compio_bridge_thread;
 #[cfg(windows)]
-use crate::pty::windows_pty_bridge::spawn_blocking_bridge_thread;
+use crate::pty::windows_pty_bridge::spawn_compio_bridge_thread;
 
 const ALACRITTY_TERMINFO: &str = "alacritty";
 const FALLBACK_TERMINFO: &str = "xterm-256color";
@@ -28,12 +28,13 @@ const TRUECOLOR_COLORTERM: &str = "truecolor";
 #[derive(Debug, Clone)]
 pub(crate) struct PtyBridgeConfig {
 	pub shell:        ShellCommand,
+	pub shell_env:    Vec<(String, String)>,
 	pub initial_size: TerminalPtySize,
 }
 
 impl PtyBridgeConfig {
-	pub fn new(initial_size: TerminalPtySize) -> Self {
-		Self { shell: default_shell_command(), initial_size }
+	pub fn new(initial_size: TerminalPtySize, shell_env: Vec<(String, String)>) -> Self {
+		Self { shell: default_shell_command(), shell_env, initial_size }
 	}
 }
 
@@ -45,6 +46,7 @@ impl PtyBridge {
 		gshell_id: GShellId,
 		pty_host_id: PtyHostId,
 		initial_size: TerminalPtySize,
+		shell_env: Vec<(String, String)>,
 		terminal_worker_tx: SyncSender<TerminalWorkerInput>,
 	) -> PtyInputSender
 	where
@@ -54,7 +56,7 @@ impl PtyBridge {
 			proxy,
 			gshell_id,
 			pty_host_id,
-			PtyBridgeConfig::new(initial_size),
+			PtyBridgeConfig::new(initial_size, shell_env),
 			terminal_worker_tx,
 		)
 	}
@@ -83,14 +85,7 @@ impl PtyBridge {
 		);
 
 		#[cfg(windows)]
-		spawn_blocking_bridge_thread(
-			proxy,
-			gshell_id,
-			pty_host_id,
-			config,
-			terminal_worker_tx,
-			input_rx,
-		);
+		spawn_compio_bridge_thread(proxy, gshell_id, pty_host_id, config, terminal_worker_tx, input_rx);
 
 		input_tx
 	}
@@ -99,6 +94,12 @@ impl PtyBridge {
 pub(crate) fn apply_default_terminal_env(command: &mut CommandBuilder) {
 	command.env("TERM", preferred_terminal_term_name());
 	command.env("COLORTERM", TRUECOLOR_COLORTERM);
+}
+
+pub(crate) fn apply_shell_env(command: &mut CommandBuilder, shell_env: &[(String, String)]) {
+	for (key, value) in shell_env {
+		command.env(key, value);
+	}
 }
 
 pub(crate) fn to_portable_pty_size(size: TerminalPtySize) -> PtySize {

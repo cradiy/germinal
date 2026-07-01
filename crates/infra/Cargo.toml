@@ -22,8 +22,15 @@ rusqlite.workspace           = true
 serde.workspace              = true
 serde_json.workspace         = true
 rayon.workspace              = true
+compio = { workspace = true, features = ["runtime", "io", "fs", "net"] }
+flume  = "0.11"
 
 
 [target.'cfg(unix)'.dependencies]
-nix    = { workspace = true, features = ["term", "process", "fs"] }
-compio = { workspace = true, features = ["runtime", "io", "fs", "io-uring"] }
+nix = { workspace = true, features = ["term", "process", "fs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+compio = { workspace = true, features = ["io-uring"] }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+compio = { workspace = true, features = ["polling"] }

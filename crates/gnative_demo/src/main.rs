@@ -18,7 +18,7 @@ use germinal_gnative_protocol::{
 	seq::Seq,
 };
 use germinal_gnative_sdk::local_session::{
-	LocalGNativeBootstrap, LocalGNativeFrameWriter, LocalGNativeSession,
+	LocalGNativeFrameWriter, LocalGNativeSession, LocalGNativeTunnelBootstrap,
 };
 use germinal_gnative_ui::{
 	CompiledUi, Element, GridSize, IntoElementNode, UiTree,
@@ -36,14 +36,14 @@ const MAX_ACTIVITY_EVENTS: usize = 10;
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 
 fn main() -> Result<(), String> {
-	let bootstrap = LocalGNativeBootstrap::bind_temporary(1)?;
-	eprintln!("germinal-gnative-demo waiting for host at {}", bootstrap.descriptor().endpoint);
+	let bootstrap = LocalGNativeTunnelBootstrap::from_env()?;
+	eprintln!("germinal-gnative-demo connecting to germinal at {}", bootstrap.tunnel_env().endpoint);
 	let mut terminal_stdout = stdout();
 	bootstrap
 		.write_enter_control_sequence(&mut terminal_stdout)
 		.map_err(|error| error.to_string())?;
 
-	let mut session = bootstrap.accept()?;
+	let mut session = bootstrap.connect()?;
 	let accepted = session.accepted().clone();
 	let initial_size = wait_for_initial_size(&mut session)?;
 	let mut emitter = DemoFrameEmitter::new(accepted.gshell_id, session.frame_writer()?);
