@@ -37,7 +37,6 @@ smol_str      = "0.2"
 unicode-width = "0.2"
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
-crossterm     = "0.29"
 
 # application
 kudi = "0.1"
