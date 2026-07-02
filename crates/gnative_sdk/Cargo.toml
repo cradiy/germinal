@@ -9,6 +9,7 @@ authors.workspace    = true
 [dependencies]
 germinal-gnative-protocol.workspace = true
 serde_json.workspace                = true
+flume                              = "0.11"
 
 [dev-dependencies]
 germinal-domain.workspace = true

@@ -16,8 +16,9 @@ use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::{
 	frame::{GNativeFrame, GNativeFrameCursor},
 	input::GNativeInputEvent,
+	media::{GNativeAudioPacket, GNativeMediaControlCommand, GNativeVideoPacket},
 	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
-	tunnel::{GNativeAppToHost, GNativeHostToApp},
+	tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame, GNativeHostToApp},
 };
 use germinal_ports::{
 	event::{
@@ -168,9 +169,10 @@ enum TunnelCommand<Dispatch> {
 }
 
 struct TunnelSlot {
-	descriptor: GNativeSessionDescriptor,
-	listener:   TcpListener,
-	writer:     Option<TcpStream>,
+	descriptor:        GNativeSessionDescriptor,
+	listener:          TcpListener,
+	writer:            Option<TcpStream>,
+	next_host_mux_seq: u64,
 }
 
 async fn run_tunnel_runtime<Dispatch>(command_rx: flume::Receiver<TunnelCommand<Dispatch>>)
@@ -214,7 +216,12 @@ async fn ensure_session_descriptor_async(
 	let descriptor =
 		GNativeSessionDescriptor { gshell_id, endpoint, token: unique_token(), protocol_version };
 
-	slots.insert(gshell_id, TunnelSlot { descriptor: descriptor.clone(), listener, writer: None });
+	slots.insert(gshell_id, TunnelSlot {
+		descriptor: descriptor.clone(),
+		listener,
+		writer: None,
+		next_host_mux_seq: 1,
+	});
 	Ok(descriptor)
 }
 
@@ -287,9 +294,13 @@ async fn send_input_async(
 	let mut slot = slots
 		.remove(&gshell_id)
 		.ok_or_else(|| format!("no gnative tunnel slot for {}", gshell_id.value()))?;
+	let mux_seq = next_host_mux_seq(&mut slot);
 
 	let result = match slot.writer.as_mut() {
-		Some(writer) => write_host_message(writer, &GNativeHostToApp::Input(input)).await,
+		Some(writer) => {
+			write_host_message(writer, &GNativeHostToApp::Mux(GNativeHostMuxFrame::input(mux_seq, input)))
+				.await
+		}
 		None => Err(format!("no active gnative tunnel session for {}", gshell_id.value())),
 	};
 
@@ -376,8 +387,8 @@ async fn read_frames_loop<Dispatch>(
 		};
 
 		match message {
-			GNativeAppToHost::Frame(frame) => {
-				present_frame(frame, &dispatcher, &surface_snapshot_tx, &presenter)
+			GNativeAppToHost::Mux(frame) => {
+				handle_app_mux_payload(frame.payload, &dispatcher, &surface_snapshot_tx, &presenter)
 			}
 			GNativeAppToHost::Exit => {
 				dispatch_exit_gnative(gshell_id, &dispatcher);
@@ -392,6 +403,36 @@ async fn read_frames_loop<Dispatch>(
 		dispatch_exit_gnative(gshell_id, &dispatcher);
 	}
 }
+
+fn handle_app_mux_payload<Dispatch>(
+	payload: GNativeAppPayload,
+	dispatcher: &Dispatch,
+	surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
+	presenter: &TextSurfaceFramePlanPresenter,
+) where
+	Dispatch: IRuntimeEventDispatcher,
+{
+	match payload {
+		GNativeAppPayload::Render(frame) => {
+			present_frame(frame, dispatcher, surface_snapshot_tx, presenter)
+		}
+		GNativeAppPayload::Control(command) => {
+			handle_media_control_command(command);
+		}
+		GNativeAppPayload::Audio(packet) => {
+			handle_audio_packet(packet);
+		}
+		GNativeAppPayload::Video(packet) => {
+			handle_video_packet(packet);
+		}
+	}
+}
+
+fn handle_media_control_command(_command: GNativeMediaControlCommand) {}
+
+fn handle_audio_packet(_packet: GNativeAudioPacket) {}
+
+fn handle_video_packet(_packet: GNativeVideoPacket) {}
 
 fn present_frame<Dispatch>(
 	frame: GNativeFrame,
@@ -430,6 +471,12 @@ where Dispatch: IRuntimeEventDispatcher {
 
 fn encode_tcp_endpoint(addr: std::net::SocketAddr) -> String {
 	format!("{TCP_ENDPOINT_PREFIX}{addr}")
+}
+
+fn next_host_mux_seq(slot: &mut TunnelSlot) -> u64 {
+	let mux_seq = slot.next_host_mux_seq;
+	slot.next_host_mux_seq += 1;
+	mux_seq
 }
 
 fn unique_token() -> String {

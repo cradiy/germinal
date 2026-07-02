@@ -1,13 +1,24 @@
 use std::{
+	cmp::Ordering,
+	collections::BinaryHeap,
 	io::{BufRead, BufReader, Write},
-	net::{Shutdown, TcpStream},
+	net::TcpStream,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering as AtomicOrdering},
+	},
+	thread,
 };
 
 use germinal_gnative_protocol::gnative::{
 	frame::GNativeFrame,
 	input::GNativeInputEvent,
+	media::{GNativeAudioPacket, GNativeMediaControlCommand, GNativeVideoPacket},
 	session::{GNativeAppHello, GNativeSessionAccepted},
-	tunnel::{GNativeAppToHost, GNativeHostToApp},
+	tunnel::{
+		GNativeAppMuxFrame, GNativeAppPayload, GNativeAppToHost, GNativeHostPayload, GNativeHostToApp,
+		GNativeStreamPriority,
+	},
 };
 
 use crate::control_sequence::{GNativeTunnelEnv, write_enter_control_sequence};
@@ -54,10 +65,14 @@ impl LocalGNativeTunnelBootstrap {
 			return Err("expected welcome after gnative hello".to_string());
 		};
 
+		let writer_stream = stream.try_clone().map_err(|error| error.to_string())?;
+		let (queue_tx, queue_rx) = flume::unbounded();
+		spawn_outbound_writer(writer_stream, queue_rx);
+
 		Ok(LocalGNativeSession {
 			accepted,
-			reader: BufReader::new(stream.try_clone().map_err(|error| error.to_string())?),
-			writer: stream,
+			reader: BufReader::new(stream),
+			outbound: LocalGNativeOutbound { queue_tx, next_mux_seq: Arc::new(AtomicU64::new(1)) },
 		})
 	}
 }
@@ -65,35 +80,32 @@ impl LocalGNativeTunnelBootstrap {
 pub struct LocalGNativeSession {
 	accepted: GNativeSessionAccepted,
 	reader:   BufReader<TcpStream>,
-	writer:   TcpStream,
+	outbound: LocalGNativeOutbound,
 }
 
 impl LocalGNativeSession {
 	pub fn accepted(&self) -> &GNativeSessionAccepted { &self.accepted }
 
 	pub fn frame_writer(&self) -> Result<LocalGNativeFrameWriter, String> {
-		Ok(LocalGNativeFrameWriter {
-			accepted: self.accepted.clone(),
-			stream:   self.writer.try_clone().map_err(|error| error.to_string())?,
-		})
+		Ok(LocalGNativeFrameWriter { accepted: self.accepted.clone(), outbound: self.outbound.clone() })
 	}
 
 	pub fn read_input(&mut self) -> Result<Option<GNativeInputEvent>, String> {
 		match read_host_message(&mut self.reader)? {
-			Some(GNativeHostToApp::Input(input)) => Ok(Some(input)),
 			Some(GNativeHostToApp::Welcome(_)) => Err("unexpected duplicate welcome message".to_string()),
+			Some(GNativeHostToApp::Mux(frame)) => match frame.payload {
+				GNativeHostPayload::Input(input) => Ok(Some(input)),
+			},
 			None => Ok(None),
 		}
 	}
 
-	pub fn send_exit(&mut self) -> Result<(), String> {
-		write_app_message(&mut self.writer, &GNativeAppToHost::Exit)
-	}
+	pub fn send_exit(&mut self) -> Result<(), String> { self.outbound.send_exit() }
 }
 
 pub struct LocalGNativeFrameWriter {
 	accepted: GNativeSessionAccepted,
-	stream:   TcpStream,
+	outbound: LocalGNativeOutbound,
 }
 
 impl LocalGNativeFrameWriter {
@@ -101,11 +113,95 @@ impl LocalGNativeFrameWriter {
 		if frame.gshell_id != self.accepted.gshell_id {
 			return Err("frame gshell_id does not match accepted session".to_string());
 		}
-		write_app_message(&mut self.stream, &GNativeAppToHost::Frame(frame))
+		self.outbound.send_payload(GNativeAppPayload::Render(frame))
 	}
 
-	pub fn send_exit(&mut self) -> Result<(), String> {
-		write_app_message(&mut self.stream, &GNativeAppToHost::Exit)
+	pub fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), String> {
+		self.outbound.send_payload(GNativeAppPayload::Control(command))
+	}
+
+	pub fn send_audio_packet(&mut self, packet: GNativeAudioPacket) -> Result<(), String> {
+		self.outbound.send_payload(GNativeAppPayload::Audio(packet))
+	}
+
+	pub fn send_video_packet(&mut self, packet: GNativeVideoPacket) -> Result<(), String> {
+		self.outbound.send_payload(GNativeAppPayload::Video(packet))
+	}
+
+	pub fn send_exit(&mut self) -> Result<(), String> { self.outbound.send_exit() }
+}
+
+#[derive(Clone)]
+struct LocalGNativeOutbound {
+	queue_tx:     flume::Sender<QueuedAppMessage>,
+	next_mux_seq: Arc<AtomicU64>,
+}
+
+impl LocalGNativeOutbound {
+	fn send_payload(&self, payload: GNativeAppPayload) -> Result<(), String> {
+		let mux_seq = self.next_mux_seq.fetch_add(1, AtomicOrdering::Relaxed);
+		self
+			.queue_tx
+			.send(QueuedAppMessage {
+				mux_seq,
+				priority: payload.default_priority(),
+				message: GNativeAppToHost::Mux(GNativeAppMuxFrame::new(mux_seq, payload)),
+			})
+			.map_err(|error| error.to_string())
+	}
+
+	fn send_exit(&self) -> Result<(), String> {
+		let mux_seq = self.next_mux_seq.fetch_add(1, AtomicOrdering::Relaxed);
+		self
+			.queue_tx
+			.send(QueuedAppMessage {
+				mux_seq,
+				priority: GNativeStreamPriority::Critical,
+				message: GNativeAppToHost::Exit,
+			})
+			.map_err(|error| error.to_string())
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedAppMessage {
+	mux_seq:  u64,
+	priority: GNativeStreamPriority,
+	message:  GNativeAppToHost,
+}
+
+impl Ord for QueuedAppMessage {
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.priority.cmp(&other.priority).then_with(|| other.mux_seq.cmp(&self.mux_seq))
+	}
+}
+
+impl PartialOrd for QueuedAppMessage {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+fn spawn_outbound_writer(stream: TcpStream, queue_rx: flume::Receiver<QueuedAppMessage>) {
+	thread::Builder::new()
+		.name("gnative-sdk-outbound".to_string())
+		.spawn(move || run_outbound_writer(stream, queue_rx))
+		.expect("failed to spawn gnative sdk outbound writer");
+}
+
+fn run_outbound_writer(mut stream: TcpStream, queue_rx: flume::Receiver<QueuedAppMessage>) {
+	let mut pending = BinaryHeap::new();
+
+	while let Ok(message) = queue_rx.recv() {
+		pending.push(message);
+		while let Ok(message) = queue_rx.try_recv() {
+			pending.push(message);
+		}
+
+		while let Some(message) = pending.pop() {
+			if let Err(error) = write_app_message(&mut stream, &message.message) {
+				eprintln!("failed to write gnative app message: {error}");
+				return;
+			}
+		}
 	}
 }
 
@@ -131,17 +227,18 @@ fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
 	endpoint.strip_prefix(TCP_ENDPOINT_PREFIX).unwrap_or(endpoint)
 }
 
-impl Drop for LocalGNativeSession {
-	fn drop(&mut self) { self.writer.shutdown(Shutdown::Both).ok(); }
-}
-
 #[cfg(test)]
 mod tests {
-	use std::{sync::mpsc, thread, time::Duration};
+	use std::{collections::BinaryHeap, sync::mpsc, thread, time::Duration};
 
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::{
-		gnative::{frame::GNativeFrame, input::GNativeInputEvent},
+		gnative::{
+			frame::GNativeFrame,
+			input::GNativeInputEvent,
+			media::GNativeMediaControlCommand,
+			tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeStreamPriority},
+		},
 		rendering::frame_plan_builder::{RenderCommandDto, TextStyleDto},
 		seq::Seq,
 	};
@@ -151,7 +248,7 @@ mod tests {
 		service::gnative_tunnel::IGNativeTunnel,
 	};
 
-	use super::LocalGNativeTunnelBootstrap;
+	use super::{LocalGNativeTunnelBootstrap, QueuedAppMessage};
 	use crate::control_sequence::GNativeTunnelEnv;
 
 	#[derive(Clone)]
@@ -232,5 +329,83 @@ mod tests {
 		assert_eq!(snapshot.target_id.value(), 32);
 		assert_eq!(snapshot.rows[0].runs[0].text, "sdk");
 		app.join().expect("app thread should join");
+	}
+
+	#[test]
+	fn outbound_priority_queue_prefers_control_over_render_audio_and_video() {
+		let mut pending = BinaryHeap::from([
+			QueuedAppMessage {
+				mux_seq:  1,
+				priority: GNativeStreamPriority::Low,
+				message:  GNativeAppToHost::Mux(
+					germinal_gnative_protocol::gnative::tunnel::GNativeAppMuxFrame::new(
+						1,
+						GNativeAppPayload::Video(
+							germinal_gnative_protocol::gnative::media::GNativeVideoPacket {
+								stream_id: 1,
+								codec:     "h264".to_string(),
+								pts_us:    10,
+								dts_us:    Some(9),
+								keyframe:  true,
+								payload:   vec![1],
+							},
+						),
+					),
+				),
+			},
+			QueuedAppMessage {
+				mux_seq:  2,
+				priority: GNativeStreamPriority::Normal,
+				message:  GNativeAppToHost::Mux(
+					germinal_gnative_protocol::gnative::tunnel::GNativeAppMuxFrame::new(
+						2,
+						GNativeAppPayload::Audio(
+							germinal_gnative_protocol::gnative::media::GNativeAudioPacket {
+								stream_id: 2,
+								codec:     "aac".to_string(),
+								pts_us:    11,
+								dts_us:    Some(10),
+								payload:   vec![2],
+							},
+						),
+					),
+				),
+			},
+			QueuedAppMessage {
+				mux_seq:  3,
+				priority: GNativeStreamPriority::High,
+				message:  GNativeAppToHost::Mux(
+					germinal_gnative_protocol::gnative::tunnel::GNativeAppMuxFrame::new(
+						3,
+						GNativeAppPayload::Render(GNativeFrame {
+							gshell_id: GShellId::new(99),
+							seq:       Seq::new(1),
+							commands:  Vec::new(),
+							cursor:    None,
+						}),
+					),
+				),
+			},
+			QueuedAppMessage {
+				mux_seq:  4,
+				priority: GNativeStreamPriority::Critical,
+				message:  GNativeAppToHost::Mux(
+					germinal_gnative_protocol::gnative::tunnel::GNativeAppMuxFrame::new(
+						4,
+						GNativeAppPayload::Control(GNativeMediaControlCommand::Pause),
+					),
+				),
+			},
+		]);
+
+		let first = pending.pop().expect("control should pop first");
+		let second = pending.pop().expect("render should pop second");
+		let third = pending.pop().expect("audio should pop third");
+		let fourth = pending.pop().expect("video should pop fourth");
+
+		assert_eq!(first.priority, GNativeStreamPriority::Critical);
+		assert_eq!(second.priority, GNativeStreamPriority::High);
+		assert_eq!(third.priority, GNativeStreamPriority::Normal);
+		assert_eq!(fourth.priority, GNativeStreamPriority::Low);
 	}
 }
