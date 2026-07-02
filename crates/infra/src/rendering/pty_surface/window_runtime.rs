@@ -5,6 +5,7 @@ use std::{
 };
 
 use germinal_ports::{
+	error::BoxResult,
 	pty_host::{
 		cell_size::TerminalCellSize, font_weight::TerminalFontWeight, profile::TerminalProfile,
 		scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
@@ -13,12 +14,16 @@ use germinal_ports::{
 	rendering::{surface_snapshot::RenderSurfaceSnapshot, window_runtime::ITerminalWindowRuntime},
 	seq::Seq,
 };
+use thiserror::Error;
+use tracing::info;
 use winit::window::{Window, WindowId};
 
 #[cfg(target_os = "linux")]
 use crate::rendering::pty_surface::video_surface_dmabuf_importer::import_nv12_dmabuf_frame;
 use crate::rendering::pty_surface::{
-	crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuTerminalFontWeight},
+	crossfont_glyph_atlas::{
+		WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError, WgpuTerminalFontWeight,
+	},
 	frame_builder::WgpuTerminalFrameBuilder,
 	frame_renderer::WgpuTerminalFrameRenderer,
 	pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
@@ -32,6 +37,16 @@ use crate::rendering::pty_surface::{
 	video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
 	video_surface_registry::WgpuVideoSurfaceRegistry,
 };
+
+#[derive(Debug, Error)]
+enum WindowRuntimeError {
+	#[error("failed to get default surface config")]
+	MissingSurfaceConfig,
+	#[error("failed to build crossfont glyph atlas: {0}")]
+	BuildGlyphAtlas(#[source] WgpuCrossfontGlyphAtlasError),
+	#[error("failed to load crossfont metrics: {0}")]
+	LoadCrossfontMetrics(#[source] WgpuCrossfontGlyphAtlasError),
+}
 
 pub struct WgpuTerminalWindowRuntime {
 	window:         Arc<Window>,
@@ -49,22 +64,21 @@ pub struct WgpuTerminalWindowRuntime {
 	perf:             WgpuTerminalRenderPerf,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WgpuTerminalWindowRuntimeFactory;
+#[derive(Debug, Clone, Copy)]
+pub struct WgpuTerminalWindowRuntimeFactory {
+	profile: TerminalProfile,
+}
 
 impl WgpuTerminalWindowRuntimeFactory {
-	pub fn new() -> Self { Self }
+	pub fn new(profile: TerminalProfile) -> Self { Self { profile } }
 
-	pub fn create_window_runtime(
-		&self,
-		window: Arc<Window>,
-	) -> Result<WgpuTerminalWindowRuntime, String> {
-		pollster::block_on(WgpuTerminalWindowRuntime::new(window))
+	pub fn create_window_runtime(&self, window: Arc<Window>) -> BoxResult<WgpuTerminalWindowRuntime> {
+		pollster::block_on(WgpuTerminalWindowRuntime::new(window, self.profile))
 	}
 }
 
 impl WgpuTerminalWindowRuntime {
-	pub async fn new(window: Arc<Window>) -> Result<Self, String> {
+	pub async fn new(window: Arc<Window>, profile: TerminalProfile) -> BoxResult<Self> {
 		let instance = wgpu::Instance::default();
 
 		let surface = instance.create_surface(Arc::clone(&window)).expect("failed to create surface");
@@ -79,20 +93,18 @@ impl WgpuTerminalWindowRuntime {
 				compatible_surface:     Some(&surface),
 				force_fallback_adapter: false,
 			})
-			.await
-			.map_err(|error| error.to_string())?;
+			.await?;
 
 		let (device, queue) = adapter
 			.request_device(&wgpu::DeviceDescriptor {
 				label: Some("germinal.terminal.device"),
 				..Default::default()
 			})
-			.await
-			.map_err(|error| error.to_string())?;
+			.await?;
 
 		let surface_config = surface
 			.get_default_config(&adapter, width, height)
-			.ok_or_else(|| "failed to get default surface config".to_string())?;
+			.ok_or(WindowRuntimeError::MissingSurfaceConfig)?;
 
 		surface.configure(&device, &surface_config);
 
@@ -100,10 +112,8 @@ impl WgpuTerminalWindowRuntime {
 		let pipeline_factory = WgpuTerminalPipelineFactory::new(pipeline_spec);
 		let pipeline = pipeline_factory.create(&device);
 
-		let profile = terminal_profile_from_alacritty_crossfont_metrics(
-			TerminalProfile::DEFAULT,
-			window.scale_factor(),
-		)?;
+		let profile =
+			terminal_profile_from_alacritty_crossfont_metrics(profile, window.scale_factor())?;
 		let size_info = terminal_size_info(profile, width, height, window.scale_factor());
 
 		let frame_builder = build_terminal_frame_builder(
@@ -157,15 +167,19 @@ impl WgpuTerminalWindowRuntime {
 		&self,
 		id: &str,
 		frame: &WgpuVideoSurfaceNv12DmaBufFrame,
-	) -> Result<(), String> {
+	) -> BoxResult<bool> {
+		if self.video_surface_registry().registration(self.render_target_id(), id).is_none() {
+			return Ok(false);
+		}
+
 		let imported = import_nv12_dmabuf_frame(&self.device, frame)?;
 		let replaced =
 			self.video_surface_registry().replace_nv12_frame(self.render_target_id(), id, imported);
 		if !replaced {
-			return Err(format!("unknown video surface: {id}"));
+			return Ok(false);
 		}
 		self.request_window_redraw();
-		Ok(())
+		Ok(true)
 	}
 
 	pub fn request_window_redraw(&self) { self.window.request_redraw(); }
@@ -259,7 +273,7 @@ fn build_terminal_frame_builder(
 	size_info: TerminalSizeInfo,
 	scale_factor: f64,
 	max_texture_dimension_2d: u32,
-) -> Result<WgpuTerminalFrameBuilder, String> {
+) -> BoxResult<WgpuTerminalFrameBuilder> {
 	let base = WgpuTerminalFrameBuilder::new(WgpuRendererConfig::from(size_info));
 
 	let glyph_config = profile.glyph_render_config(size_info, TerminalScaleFactor::new(scale_factor));
@@ -268,7 +282,7 @@ fn build_terminal_frame_builder(
 		glyph_config.font_family_name(),
 		glyph_config.font_size_px(),
 	)
-	.map_err(|error| format!("crossfont font load failed: {error:?}"))?
+	.map_err(WindowRuntimeError::BuildGlyphAtlas)?
 	.with_bold_font_weight(wgpu_font_weight_from_terminal(glyph_config.bold_font_weight()))
 	.with_padding_px(2)
 	.with_columns(16)
@@ -290,12 +304,12 @@ fn wgpu_font_weight_from_terminal(weight: TerminalFontWeight) -> WgpuTerminalFon
 fn terminal_profile_from_alacritty_crossfont_metrics(
 	profile: TerminalProfile,
 	scale_factor: f64,
-) -> Result<TerminalProfile, String> {
+) -> BoxResult<TerminalProfile> {
 	let scale_factor = TerminalScaleFactor::new(scale_factor);
 	let font_px = profile.font_physical_px(scale_factor);
 	let font_family = profile.font_family().name();
 	let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics(font_family, font_px)
-		.map_err(|error| format!("crossfont metrics load failed: {error:?}"))?;
+		.map_err(WindowRuntimeError::LoadCrossfontMetrics)?;
 
 	Ok(
 		profile
@@ -453,7 +467,7 @@ impl WgpuTerminalRenderPerf {
 			return;
 		}
 
-		eprintln!(
+		info!(
 			"[render] frames={} errors={} rows/frame={} runs/frame={} quads/frame={} glyphs/frame={} \
 			 prepare avg={} max={} prep_parts(surface/quads/vb/atlas/uv/bytes)={}/{}/{}/{}/{}/{} upload \
 			 avg={} max={} render avg={} max={} surface avg={} max={} frame_total avg={} \

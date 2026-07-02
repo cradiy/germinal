@@ -29,6 +29,7 @@ use germinal_ports::{
 	seq::Seq,
 };
 use rayon::ThreadPool;
+use tracing::info;
 
 use crate::{
 	gnative::control_sequence::GNativeEnterControlSequenceDecoder,
@@ -577,7 +578,7 @@ impl TerminalWorkerPerf {
 		let mib = self.input_bytes as f64 / 1024.0 / 1024.0;
 		let mib_per_sec = mib / elapsed_secs;
 
-		eprintln!(
+		info!(
 			"[terminal-worker] input={} chunks / {:.2} MiB / {:.2} MiB/s, apply={} batches {} chunks \
 			 avg={} max={}, publish={} avg={} max={} \
 			 parts(snapshot/cursor/send/clear/dispatch)={}/{}/{}/{}/{}, resize={} avg={} max={}, \
@@ -746,8 +747,9 @@ mod tests {
 	}
 
 	impl IRuntimeEventDispatcher for TestDispatcher {
-		fn dispatch(&self, event: RuntimeEvent) -> Result<(), String> {
-			self.tx.send(event).map_err(|error| error.to_string())
+		fn dispatch(&self, event: RuntimeEvent) -> germinal_ports::error::BoxResult<()> {
+			self.tx.send(event)?;
+			Ok(())
 		}
 	}
 

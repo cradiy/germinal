@@ -9,6 +9,7 @@ use germinal_gnative_protocol::gnative::{
 	session::GNativeSessionAccepted,
 };
 use germinal_ports::{
+	error::BoxResult,
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		window_input_event::{WindowInputEvent, WindowInputModifiers},
@@ -19,6 +20,7 @@ use germinal_ports::{
 		worker_service::IWorkerService,
 	},
 };
+use tracing::warn;
 
 #[derive(kudi::DepInj)]
 #[target(GNativeService)]
@@ -73,7 +75,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 {
 	fn ensure_gshell_gnative(&self, _gshell_id: GShellId) { self.prj_ref().start_worker_pool(); }
 
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), String> {
+	fn enter_gnative_session(&self, gshell_id: GShellId) -> BoxResult<()> {
 		let accepted = self.prj_ref().gnative_tunnel().accept_session(gshell_id)?;
 		let runtime = GNativeSessionRuntime { accepted };
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
@@ -85,7 +87,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
 		state.remove_session(gshell_id);
 		if let Err(error) = self.prj_ref().gnative_tunnel().close_session(gshell_id) {
-			eprintln!("failed to close gnative session for {}: {error}", gshell_id.value());
+			warn!(gshell_id = gshell_id.value(), error = %error, "failed to close gnative session");
 		}
 	}
 
@@ -103,7 +105,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 		};
 
 		if let Err(error) = self.prj_ref().gnative_tunnel().send_input(gshell_id, event) {
-			eprintln!("failed to send gnative input for {}: {error}", gshell_id.value());
+			warn!(gshell_id = gshell_id.value(), error = %error, "failed to send gnative input");
 		}
 	}
 
@@ -114,7 +116,7 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 		};
 
 		if let Err(error) = self.prj_ref().gnative_tunnel().send_input(gshell_id, event) {
-			eprintln!("failed to send gnative resize for {}: {error}", gshell_id.value());
+			warn!(gshell_id = gshell_id.value(), error = %error, "failed to send gnative resize");
 		}
 	}
 }

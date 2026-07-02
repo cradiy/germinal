@@ -1,7 +1,7 @@
-use crate::event::runtime_event::RuntimeEvent;
+use crate::{error::BoxResult, event::runtime_event::RuntimeEvent};
 
 pub trait IRuntimeEventDispatcher: Clone + Send + 'static {
-	fn dispatch(&self, event: RuntimeEvent) -> Result<(), String>;
+	fn dispatch(&self, event: RuntimeEvent) -> BoxResult<()>;
 }
 
 pub trait IRuntimeEventDispatcherProvider {

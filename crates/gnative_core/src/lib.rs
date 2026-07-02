@@ -229,11 +229,44 @@ pub fn v_flex() -> Div { Div::new().v_flex() }
 pub fn h_flex() -> Div { Div::new().h_flex() }
 
 pub fn text_input(value: impl Into<String>, focused: bool) -> Element {
-	Element::Input(InputElement { value: value.into(), style: TextStyleDto::plain(), focused })
+	let value = value.into();
+	let cursor_byte_index = value.len();
+	Element::Input(InputElement { value, style: TextStyleDto::plain(), focused, cursor_byte_index })
 }
 
 pub fn styled_text_input(value: impl Into<String>, focused: bool, style: TextStyleDto) -> Element {
-	Element::Input(InputElement { value: value.into(), style, focused })
+	let value = value.into();
+	let cursor_byte_index = value.len();
+	Element::Input(InputElement { value, style, focused, cursor_byte_index })
+}
+
+pub fn text_input_with_cursor(
+	value: impl Into<String>,
+	focused: bool,
+	cursor_byte_index: usize,
+) -> Element {
+	let value = value.into();
+	Element::Input(InputElement {
+		cursor_byte_index: cursor_byte_index.min(value.len()),
+		value,
+		style: TextStyleDto::plain(),
+		focused,
+	})
+}
+
+pub fn styled_text_input_with_cursor(
+	value: impl Into<String>,
+	focused: bool,
+	cursor_byte_index: usize,
+	style: TextStyleDto,
+) -> Element {
+	let value = value.into();
+	Element::Input(InputElement {
+		cursor_byte_index: cursor_byte_index.min(value.len()),
+		value,
+		style,
+		focused,
+	})
 }
 
 impl IntoElementNode for Video {
@@ -445,9 +478,10 @@ impl IntoDivChild for Text {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputElement {
-	pub value:   String,
-	pub style:   TextStyleDto,
-	pub focused: bool,
+	pub value:             String,
+	pub style:             TextStyleDto,
+	pub focused:           bool,
+	pub cursor_byte_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,9 +810,11 @@ fn layout_input(
 	}
 
 	if input.focused {
+		let cursor_prefix =
+			clip_line(&input.value[..input.cursor_byte_index.min(input.value.len())], rect.width);
 		let cursor_x = rect
 			.x
-			.saturating_add(display_width(&clipped))
+			.saturating_add(display_width(&cursor_prefix))
 			.min(rect.x.saturating_add(rect.width.saturating_sub(1)));
 		state.cursor = Some(GridPoint { x: u32::from(cursor_x), y: u32::from(rect.y) });
 	}
@@ -787,6 +823,7 @@ fn layout_input(
 
 fn layout_video(video: &Video, rect: Rect) -> LayoutNode {
 	let mut node = LayoutNode::new(rect);
+	node.paints.push(LayoutPaint::FillRect { rect: rect.pixel_rect(), color: rgba(0, 0, 0, 255) });
 	node.paints.push(LayoutPaint::VideoSurface { id: video.id.clone(), rect: rect.pixel_rect() });
 	node
 }
@@ -1130,6 +1167,16 @@ mod tests {
 	#[test]
 	fn video_element_compiles_to_video_surface_command() {
 		let compiled = UiTree::new(div().child(video("player-main"))).compile(GridSize::new(20, 5));
+
+		assert!(compiled.commands.iter().any(|command| matches!(
+			command,
+			RenderCommandDto::PixelFillRect { x_px, y_px, width_px, height_px, color }
+				if *x_px == 0
+					&& *y_px == 0
+					&& *width_px == 20 * CELL_WIDTH_PX
+					&& *height_px == 5 * CELL_HEIGHT_PX
+					&& *color == rgba(0, 0, 0, 255)
+		)));
 
 		assert!(compiled.commands.iter().any(|command| matches!(
 			command,

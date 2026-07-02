@@ -7,9 +7,16 @@ repository.workspace = true
 authors.workspace    = true
 
 [dependencies]
-germinal-application.workspace = true
-germinal-domain.workspace      = true
-germinal-infra.workspace       = true
+germinal-application.workspace      = true
+germinal-domain.workspace           = true
+germinal-infra.workspace            = true
 germinal-gnative-protocol.workspace = true
-germinal-ports.workspace       = true
-winit.workspace                = true
+germinal-ports.workspace            = true
+winit.workspace                     = true
+arboard.workspace                   = true
+serde.workspace                     = true
+thiserror.workspace                 = true
+eyre.workspace                      = true
+tracing.workspace                   = true
+tracing-subscriber.workspace        = true
+toml.workspace                      = true

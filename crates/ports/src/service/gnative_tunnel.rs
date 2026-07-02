@@ -4,15 +4,17 @@ use germinal_gnative_protocol::gnative::{
 	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
 };
 
+use crate::error::BoxResult;
+
 pub trait IGNativeTunnel {
 	fn ensure_session_descriptor(
 		&self,
 		gshell_id: GShellId,
 		protocol_version: u32,
-	) -> Result<GNativeSessionDescriptor, String>;
-	fn accept_session(&self, gshell_id: GShellId) -> Result<GNativeSessionAccepted, String>;
-	fn send_input(&self, gshell_id: GShellId, input: GNativeInputEvent) -> Result<(), String>;
-	fn close_session(&self, gshell_id: GShellId) -> Result<(), String>;
+	) -> BoxResult<GNativeSessionDescriptor>;
+	fn accept_session(&self, gshell_id: GShellId) -> BoxResult<GNativeSessionAccepted>;
+	fn send_input(&self, gshell_id: GShellId, input: GNativeInputEvent) -> BoxResult<()>;
+	fn close_session(&self, gshell_id: GShellId) -> BoxResult<()>;
 }
 
 pub trait IGNativeTunnelProvider {

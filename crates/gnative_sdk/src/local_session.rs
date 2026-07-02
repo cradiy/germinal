@@ -21,7 +21,10 @@ use germinal_gnative_protocol::gnative::{
 	},
 };
 
-use crate::control_sequence::{GNativeTunnelEnv, write_enter_control_sequence};
+use crate::{
+	control_sequence::{GNativeTunnelEnv, write_enter_control_sequence},
+	error::{GNativeSdkError, GNativeSdkResult},
+};
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 
@@ -30,7 +33,7 @@ pub struct LocalGNativeTunnelBootstrap {
 }
 
 impl LocalGNativeTunnelBootstrap {
-	pub fn from_env() -> Result<Self, String> {
+	pub fn from_env() -> GNativeSdkResult<Self> {
 		Ok(Self { tunnel_env: GNativeTunnelEnv::from_env()? })
 	}
 
@@ -45,9 +48,8 @@ impl LocalGNativeTunnelBootstrap {
 		write_enter_control_sequence(writer, &self.tunnel_env)
 	}
 
-	pub fn connect(self) -> Result<LocalGNativeSession, String> {
-		let mut stream = TcpStream::connect(strip_tcp_endpoint_prefix(&self.tunnel_env.endpoint))
-			.map_err(|error| error.to_string())?;
+	pub fn connect(self) -> GNativeSdkResult<LocalGNativeSession> {
+		let mut stream = TcpStream::connect(strip_tcp_endpoint_prefix(&self.tunnel_env.endpoint))?;
 		stream.set_nodelay(true).ok();
 		write_app_message(
 			&mut stream,
@@ -57,17 +59,15 @@ impl LocalGNativeTunnelBootstrap {
 			}),
 		)?;
 
-		let welcome = read_host_message(&mut BufReader::new(
-			stream.try_clone().map_err(|error| error.to_string())?,
-		))?
-		.ok_or_else(|| "host closed before welcome".to_string())?;
+		let welcome = read_host_message(&mut BufReader::new(stream.try_clone()?))?
+			.ok_or(GNativeSdkError::HostClosedBeforeWelcome)?;
 		let GNativeHostToApp::Welcome(accepted) = welcome else {
-			return Err("expected welcome after gnative hello".to_string());
+			return Err(GNativeSdkError::ExpectedWelcomeAfterHello);
 		};
 
-		let writer_stream = stream.try_clone().map_err(|error| error.to_string())?;
+		let writer_stream = stream.try_clone()?;
 		let (queue_tx, queue_rx) = flume::unbounded();
-		spawn_outbound_writer(writer_stream, queue_rx);
+		spawn_outbound_writer(writer_stream, queue_rx)?;
 
 		Ok(LocalGNativeSession {
 			accepted,
@@ -86,13 +86,13 @@ pub struct LocalGNativeSession {
 impl LocalGNativeSession {
 	pub fn accepted(&self) -> &GNativeSessionAccepted { &self.accepted }
 
-	pub fn frame_writer(&self) -> Result<LocalGNativeFrameWriter, String> {
-		Ok(LocalGNativeFrameWriter { accepted: self.accepted.clone(), outbound: self.outbound.clone() })
+	pub fn frame_writer(&self) -> LocalGNativeFrameWriter {
+		LocalGNativeFrameWriter { accepted: self.accepted.clone(), outbound: self.outbound.clone() }
 	}
 
-	pub fn read_input(&mut self) -> Result<Option<GNativeInputEvent>, String> {
+	pub fn read_input(&mut self) -> GNativeSdkResult<Option<GNativeInputEvent>> {
 		match read_host_message(&mut self.reader)? {
-			Some(GNativeHostToApp::Welcome(_)) => Err("unexpected duplicate welcome message".to_string()),
+			Some(GNativeHostToApp::Welcome(_)) => Err(GNativeSdkError::UnexpectedDuplicateWelcome),
 			Some(GNativeHostToApp::Mux(frame)) => match frame.payload {
 				GNativeHostPayload::Input(input) => Ok(Some(input)),
 			},
@@ -100,7 +100,7 @@ impl LocalGNativeSession {
 		}
 	}
 
-	pub fn send_exit(&mut self) -> Result<(), String> { self.outbound.send_exit() }
+	pub fn send_exit(&mut self) -> GNativeSdkResult<()> { self.outbound.send_exit() }
 }
 
 pub struct LocalGNativeFrameWriter {
@@ -109,26 +109,26 @@ pub struct LocalGNativeFrameWriter {
 }
 
 impl LocalGNativeFrameWriter {
-	pub fn send_frame(&mut self, frame: GNativeFrame) -> Result<(), String> {
+	pub fn send_frame(&mut self, frame: GNativeFrame) -> GNativeSdkResult<()> {
 		if frame.gshell_id != self.accepted.gshell_id {
-			return Err("frame gshell_id does not match accepted session".to_string());
+			return Err(GNativeSdkError::FrameGshellMismatch);
 		}
 		self.outbound.send_payload(GNativeAppPayload::Render(frame))
 	}
 
-	pub fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), String> {
+	pub fn send_control(&mut self, command: GNativeMediaControlCommand) -> GNativeSdkResult<()> {
 		self.outbound.send_payload(GNativeAppPayload::Control(command))
 	}
 
-	pub fn send_audio_packet(&mut self, packet: GNativeAudioPacket) -> Result<(), String> {
+	pub fn send_audio_packet(&mut self, packet: GNativeAudioPacket) -> GNativeSdkResult<()> {
 		self.outbound.send_payload(GNativeAppPayload::Audio(packet))
 	}
 
-	pub fn send_video_packet(&mut self, packet: GNativeVideoPacket) -> Result<(), String> {
+	pub fn send_video_packet(&mut self, packet: GNativeVideoPacket) -> GNativeSdkResult<()> {
 		self.outbound.send_payload(GNativeAppPayload::Video(packet))
 	}
 
-	pub fn send_exit(&mut self) -> Result<(), String> { self.outbound.send_exit() }
+	pub fn send_exit(&mut self) -> GNativeSdkResult<()> { self.outbound.send_exit() }
 }
 
 #[derive(Clone)]
@@ -138,7 +138,7 @@ struct LocalGNativeOutbound {
 }
 
 impl LocalGNativeOutbound {
-	fn send_payload(&self, payload: GNativeAppPayload) -> Result<(), String> {
+	fn send_payload(&self, payload: GNativeAppPayload) -> GNativeSdkResult<()> {
 		let mux_seq = self.next_mux_seq.fetch_add(1, AtomicOrdering::Relaxed);
 		self
 			.queue_tx
@@ -147,10 +147,10 @@ impl LocalGNativeOutbound {
 				priority: payload.default_priority(),
 				message: GNativeAppToHost::Mux(GNativeAppMuxFrame::new(mux_seq, payload)),
 			})
-			.map_err(|error| error.to_string())
+			.map_err(|_| GNativeSdkError::OutboundQueueClosed)
 	}
 
-	fn send_exit(&self) -> Result<(), String> {
+	fn send_exit(&self) -> GNativeSdkResult<()> {
 		let mux_seq = self.next_mux_seq.fetch_add(1, AtomicOrdering::Relaxed);
 		self
 			.queue_tx
@@ -159,7 +159,7 @@ impl LocalGNativeOutbound {
 				priority: GNativeStreamPriority::Critical,
 				message: GNativeAppToHost::Exit,
 			})
-			.map_err(|error| error.to_string())
+			.map_err(|_| GNativeSdkError::OutboundQueueClosed)
 	}
 }
 
@@ -180,11 +180,15 @@ impl PartialOrd for QueuedAppMessage {
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
 }
 
-fn spawn_outbound_writer(stream: TcpStream, queue_rx: flume::Receiver<QueuedAppMessage>) {
+fn spawn_outbound_writer(
+	stream: TcpStream,
+	queue_rx: flume::Receiver<QueuedAppMessage>,
+) -> GNativeSdkResult<()> {
 	thread::Builder::new()
 		.name("gnative-sdk-outbound".to_string())
 		.spawn(move || run_outbound_writer(stream, queue_rx))
-		.expect("failed to spawn gnative sdk outbound writer");
+		.map(|_| ())
+		.map_err(GNativeSdkError::from)
 }
 
 fn run_outbound_writer(mut stream: TcpStream, queue_rx: flume::Receiver<QueuedAppMessage>) {
@@ -197,30 +201,30 @@ fn run_outbound_writer(mut stream: TcpStream, queue_rx: flume::Receiver<QueuedAp
 		}
 
 		while let Some(message) = pending.pop() {
-			if let Err(error) = write_app_message(&mut stream, &message.message) {
-				eprintln!("failed to write gnative app message: {error}");
+			if write_app_message(&mut stream, &message.message).is_err() {
 				return;
 			}
 		}
 	}
 }
 
-fn write_app_message(stream: &mut TcpStream, message: &GNativeAppToHost) -> Result<(), String> {
-	let payload = serde_json::to_string(message).map_err(|error| error.to_string())?;
-	stream.write_all(payload.as_bytes()).map_err(|error| error.to_string())?;
-	stream.write_all(b"\n").map_err(|error| error.to_string())?;
-	stream.flush().map_err(|error| error.to_string())
+fn write_app_message(stream: &mut TcpStream, message: &GNativeAppToHost) -> GNativeSdkResult<()> {
+	let payload = serde_json::to_string(message).map_err(GNativeSdkError::EncodeMessage)?;
+	stream.write_all(payload.as_bytes())?;
+	stream.write_all(b"\n")?;
+	stream.flush()?;
+	Ok(())
 }
 
 fn read_host_message(
 	reader: &mut BufReader<TcpStream>,
-) -> Result<Option<GNativeHostToApp>, String> {
+) -> GNativeSdkResult<Option<GNativeHostToApp>> {
 	let mut line = String::new();
-	let bytes_read = reader.read_line(&mut line).map_err(|error| error.to_string())?;
+	let bytes_read = reader.read_line(&mut line)?;
 	if bytes_read == 0 {
 		return Ok(None);
 	}
-	serde_json::from_str(line.trim_end()).map(Some).map_err(|error| error.to_string())
+	serde_json::from_str(line.trim_end()).map(Some).map_err(GNativeSdkError::DecodeMessage)
 }
 
 fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
@@ -258,7 +262,7 @@ mod tests {
 		fn dispatch(
 			&self,
 			_event: germinal_ports::event::runtime_event::RuntimeEvent,
-		) -> Result<(), String> {
+		) -> germinal_ports::error::BoxResult<()> {
 			Ok(())
 		}
 	}
@@ -307,7 +311,7 @@ mod tests {
 
 		let app = thread::spawn(move || {
 			let session = bootstrap.connect().expect("session should connect host");
-			let mut writer = session.frame_writer().expect("frame writer should clone stream");
+			let mut writer = session.frame_writer();
 			writer
 				.send_frame(GNativeFrame {
 					gshell_id: session.accepted().gshell_id,

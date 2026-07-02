@@ -4,6 +4,8 @@ use germinal_gnative_protocol::gnative::session::{
 	GNATIVE_TUNNEL_ENDPOINT_ENV, GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV, GNATIVE_TUNNEL_TOKEN_ENV,
 };
 
+use crate::error::{GNativeSdkError, GNativeSdkResult};
+
 const ENTER_GNATIVE_PREFIX: &str = "\u{1b}Pgerminal-gnative;";
 const DCS_TERMINATOR: &str = "\u{1b}\\";
 
@@ -15,15 +17,18 @@ pub struct GNativeTunnelEnv {
 }
 
 impl GNativeTunnelEnv {
-	pub fn from_env() -> Result<Self, String> {
+	pub fn from_env() -> GNativeSdkResult<Self> {
 		let endpoint = std::env::var(GNATIVE_TUNNEL_ENDPOINT_ENV)
-			.map_err(|_| format!("missing {GNATIVE_TUNNEL_ENDPOINT_ENV}"))?;
+			.map_err(|_| GNativeSdkError::MissingEnv { name: GNATIVE_TUNNEL_ENDPOINT_ENV })?;
 		let token = std::env::var(GNATIVE_TUNNEL_TOKEN_ENV)
-			.map_err(|_| format!("missing {GNATIVE_TUNNEL_TOKEN_ENV}"))?;
+			.map_err(|_| GNativeSdkError::MissingEnv { name: GNATIVE_TUNNEL_TOKEN_ENV })?;
 		let protocol_version = std::env::var(GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV)
-			.map_err(|_| format!("missing {GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV}"))?
+			.map_err(|_| GNativeSdkError::MissingEnv { name: GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV })?
 			.parse::<u32>()
-			.map_err(|error| error.to_string())?;
+			.map_err(|source| GNativeSdkError::InvalidEnvNumber {
+				name: GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV,
+				source,
+			})?;
 
 		Ok(Self { endpoint, token, protocol_version })
 	}

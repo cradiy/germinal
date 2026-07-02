@@ -1,6 +1,6 @@
 use std::{
 	collections::VecDeque,
-	fs,
+	fs, io,
 	io::stdout,
 	path::{Path, PathBuf},
 	sync::mpsc::{self, RecvTimeoutError},
@@ -20,8 +20,9 @@ use germinal_gnative_protocol::{
 	},
 	seq::Seq,
 };
-use germinal_gnative_sdk::local_session::{
-	LocalGNativeFrameWriter, LocalGNativeSession, LocalGNativeTunnelBootstrap,
+use germinal_gnative_sdk::{
+	GNativeSdkError,
+	local_session::{LocalGNativeFrameWriter, LocalGNativeSession, LocalGNativeTunnelBootstrap},
 };
 use germinal_gnative_ui::{
 	CompiledUi, Element, GridSize, IntoElementNode, UiTree,
@@ -34,6 +35,7 @@ use germinal_gnative_widgets::{
 	input::{Input, InputState},
 	label::Label,
 };
+use thiserror::Error;
 
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 const MAX_TODO_EVENTS: usize = 10;
@@ -42,18 +44,46 @@ const VIDEO_SEEK_STEP_US: u64 = 1_000_000;
 const VIDEO_EXTENSIONS: &[&str] =
 	&["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "mpeg", "mpg", "flv", "wmv"];
 
-fn main() -> Result<(), String> {
+#[derive(Debug, Error)]
+enum DemoError {
+	#[error(transparent)]
+	Sdk(#[from] GNativeSdkError),
+	#[error("failed to write enter control sequence: {0}")]
+	WriteEnterControlSequence(#[source] io::Error),
+	#[error("host closed before initial resize")]
+	HostClosedBeforeInitialResize,
+	#[error("video path is empty; enter an existing directory")]
+	EmptyVideoPath,
+	#[error("path does not exist: {path}")]
+	VideoPathMissing { path: String },
+	#[error("path is not a directory: {path}")]
+	VideoPathNotDirectory { path: String },
+	#[error("failed to read video directory {path}: {source}")]
+	ReadVideoDirectory {
+		path:   PathBuf,
+		#[source]
+		source: io::Error,
+	},
+	#[error("failed to read a video directory entry under {path}: {source}")]
+	ReadVideoDirectoryEntry {
+		path:   PathBuf,
+		#[source]
+		source: io::Error,
+	},
+}
+
+fn main() -> Result<(), DemoError> {
 	let bootstrap = LocalGNativeTunnelBootstrap::from_env()?;
 	eprintln!("germinal-gnative-demo connecting to germinal at {}", bootstrap.tunnel_env().endpoint);
 	let mut terminal_stdout = stdout();
 	bootstrap
 		.write_enter_control_sequence(&mut terminal_stdout)
-		.map_err(|error| error.to_string())?;
+		.map_err(DemoError::WriteEnterControlSequence)?;
 
 	let mut session = bootstrap.connect()?;
 	let accepted = session.accepted().clone();
 	let initial_size = wait_for_initial_size(&mut session)?;
-	let mut emitter = DemoFrameEmitter::new(accepted.gshell_id, session.frame_writer()?);
+	let mut emitter = DemoFrameEmitter::new(accepted.gshell_id, session.frame_writer());
 	let mut app = DemoHostApp::new(initial_size);
 	app.push_notice(format!(
 		"connected gshell={} protocol=v{}",
@@ -139,7 +169,7 @@ fn flush_media_commands(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) {
 	}
 }
 
-fn draw_app(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) -> Result<(), String> {
+fn draw_app(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) -> Result<(), DemoError> {
 	let layout = app.ui_tree().layout(app.size);
 	let compiled = layout.render();
 	emitter.send(compiled)?;
@@ -147,13 +177,13 @@ fn draw_app(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) -> Result<(),
 	Ok(())
 }
 
-fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<GridSize, String> {
+fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<GridSize, DemoError> {
 	while let Some(input) = session.read_input()? {
 		if let GNativeInputEvent::Resize { columns, rows } = input {
 			return Ok(clamped_size(columns, rows));
 		}
 	}
-	Err("host closed before initial resize".to_string())
+	Err(DemoError::HostClosedBeforeInitialResize)
 }
 
 fn handle_input(app: &mut DemoHostApp, input: GNativeInputEvent) {
@@ -253,7 +283,7 @@ fn clamped_size(columns: u32, rows: u32) -> GridSize {
 enum SessionMessage {
 	Input(GNativeInputEvent),
 	Closed,
-	Error(String),
+	Error(GNativeSdkError),
 }
 
 struct DemoFrameEmitter {
@@ -267,18 +297,20 @@ impl DemoFrameEmitter {
 		Self { gshell_id, frame_seq: 0, writer }
 	}
 
-	fn send(&mut self, compiled: CompiledUi) -> Result<(), String> {
+	fn send(&mut self, compiled: CompiledUi) -> Result<(), DemoError> {
 		self.frame_seq += 1;
 		self.writer.send_frame(GNativeFrame {
 			gshell_id: self.gshell_id,
 			seq:       Seq::new(self.frame_seq),
 			commands:  compiled.commands,
 			cursor:    compiled.cursor.map(|cursor| GNativeFrameCursor { x: cursor.x, y: cursor.y }),
-		})
+		})?;
+		Ok(())
 	}
 
-	fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), String> {
-		self.writer.send_control(command)
+	fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), DemoError> {
+		self.writer.send_control(command)?;
+		Ok(())
 	}
 }
 
@@ -663,6 +695,10 @@ impl TodoDemo {
 	) -> Option<String> {
 		if self.composer.is_focused() {
 			match logical_key {
+				GNativeInputKey::Named(GNativeInputNamedKey::ArrowLeft) => self.composer.move_cursor_left(),
+				GNativeInputKey::Named(GNativeInputNamedKey::ArrowRight) => {
+					self.composer.move_cursor_right()
+				}
 				GNativeInputKey::Named(GNativeInputNamedKey::Backspace) => self.backspace(),
 				GNativeInputKey::Named(GNativeInputNamedKey::Escape) => self.escape(),
 				GNativeInputKey::Named(GNativeInputNamedKey::Enter) => self.submit_composer(),
@@ -739,17 +775,13 @@ impl TodoDemo {
 
 	fn insert_text(&mut self, text: &str) {
 		if self.composer.is_focused() {
-			let mut value = self.composer.value().to_string();
-			value.push_str(text);
-			self.composer.set_value(value);
+			self.composer.insert_text(text);
 		}
 	}
 
 	fn backspace(&mut self) {
 		if self.composer.is_focused() {
-			let mut value = self.composer.value().to_string();
-			value.pop();
-			self.composer.set_value(value);
+			self.composer.backspace();
 		}
 	}
 
@@ -1025,6 +1057,12 @@ impl VideoPlayerDemo {
 	) -> Option<String> {
 		if self.library.is_none() {
 			match logical_key {
+				GNativeInputKey::Named(GNativeInputNamedKey::ArrowLeft) => {
+					self.path_input.move_cursor_left()
+				}
+				GNativeInputKey::Named(GNativeInputNamedKey::ArrowRight) => {
+					self.path_input.move_cursor_right();
+				}
 				GNativeInputKey::Named(GNativeInputNamedKey::Backspace) => self.backspace_path(),
 				GNativeInputKey::Named(GNativeInputNamedKey::Escape) => self.clear_prompt_error(),
 				GNativeInputKey::Named(GNativeInputNamedKey::Enter) => self.submit_path(),
@@ -1103,16 +1141,12 @@ impl VideoPlayerDemo {
 	}
 
 	fn insert_path_text(&mut self, text: &str) {
-		let mut value = self.path_input.value().to_string();
-		value.push_str(text);
-		self.path_input.set_value(value);
+		self.path_input.insert_text(text);
 		self.error_message = None;
 	}
 
 	fn backspace_path(&mut self) {
-		let mut value = self.path_input.value().to_string();
-		value.pop();
-		self.path_input.set_value(value);
+		self.path_input.backspace();
 		self.error_message = None;
 	}
 
@@ -1145,7 +1179,7 @@ impl VideoPlayerDemo {
 				));
 			}
 			Err(error) => {
-				self.error_message = Some(error);
+				self.error_message = Some(error.to_string());
 				self.info_message = None;
 			}
 		}
@@ -1166,10 +1200,14 @@ impl VideoPlayerDemo {
 			if library.loaded_index.is_some() {
 				self.pending_controls.push(GNativeMediaControlCommand::Stop);
 			}
+			let path = library.videos[selected_index].path.to_string_lossy().into_owned();
 			library.loaded_index = Some(selected_index);
 			library.playback = PlaybackState::Playing;
 			library.position_us = 0;
-			self.pending_controls.push(GNativeMediaControlCommand::Seek { position_us: 0 });
+			self.pending_controls.push(GNativeMediaControlCommand::OpenFile {
+				path,
+				surface_id: VIDEO_SURFACE_ID.to_string(),
+			});
 			self.pending_controls.push(GNativeMediaControlCommand::Play);
 			self.info_message = Some(format!("queued play: {}", library.videos[selected_index].name));
 			self.error_message = None;
@@ -1332,23 +1370,26 @@ impl VideoPlayerDemo {
 	}
 }
 
-fn scan_video_entries(path: &str) -> Result<Vec<VideoEntry>, String> {
+fn scan_video_entries(path: &str) -> Result<Vec<VideoEntry>, DemoError> {
 	let trimmed = path.trim();
 	if trimmed.is_empty() {
-		return Err("path is empty; enter an existing directory".to_string());
+		return Err(DemoError::EmptyVideoPath);
 	}
 
 	let root = Path::new(trimmed);
 	if !root.exists() {
-		return Err(format!("path does not exist: {trimmed}"));
+		return Err(DemoError::VideoPathMissing { path: trimmed.to_string() });
 	}
 	if !root.is_dir() {
-		return Err(format!("path is not a directory: {trimmed}"));
+		return Err(DemoError::VideoPathNotDirectory { path: trimmed.to_string() });
 	}
 
 	let mut videos = Vec::new();
-	for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
-		let entry = entry.map_err(|error| error.to_string())?;
+	for entry in fs::read_dir(root)
+		.map_err(|source| DemoError::ReadVideoDirectory { path: root.to_path_buf(), source })?
+	{
+		let entry = entry
+			.map_err(|source| DemoError::ReadVideoDirectoryEntry { path: root.to_path_buf(), source })?;
 		let path = entry.path();
 		if !path.is_file() || !is_supported_video_path(&path) {
 			continue;

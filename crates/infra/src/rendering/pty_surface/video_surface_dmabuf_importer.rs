@@ -7,7 +7,11 @@ use std::{
 #[cfg(target_os = "linux")]
 use ash::vk;
 #[cfg(target_os = "linux")]
+use germinal_ports::error::BoxResult;
+#[cfg(target_os = "linux")]
 use nix::{sys::stat::fstat, unistd::dup};
+#[cfg(target_os = "linux")]
+use thiserror::Error;
 
 #[cfg(target_os = "linux")]
 use crate::rendering::pty_surface::video_surface_frame::{
@@ -15,19 +19,40 @@ use crate::rendering::pty_surface::video_surface_frame::{
 };
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Error)]
+enum VideoSurfaceImportError {
+	#[error("dma_buf import requires a non-empty frame")]
+	EmptyFrame,
+	#[error("nv12 dma_buf import requires even width and height, got {width_px}x{height_px}")]
+	OddDimensions { width_px: u32, height_px: u32 },
+	#[error("dma_buf import requires the Vulkan backend")]
+	RequiresVulkanBackend,
+	#[error("no compatible Vulkan memory type for dma_buf import")]
+	NoCompatibleMemoryType,
+	#[error("dma_buf size must be non-negative")]
+	NegativeDmaBufSize,
+}
+
+#[cfg(target_os = "linux")]
 pub fn import_nv12_dmabuf_frame(
 	device: &wgpu::Device,
 	frame: &WgpuVideoSurfaceNv12DmaBufFrame,
-) -> Result<WgpuVideoSurfaceNv12GpuFrame, String> {
+) -> BoxResult<WgpuVideoSurfaceNv12GpuFrame> {
 	if frame.width_px == 0 || frame.height_px == 0 {
-		return Err("dma_buf import requires a non-empty frame".to_string());
+		return Err(VideoSurfaceImportError::EmptyFrame.into());
 	}
 	if frame.width_px % 2 != 0 || frame.height_px % 2 != 0 {
-		return Err("nv12 dma_buf import requires even width and height".to_string());
+		return Err(
+			VideoSurfaceImportError::OddDimensions {
+				width_px:  frame.width_px,
+				height_px: frame.height_px,
+			}
+			.into(),
+		);
 	}
 
 	let Some(hal_device) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
-		return Err("dma_buf import requires the Vulkan backend".to_string());
+		return Err(VideoSurfaceImportError::RequiresVulkanBackend.into());
 	};
 
 	let raw_device = hal_device.raw_device().clone();
@@ -84,6 +109,7 @@ pub fn import_nv12_dmabuf_frame(
 	Ok(WgpuVideoSurfaceNv12GpuFrame::new(
 		frame.width_px,
 		frame.height_px,
+		frame.color_profile,
 		y_texture,
 		y_plane,
 		uv_texture,
@@ -111,18 +137,16 @@ fn import_plane_texture(
 	raw_physical_device: vk::PhysicalDevice,
 	external_memory_fd: &ash::khr::external_memory_fd::Device,
 	request: PlaneImportRequest<'_>,
-) -> Result<wgpu::Texture, String> {
-	let duplicated_fd = dup(&*request.plane.fd).map_err(|error| error.to_string())?;
+) -> BoxResult<wgpu::Texture> {
+	let duplicated_fd = dup(&*request.plane.fd)?;
 
 	let mut memory_fd_properties = vk::MemoryFdPropertiesKHR::default();
 	unsafe {
-		external_memory_fd
-			.get_memory_fd_properties(
-				vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
-				duplicated_fd.as_raw_fd(),
-				&mut memory_fd_properties,
-			)
-			.map_err(vk_error)?
+		external_memory_fd.get_memory_fd_properties(
+			vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+			duplicated_fd.as_raw_fd(),
+			&mut memory_fd_properties,
+		)?
 	};
 
 	let mut external_memory_image_info = vk::ExternalMemoryImageCreateInfo::default()
@@ -144,7 +168,7 @@ fn import_plane_texture(
 		.initial_layout(vk::ImageLayout::UNDEFINED)
 		.push_next(&mut drm_format_modifier_info)
 		.push_next(&mut external_memory_image_info);
-	let vk_image = unsafe { raw_device.create_image(&image_create_info, None).map_err(vk_error)? };
+	let vk_image = unsafe { raw_device.create_image(&image_create_info, None)? };
 
 	let image_requirements = unsafe { raw_device.get_image_memory_requirements(vk_image) };
 	let memory_type_bits =
@@ -163,7 +187,7 @@ fn import_plane_texture(
 			vk::MemoryPropertyFlags::empty(),
 		)
 	})
-	.ok_or_else(|| "no compatible Vulkan memory type for dma_buf import".to_string())?;
+	.ok_or(VideoSurfaceImportError::NoCompatibleMemoryType)?;
 
 	let dmabuf_size = dma_buf_size_bytes(&request.plane.fd)?;
 	let allocation_size = image_requirements
@@ -172,20 +196,19 @@ fn import_plane_texture(
 		.max(request.plane.offset.saturating_add(request.estimated_plane_size));
 	let mut import_memory_info = vk::ImportMemoryFdInfoKHR::default()
 		.handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-		.fd(dup(&*request.plane.fd).map_err(|error| error.to_string())?.into_raw_fd());
+		.fd(dup(&*request.plane.fd)?.into_raw_fd());
 	let memory_allocate_info = vk::MemoryAllocateInfo::default()
 		.allocation_size(allocation_size)
 		.memory_type_index(memory_type_index)
 		.push_next(&mut import_memory_info);
-	let vk_memory =
-		unsafe { raw_device.allocate_memory(&memory_allocate_info, None).map_err(vk_error)? };
+	let vk_memory = unsafe { raw_device.allocate_memory(&memory_allocate_info, None)? };
 
 	if let Err(error) = unsafe { raw_device.bind_image_memory(vk_image, vk_memory, 0) } {
 		unsafe {
 			raw_device.free_memory(vk_memory, None);
 			raw_device.destroy_image(vk_image, None);
 		}
-		return Err(vk_error(error));
+		return Err(error.into());
 	}
 
 	let raw_device_for_drop = raw_device.clone();
@@ -196,7 +219,7 @@ fn import_plane_texture(
 
 	let hal_texture = unsafe {
 		let Some(hal_device) = device.as_hal::<wgpu::hal::api::Vulkan>() else {
-			return Err("dma_buf import requires the Vulkan backend".to_string());
+			return Err(VideoSurfaceImportError::RequiresVulkanBackend.into());
 		};
 		hal_device.texture_from_raw(
 			vk_image,
@@ -271,10 +294,9 @@ fn wgpu_texture_descriptor<'a>(
 	}
 }
 
-#[cfg(target_os = "linux")]
-fn dma_buf_size_bytes(fd: &Arc<OwnedFd>) -> Result<u64, String> {
-	let stat = fstat(&**fd).map_err(|error| error.to_string())?;
-	u64::try_from(stat.st_size).map_err(|_| "dma_buf size must be non-negative".to_string())
+fn dma_buf_size_bytes(fd: &Arc<OwnedFd>) -> BoxResult<u64> {
+	let stat = fstat(&**fd)?;
+	u64::try_from(stat.st_size).map_err(|_| VideoSurfaceImportError::NegativeDmaBufSize.into())
 }
 
 #[cfg(target_os = "linux")]
@@ -302,6 +324,3 @@ fn find_memory_type_index(
 	}
 	None
 }
-
-#[cfg(target_os = "linux")]
-fn vk_error(error: vk::Result) -> String { format!("Vulkan error: {error:?}") }

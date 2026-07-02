@@ -1,7 +1,7 @@
 use germinal_gnative_ui::{
 	Element, IntoDivChild, IntoElementNode,
 	elements::div::{Div, div, h_flex, v_flex},
-	rgb, rgba, text_input,
+	rgb, rgba, text_input_with_cursor,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,21 +354,23 @@ impl IntoDivChild for GroupBox {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputState {
-	id:              String,
-	value:           String,
-	placeholder:     Option<String>,
-	clean_on_escape: bool,
-	focused:         bool,
+	id:                String,
+	value:             String,
+	cursor_byte_index: usize,
+	placeholder:       Option<String>,
+	clean_on_escape:   bool,
+	focused:           bool,
 }
 
 impl InputState {
 	pub fn new(id: impl Into<String>) -> Self {
 		Self {
-			id:              id.into(),
-			value:           String::new(),
-			placeholder:     None,
-			clean_on_escape: false,
-			focused:         false,
+			id:                id.into(),
+			value:             String::new(),
+			cursor_byte_index: 0,
+			placeholder:       None,
+			clean_on_escape:   false,
+			focused:           false,
 		}
 	}
 
@@ -379,6 +381,7 @@ impl InputState {
 
 	pub fn default_value(mut self, value: impl Into<String>) -> Self {
 		self.value = value.into();
+		self.cursor_byte_index = self.value.len();
 		self
 	}
 
@@ -389,9 +392,56 @@ impl InputState {
 
 	pub fn value(&self) -> &str { &self.value }
 
-	pub fn set_value(&mut self, value: impl Into<String>) { self.value = value.into(); }
+	pub fn set_value(&mut self, value: impl Into<String>) {
+		self.value = value.into();
+		self.cursor_byte_index = self.value.len();
+	}
 
-	pub fn clear(&mut self) { self.value.clear(); }
+	pub fn clear(&mut self) {
+		self.value.clear();
+		self.cursor_byte_index = 0;
+	}
+
+	pub fn cursor_byte_index(&self) -> usize { self.cursor_byte_index }
+
+	pub fn insert_text(&mut self, text: &str) {
+		if text.is_empty() {
+			return;
+		}
+
+		let insert_at = self.cursor_byte_index.min(self.value.len());
+		self.value.insert_str(insert_at, text);
+		self.cursor_byte_index = insert_at + text.len();
+	}
+
+	pub fn backspace(&mut self) {
+		if self.cursor_byte_index == 0 || self.value.is_empty() {
+			return;
+		}
+
+		let current = self.cursor_byte_index.min(self.value.len());
+		let previous = previous_char_boundary(&self.value, current);
+		self.value.drain(previous..current);
+		self.cursor_byte_index = previous;
+	}
+
+	pub fn move_cursor_left(&mut self) {
+		if self.cursor_byte_index == 0 {
+			return;
+		}
+
+		self.cursor_byte_index =
+			previous_char_boundary(&self.value, self.cursor_byte_index.min(self.value.len()));
+	}
+
+	pub fn move_cursor_right(&mut self) {
+		let current = self.cursor_byte_index.min(self.value.len());
+		if current >= self.value.len() {
+			return;
+		}
+
+		self.cursor_byte_index = next_char_boundary(&self.value, current);
+	}
 
 	pub fn placeholder_text(&self) -> Option<&str> { self.placeholder.as_deref() }
 
@@ -449,9 +499,30 @@ impl IntoElementNode for Input {
 		}
 
 		container
-			.child(text_input(self.state.value().to_string(), self.state.is_focused()))
+			.child(text_input_with_cursor(
+				self.state.value().to_string(),
+				self.state.is_focused(),
+				self.state.cursor_byte_index(),
+			))
 			.into_element()
 	}
+}
+
+fn previous_char_boundary(value: &str, index: usize) -> usize {
+	value[..index.min(value.len())].char_indices().last().map(|(index, _)| index).unwrap_or(0)
+}
+
+fn next_char_boundary(value: &str, index: usize) -> usize {
+	let index = index.min(value.len());
+	if index >= value.len() {
+		return value.len();
+	}
+
+	let mut iter = value[index..].char_indices();
+	let Some((_, ch)) = iter.next() else {
+		return value.len();
+	};
+	index + ch.len_utf8()
 }
 
 impl IntoDivChild for Input {

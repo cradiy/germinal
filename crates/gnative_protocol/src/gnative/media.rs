@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GNativeMediaControlCommand {
+	OpenFile { path: String, surface_id: String },
 	Play,
 	Pause,
 	Stop,

@@ -7,9 +7,10 @@ repository.workspace = true
 authors.workspace    = true
 
 [dependencies]
-germinal-domain.workspace      = true
+germinal-domain.workspace           = true
 germinal-gnative-protocol.workspace = true
-germinal-gnative-sdk.workspace = true
-germinal-gnative-ui.workspace  = true
-germinal-gnative-widgets.workspace = true
-germinal-ports.workspace       = true
+germinal-gnative-sdk.workspace      = true
+germinal-gnative-ui.workspace       = true
+germinal-gnative-widgets.workspace  = true
+germinal-ports.workspace            = true
+thiserror.workspace                 = true

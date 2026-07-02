@@ -6,8 +6,13 @@ use germinal_ports::rendering::{
 };
 
 use crate::rendering::pty_surface::{
-	render_target_plan::WgpuTerminalRenderTargetPlan, renderer_backend::WgpuRendererConfig,
-	video_surface_frame::WgpuVideoSurfaceFrame, video_surface_registry::WgpuVideoSurfaceRegistry,
+	render_target_plan::WgpuTerminalRenderTargetPlan,
+	renderer_backend::WgpuRendererConfig,
+	video_surface_frame::{
+		WgpuVideoSurfaceColorMatrix, WgpuVideoSurfaceColorProfile, WgpuVideoSurfaceColorRange,
+		WgpuVideoSurfaceFrame,
+	},
+	video_surface_registry::WgpuVideoSurfaceRegistry,
 };
 
 const VIDEO_SURFACE_VERTEX_COUNT: u32 = 6;
@@ -20,6 +25,16 @@ var uv_plane: texture_2d<f32>;
 
 @group(0) @binding(2)
 var plane_sampler: sampler;
+
+struct ColorConversionUniform {
+    row0: vec4<f32>,
+    row1: vec4<f32>,
+    row2: vec4<f32>,
+    offset: vec4<f32>,
+}
+
+@group(0) @binding(3)
+var<uniform> color_conversion: ColorConversionUniform;
 
 struct VertexInput {
     @location(0) position_ndc: vec2<f32>,
@@ -42,12 +57,13 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let y = textureSample(y_plane, plane_sampler, input.uv).r;
-    let uv = textureSample(uv_plane, plane_sampler, input.uv).rg - vec2<f32>(0.5, 0.5);
+    let uv = textureSample(uv_plane, plane_sampler, input.uv).rg;
+    let yuv = vec4<f32>(y, uv, 1.0) + color_conversion.offset;
 
     let rgb = vec3<f32>(
-        y + 1.402 * uv.y,
-        y - 0.344136 * uv.x - 0.714136 * uv.y,
-        y + 1.772 * uv.x
+        dot(color_conversion.row0, yuv),
+        dot(color_conversion.row1, yuv),
+        dot(color_conversion.row2, yuv)
     );
 
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -83,11 +99,12 @@ impl WgpuVideoSurfaceRenderer {
 			let Some(frame) = registry.attached_frame(surface_snapshot.target_id, &surface.id) else {
 				continue;
 			};
-			if !matches!(frame, WgpuVideoSurfaceFrame::Nv12Gpu(_)) {
+			let WgpuVideoSurfaceFrame::Nv12Gpu(ref nv12_frame) = frame else {
 				continue;
-			}
+			};
 
-			let Some(vertices) = vertices_for_surface(surface, render_target_plan, renderer_config)
+			let Some(vertices) =
+				vertices_for_surface(surface, nv12_frame, render_target_plan, renderer_config)
 			else {
 				continue;
 			};
@@ -254,6 +271,57 @@ impl WgpuVideoSurfaceVertex {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WgpuVideoSurfaceColorConversionUniform {
+	row0:   [f32; 4],
+	row1:   [f32; 4],
+	row2:   [f32; 4],
+	offset: [f32; 4],
+}
+
+impl WgpuVideoSurfaceColorConversionUniform {
+	const BYTE_SIZE: usize = 64;
+
+	fn from_profile(profile: WgpuVideoSurfaceColorProfile) -> Self {
+		match (profile.range, profile.matrix) {
+			(WgpuVideoSurfaceColorRange::Full, WgpuVideoSurfaceColorMatrix::Bt601) => Self {
+				row0:   [1.0, 0.0, 1.402, 0.0],
+				row1:   [1.0, -0.344_136, -0.714_136, 0.0],
+				row2:   [1.0, 1.772, 0.0, 0.0],
+				offset: [0.0, -0.5, -0.5, 0.0],
+			},
+			(WgpuVideoSurfaceColorRange::Full, WgpuVideoSurfaceColorMatrix::Bt709) => Self {
+				row0:   [1.0, 0.0, 1.574_8, 0.0],
+				row1:   [1.0, -0.187_324, -0.468_124, 0.0],
+				row2:   [1.0, 1.855_6, 0.0, 0.0],
+				offset: [0.0, -0.5, -0.5, 0.0],
+			},
+			(WgpuVideoSurfaceColorRange::Limited, WgpuVideoSurfaceColorMatrix::Bt601) => Self {
+				row0:   [1.164_383_5, 0.0, 1.596_026_8, 0.0],
+				row1:   [1.164_383_5, -0.391_762_3, -0.812_967_7, 0.0],
+				row2:   [1.164_383_5, 2.017_232_2, 0.0, 0.0],
+				offset: [-0.062_745_1, -0.5, -0.5, 0.0],
+			},
+			(WgpuVideoSurfaceColorRange::Limited, WgpuVideoSurfaceColorMatrix::Bt709) => Self {
+				row0:   [1.164_383_5, 0.0, 1.792_741_1, 0.0],
+				row1:   [1.164_383_5, -0.213_248_6, -0.532_909_33, 0.0],
+				row2:   [1.164_383_5, 2.112_401_7, 0.0, 0.0],
+				offset: [-0.062_745_1, -0.5, -0.5, 0.0],
+			},
+		}
+	}
+
+	fn to_ne_bytes(self) -> [u8; Self::BYTE_SIZE] {
+		let mut bytes = [0u8; Self::BYTE_SIZE];
+		let mut offset = 0usize;
+		for value in self.row0.into_iter().chain(self.row1).chain(self.row2).chain(self.offset) {
+			bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+			offset += 4;
+		}
+		bytes
+	}
+}
+
 #[derive(Debug)]
 struct WgpuVideoSurfacePipeline {
 	color_format:              wgpu::TextureFormat,
@@ -296,6 +364,16 @@ impl WgpuVideoSurfacePipeline {
 						binding:    2,
 						visibility: wgpu::ShaderStages::FRAGMENT,
 						ty:         wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+						count:      None,
+					},
+					wgpu::BindGroupLayoutEntry {
+						binding:    3,
+						visibility: wgpu::ShaderStages::FRAGMENT,
+						ty:         wgpu::BindingType::Buffer {
+							ty:                 wgpu::BufferBindingType::Uniform,
+							has_dynamic_offset: false,
+							min_binding_size:   None,
+						},
 						count:      None,
 					},
 				],
@@ -353,29 +431,49 @@ fn bind_group_for_surface(
 	frame: &WgpuVideoSurfaceFrame,
 ) -> wgpu::BindGroup {
 	match frame {
-		WgpuVideoSurfaceFrame::Nv12Gpu(frame) => device.create_bind_group(&wgpu::BindGroupDescriptor {
-			label:   Some("germinal.video_surface.texture.bind_group"),
-			layout:  &pipeline.texture_bind_group_layout,
-			entries: &[
-				wgpu::BindGroupEntry {
-					binding:  0,
-					resource: wgpu::BindingResource::TextureView(&frame.y_plane),
-				},
-				wgpu::BindGroupEntry {
-					binding:  1,
-					resource: wgpu::BindingResource::TextureView(&frame.uv_plane),
-				},
-				wgpu::BindGroupEntry {
-					binding:  2,
-					resource: wgpu::BindingResource::Sampler(&frame.plane_sampler),
-				},
-			],
-		}),
+		WgpuVideoSurfaceFrame::Nv12Gpu(frame) => {
+			let color_conversion = create_color_conversion_buffer(device, frame.color_profile);
+			device.create_bind_group(&wgpu::BindGroupDescriptor {
+				label:   Some("germinal.video_surface.texture.bind_group"),
+				layout:  &pipeline.texture_bind_group_layout,
+				entries: &[
+					wgpu::BindGroupEntry {
+						binding:  0,
+						resource: wgpu::BindingResource::TextureView(&frame.y_plane),
+					},
+					wgpu::BindGroupEntry {
+						binding:  1,
+						resource: wgpu::BindingResource::TextureView(&frame.uv_plane),
+					},
+					wgpu::BindGroupEntry {
+						binding:  2,
+						resource: wgpu::BindingResource::Sampler(&frame.plane_sampler),
+					},
+					wgpu::BindGroupEntry { binding: 3, resource: color_conversion.as_entire_binding() },
+				],
+			})
+		}
 		#[cfg(target_os = "linux")]
 		WgpuVideoSurfaceFrame::Nv12DmaBuf(_) => {
 			unreachable!("prepare filters out dma_buf frames until the importer is wired")
 		}
 	}
+}
+
+fn create_color_conversion_buffer(
+	device: &wgpu::Device,
+	profile: WgpuVideoSurfaceColorProfile,
+) -> wgpu::Buffer {
+	let bytes = WgpuVideoSurfaceColorConversionUniform::from_profile(profile).to_ne_bytes();
+	let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+		label:              Some("germinal.video_surface.color_conversion.uniform"),
+		size:               bytes.len() as u64,
+		usage:              wgpu::BufferUsages::UNIFORM,
+		mapped_at_creation: true,
+	});
+	buffer.slice(..).get_mapped_range_mut().copy_from_slice(&bytes);
+	buffer.unmap();
+	buffer
 }
 
 fn create_vertex_buffer(
@@ -407,17 +505,20 @@ fn create_vertex_buffer(
 
 fn vertices_for_surface(
 	surface: &RenderSurfaceVideoSurfaceSnapshot,
+	frame: &crate::rendering::pty_surface::video_surface_frame::WgpuVideoSurfaceNv12GpuFrame,
 	render_target_plan: WgpuTerminalRenderTargetPlan,
 	renderer_config: WgpuRendererConfig,
 ) -> Option<[WgpuVideoSurfaceVertex; VIDEO_SURFACE_VERTEX_COUNT as usize]> {
-	if surface.width_px == 0 || surface.height_px == 0 {
+	let fitted =
+		layout_video_surface_rect(surface, frame.width_px, frame.height_px, renderer_config)?;
+	if fitted.width_px == 0 || fitted.height_px == 0 {
 		return None;
 	}
 
-	let x0 = renderer_config.content_origin_x.saturating_add(surface.x_px) as f32;
-	let y0 = renderer_config.content_origin_y.saturating_add(surface.y_px) as f32;
-	let x1 = x0 + surface.width_px as f32;
-	let y1 = y0 + surface.height_px as f32;
+	let x0 = fitted.x_px as f32;
+	let y0 = fitted.y_px as f32;
+	let x1 = x0 + fitted.width_px as f32;
+	let y1 = y0 + fitted.height_px as f32;
 	let viewport_width = render_target_plan.viewport_width_px().max(1.0);
 	let viewport_height = render_target_plan.viewport_height_px().max(1.0);
 	let left = pixel_x_to_ndc(x0, viewport_width);
@@ -433,6 +534,96 @@ fn vertices_for_surface(
 		WgpuVideoSurfaceVertex { position_ndc: [right, bottom], uv: [1.0, 1.0] },
 		WgpuVideoSurfaceVertex { position_ndc: [left, bottom], uv: [0.0, 1.0] },
 	])
+}
+
+fn layout_video_surface_rect(
+	surface: &RenderSurfaceVideoSurfaceSnapshot,
+	frame_width_px: u32,
+	frame_height_px: u32,
+	renderer_config: WgpuRendererConfig,
+) -> Option<RenderSurfaceVideoSurfaceSnapshot> {
+	if surface.width_px == 0 || surface.height_px == 0 || frame_width_px == 0 || frame_height_px == 0
+	{
+		return None;
+	}
+
+	let scaled_surface = scale_video_surface_rect(surface, renderer_config);
+	Some(fit_video_frame_rect(scaled_surface, frame_width_px, frame_height_px))
+}
+
+fn scale_video_surface_rect(
+	surface: &RenderSurfaceVideoSurfaceSnapshot,
+	config: WgpuRendererConfig,
+) -> RenderSurfaceVideoSurfaceSnapshot {
+	RenderSurfaceVideoSurfaceSnapshot {
+		id:        surface.id.clone(),
+		x_px:      config.content_origin_x
+			+ scale_virtual_px(surface.x_px, config.content_width_px, pixel_virtual_width_px(config)),
+		y_px:      config.content_origin_y
+			+ scale_virtual_px(surface.y_px, config.content_height_px, pixel_virtual_height_px(config)),
+		width_px:  scale_virtual_px(
+			surface.width_px,
+			config.content_width_px,
+			pixel_virtual_width_px(config),
+		),
+		height_px: scale_virtual_px(
+			surface.height_px,
+			config.content_height_px,
+			pixel_virtual_height_px(config),
+		),
+	}
+}
+
+fn fit_video_frame_rect(
+	container: RenderSurfaceVideoSurfaceSnapshot,
+	frame_width_px: u32,
+	frame_height_px: u32,
+) -> RenderSurfaceVideoSurfaceSnapshot {
+	let container_width = container.width_px.max(1);
+	let container_height = container.height_px.max(1);
+	let frame_width = frame_width_px.max(1);
+	let frame_height = frame_height_px.max(1);
+
+	let width_limited_height = rounded_ratio(container_width, frame_height, frame_width);
+
+	let (fit_width, fit_height) = if width_limited_height <= container_height {
+		(container_width, width_limited_height.min(container_height).max(1))
+	} else {
+		let fit_width = rounded_ratio(container_height, frame_width, frame_height).min(container_width);
+		(fit_width.max(1), container_height)
+	};
+
+	let offset_x = container.width_px.saturating_sub(fit_width) / 2;
+	let offset_y = container.height_px.saturating_sub(fit_height) / 2;
+
+	RenderSurfaceVideoSurfaceSnapshot {
+		id:        container.id,
+		x_px:      container.x_px.saturating_add(offset_x),
+		y_px:      container.y_px.saturating_add(offset_y),
+		width_px:  fit_width,
+		height_px: fit_height,
+	}
+}
+
+fn rounded_ratio(lhs: u32, numerator: u32, denominator: u32) -> u32 {
+	let denominator = u64::from(denominator.max(1));
+	let scaled = u64::from(lhs) * u64::from(numerator);
+	let rounded = (scaled + denominator / 2) / denominator;
+	rounded.min(u64::from(u32::MAX)) as u32
+}
+
+fn scale_virtual_px(value: u32, actual_content_px: u32, virtual_content_px: u32) -> u32 {
+	let scaled = u64::from(value) * u64::from(actual_content_px);
+	let rounded = (scaled + u64::from(virtual_content_px / 2)) / u64::from(virtual_content_px.max(1));
+	rounded.min(u64::from(u32::MAX)) as u32
+}
+
+fn pixel_virtual_width_px(config: WgpuRendererConfig) -> u32 {
+	config.grid_columns.saturating_mul(8).max(1)
+}
+
+fn pixel_virtual_height_px(config: WgpuRendererConfig) -> u32 {
+	config.grid_rows.saturating_mul(16).max(1)
 }
 
 fn pixel_x_to_ndc(x_px: f32, viewport_width_px: f32) -> f32 {
@@ -453,7 +644,7 @@ mod tests {
 
 	#[test]
 	fn maps_video_surface_rect_to_ndc_vertices() {
-		let vertices = vertices_for_surface(
+		let fitted = layout_video_surface_rect(
 			&RenderSurfaceVideoSurfaceSnapshot {
 				id:        "player".to_string(),
 				x_px:      8,
@@ -461,7 +652,8 @@ mod tests {
 				width_px:  80,
 				height_px: 48,
 			},
-			WgpuTerminalRenderTargetPlan::new(160, 96),
+			160,
+			96,
 			WgpuRendererConfig {
 				cell_width_px:     8,
 				cell_height_px:    16,
@@ -472,9 +664,10 @@ mod tests {
 				grid_columns:      18,
 				grid_rows:         5,
 			},
-		);
+		)
+		.expect("expected fitted rect");
 
-		let vertices = vertices.expect("expected vertices");
+		let vertices = quad_vertices_for_rect(fitted, WgpuTerminalRenderTargetPlan::new(160, 96));
 		assert_vertex_close(vertices[0], [-0.8, 0.3333333], [0.0, 0.0]);
 		assert_vertex_close(vertices[1], [0.2, 0.3333333], [1.0, 0.0]);
 		assert_vertex_close(vertices[5], [-0.8, -0.6666667], [0.0, 1.0]);
@@ -482,7 +675,7 @@ mod tests {
 
 	#[test]
 	fn skips_empty_video_surface_rects() {
-		let vertices = vertices_for_surface(
+		let fitted = layout_video_surface_rect(
 			&RenderSurfaceVideoSurfaceSnapshot {
 				id:        "player".to_string(),
 				x_px:      0,
@@ -490,11 +683,116 @@ mod tests {
 				width_px:  0,
 				height_px: 10,
 			},
-			WgpuTerminalRenderTargetPlan::new(160, 96),
+			10,
+			10,
 			WgpuRendererConfig::default(),
 		);
 
-		assert!(vertices.is_none());
+		assert!(fitted.is_none());
+	}
+
+	#[test]
+	fn fits_video_frame_inside_surface_without_stretching() {
+		let fitted = fit_video_frame_rect(
+			RenderSurfaceVideoSurfaceSnapshot {
+				id:        "player".to_string(),
+				x_px:      100,
+				y_px:      50,
+				width_px:  400,
+				height_px: 200,
+			},
+			1920,
+			1080,
+		);
+
+		assert_eq!(fitted.x_px, 122);
+		assert_eq!(fitted.y_px, 50);
+		assert_eq!(fitted.width_px, 356);
+		assert_eq!(fitted.height_px, 200);
+	}
+
+	#[test]
+	fn scales_video_surface_like_pixel_rects_before_ndc_mapping() {
+		let scaled = scale_video_surface_rect(
+			&RenderSurfaceVideoSurfaceSnapshot {
+				id:        "player".to_string(),
+				x_px:      80,
+				y_px:      160,
+				width_px:  400,
+				height_px: 320,
+			},
+			WgpuRendererConfig {
+				cell_width_px:     10,
+				cell_height_px:    20,
+				content_origin_x:  12,
+				content_origin_y:  18,
+				content_width_px:  1000,
+				content_height_px: 600,
+				grid_columns:      100,
+				grid_rows:         50,
+			},
+		);
+
+		assert_eq!(scaled.x_px, 112);
+		assert_eq!(scaled.y_px, 138);
+		assert_eq!(scaled.width_px, 500);
+		assert_eq!(scaled.height_px, 240);
+	}
+
+	#[test]
+	fn limited_bt709_color_profile_expands_video_range() {
+		let uniform =
+			WgpuVideoSurfaceColorConversionUniform::from_profile(WgpuVideoSurfaceColorProfile {
+				range:  WgpuVideoSurfaceColorRange::Limited,
+				matrix: WgpuVideoSurfaceColorMatrix::Bt709,
+			});
+
+		assert!((uniform.row0[0] - 1.164_383_5).abs() < 0.0001);
+		assert!((uniform.row0[2] - 1.792_741_1).abs() < 0.0001);
+		assert!((uniform.offset[0] + 0.062_745_1).abs() < 0.0001);
+		assert!((uniform.offset[1] + 0.5).abs() < 0.0001);
+		assert!((uniform.offset[2] + 0.5).abs() < 0.0001);
+	}
+
+	#[test]
+	fn full_bt601_color_profile_keeps_legacy_coefficients() {
+		let uniform =
+			WgpuVideoSurfaceColorConversionUniform::from_profile(WgpuVideoSurfaceColorProfile {
+				range:  WgpuVideoSurfaceColorRange::Full,
+				matrix: WgpuVideoSurfaceColorMatrix::Bt601,
+			});
+
+		assert!((uniform.row0[0] - 1.0).abs() < 0.0001);
+		assert!((uniform.row0[2] - 1.402).abs() < 0.0001);
+		assert!((uniform.row1[1] + 0.344_136).abs() < 0.0001);
+		assert!((uniform.offset[0] - 0.0).abs() < 0.0001);
+		assert!((uniform.offset[1] + 0.5).abs() < 0.0001);
+		assert!((uniform.offset[2] + 0.5).abs() < 0.0001);
+	}
+
+	fn quad_vertices_for_rect(
+		rect: RenderSurfaceVideoSurfaceSnapshot,
+		render_target_plan: WgpuTerminalRenderTargetPlan,
+	) -> [WgpuVideoSurfaceVertex; VIDEO_SURFACE_VERTEX_COUNT as usize] {
+		let x0 = rect.x_px as f32;
+		let y0 = rect.y_px as f32;
+		let x1 = x0 + rect.width_px as f32;
+		let y1 = y0 + rect.height_px as f32;
+		let viewport_width = render_target_plan.viewport_width_px().max(1.0);
+		let viewport_height = render_target_plan.viewport_height_px().max(1.0);
+		let left = pixel_x_to_ndc(x0, viewport_width);
+		let right = pixel_x_to_ndc(x1, viewport_width);
+		let top = pixel_y_to_ndc(y0, viewport_height);
+		let bottom = pixel_y_to_ndc(y1, viewport_height);
+
+		[
+			WgpuVideoSurfaceVertex { position_ndc: [left, top], uv: [0.0, 0.0] },
+			WgpuVideoSurfaceVertex { position_ndc: [right, top], uv: [1.0, 0.0] },
+			WgpuVideoSurfaceVertex { position_ndc: [right, bottom], uv: [1.0, 1.0] },
+			WgpuVideoSurfaceVertex { position_ndc: [left, top], uv: [0.0, 0.0] },
+			WgpuVideoSurfaceVertex { position_ndc: [right, bottom], uv: [1.0, 1.0] },
+			WgpuVideoSurfaceVertex { position_ndc: [left, bottom], uv: [0.0, 1.0] },
+		]
 	}
 
 	fn assert_vertex_close(

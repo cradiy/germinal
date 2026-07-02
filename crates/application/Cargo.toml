@@ -11,4 +11,6 @@ germinal-domain.workspace           = true
 germinal-gnative-protocol.workspace = true
 germinal-ports.workspace            = true
 
-kudi.workspace = true
+kudi.workspace      = true
+tracing.workspace   = true
+thiserror.workspace = true

@@ -18,6 +18,7 @@ use germinal_ports::{
 	},
 };
 use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
+use tracing::warn;
 
 use crate::pty::portable_pty_bridge::{
 	PtyBridgeConfig, apply_default_terminal_env, apply_shell_env, to_portable_pty_size,
@@ -119,7 +120,7 @@ fn read_pty_to_terminal_worker<R>(
 				}
 			}
 			Err(error) => {
-				eprintln!("pty read error: {error}");
+				warn!(error = %error, "pty read error");
 				break;
 			}
 		}

@@ -35,6 +35,7 @@ use germinal_ports::{
 		worker_service::IWorkerService,
 	},
 };
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 struct PtyPaneRuntime {
@@ -99,7 +100,7 @@ where Deps: AsRef<PtyServiceState>
 		{
 			Ok(descriptor) => descriptor.tunnel_env(),
 			Err(error) => {
-				eprintln!("failed to prepare gnative tunnel for {}: {error}", gshell_id.value());
+				warn!(gshell_id = gshell_id.value(), error = %error, "failed to prepare gnative tunnel");
 				return;
 			}
 		};

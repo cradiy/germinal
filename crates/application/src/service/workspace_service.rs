@@ -1,7 +1,10 @@
 use std::cell::{Cell, RefCell};
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, workspace::entity::workspace::Workspace};
-use germinal_ports::{repository::IRepository, service::workspace_service::IWorkspaceService};
+use germinal_ports::{
+	error::BoxResult, repository::IRepository, service::workspace_service::IWorkspaceService,
+};
+use thiserror::Error;
 
 #[derive(kudi::DepInj)]
 #[target(WorkspaceService)]
@@ -30,6 +33,12 @@ impl WorkspaceServiceState {
 	}
 }
 
+#[derive(Debug, Error)]
+enum WorkspaceServiceError {
+	#[error("workspace persistence id is not initialized")]
+	PersistenceIdNotInitialized,
+}
+
 impl<Deps> IWorkspaceService for WorkspaceService<Deps>
 where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Workspace>
 {
@@ -37,7 +46,7 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focused_gshell()
 	}
 
-	fn restore_workspace(&self) -> Result<(), String> {
+	fn restore_workspace(&self) -> BoxResult<()> {
 		let state = <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref());
 		let repository = self.prj_ref();
 
@@ -52,11 +61,13 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 		Ok(())
 	}
 
-	fn persist_workspace(&self) -> Result<(), String> {
+	fn persist_workspace(&self) -> BoxResult<()> {
 		let state = <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref());
-		let persistence_id = state
-			.persistence_workspace_id()
-			.ok_or_else(|| "workspace persistence id is not initialized".to_string())?;
+		let persistence_id = state.persistence_workspace_id().ok_or_else(|| {
+			Box::<dyn std::error::Error + Send + Sync>::from(
+				WorkspaceServiceError::PersistenceIdNotInitialized,
+			)
+		})?;
 
 		self.prj_ref().update(persistence_id, state.workspace())
 	}

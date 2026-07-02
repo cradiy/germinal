@@ -1,5 +1,11 @@
 mod boilerplate;
+mod config;
+mod error;
+mod logging;
+mod paste;
 
+pub use config::{AppPaths, GerminalConfig, load_or_create_config};
+pub use error::{AppError, AppResult};
 use germinal_application::service::{
 	gshell_service::GShellServiceState, layout_service::LayoutServiceState,
 	render_service::RenderServiceState, worker_service::WorkerServiceState,
@@ -7,6 +13,7 @@ use germinal_application::service::{
 };
 use germinal_domain::workspace::entity::workspace::Workspace;
 use germinal_infra::{
+	gnative::gst_video_player_bridge::GstVideoPlayerBridge,
 	pty::PlatformPtyBackend,
 	pty_host::worker::PlatformTerminalWorkerBackend,
 	rendering::pty_surface::window_runtime::{
@@ -18,6 +25,7 @@ use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+		runtime_event_dispatcher::IRuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
 			WindowInputNamedKey,
@@ -30,6 +38,9 @@ use germinal_ports::{
 		render_service::IRenderService, workspace_service::IWorkspaceService,
 	},
 };
+pub use logging::init_logging;
+use paste::{HostPasteAction, HostPasteController, HostPasteModifiers};
+use tracing::{debug, error, warn};
 use winit::{
 	application::ApplicationHandler,
 	event::{ElementState, Ime, WindowEvent},
@@ -53,51 +64,70 @@ pub struct App {
 	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
 	pty_backend:                      PlatformPtyBackend,
 	gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>,
+	media_bridge:                     std::sync::Arc<GstVideoPlayerBridge>,
 	terminal_worker_backend:          PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
 	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
 	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
 	render_window_id:                 Option<WindowId>,
+	paste_controller:                 HostPasteController,
+	config:                           GerminalConfig,
 }
 
 impl App {
-	pub fn new(runtime_event_proxy: EventLoopProxy<RuntimeEvent>) -> Result<Self, String> {
+	pub fn new(
+		runtime_event_proxy: EventLoopProxy<RuntimeEvent>,
+		config: GerminalConfig,
+		paths: AppPaths,
+	) -> AppResult<Self> {
 		let runtime_event_dispatcher = AppRuntimeEventDispatcher { proxy: runtime_event_proxy };
+		let media_dispatcher = {
+			let runtime_event_dispatcher = runtime_event_dispatcher.clone();
+			std::sync::Arc::new(move |event: RuntimeEvent| runtime_event_dispatcher.dispatch(event))
+		};
+		let media_bridge = std::sync::Arc::new(
+			GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
+		);
+		let terminal_profile = config.terminal_profile();
+		let workspace_database_path = paths.workspace_database_path(&config);
 
 		let app = Self {
-			workspace_service_state:          WorkspaceServiceState::new(),
-			gshell_service_state:             GShellServiceState::new(),
-			worker_service_state:             WorkerServiceState::new(),
-			render_service_state:             RenderServiceState::new(),
-			layout_service_state:             LayoutServiceState::default(),
+			workspace_service_state: WorkspaceServiceState::new(),
+			gshell_service_state: GShellServiceState::new(),
+			worker_service_state: WorkerServiceState::new(),
+			render_service_state: RenderServiceState::new(),
+			layout_service_state: LayoutServiceState::new(terminal_profile),
 			workspace_persistence_repository: SqliteRepository::new(
-				"germinal-workspace.sqlite3",
+				&workspace_database_path,
 				"workspace",
-			)?,
-			runtime_event_dispatcher:         runtime_event_dispatcher.clone(),
-			pty_backend:                      PlatformPtyBackend::new(),
-			gnative_tunnel:                   germinal_infra::gnative::tunnel::GNativeTunnel::new(),
-			terminal_worker_backend:          PlatformTerminalWorkerBackend::new(
-				runtime_event_dispatcher,
-			),
-			render_runtime_factory:           WgpuTerminalWindowRuntimeFactory::new(),
-			render_runtime:                   None,
-			render_window_id:                 None,
+			)
+			.map_err(|source| AppError::WorkspaceRepository { path: workspace_database_path, source })?,
+			runtime_event_dispatcher: runtime_event_dispatcher.clone(),
+			pty_backend: PlatformPtyBackend::new(),
+			gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new(),
+			media_bridge: std::sync::Arc::clone(&media_bridge),
+			terminal_worker_backend: PlatformTerminalWorkerBackend::new(runtime_event_dispatcher),
+			render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(terminal_profile),
+			render_runtime: None,
+			render_window_id: None,
+			paste_controller: HostPasteController::default(),
+			config,
 		};
 
 		app
 			.gnative_tunnel
 			.configure(app.runtime_event_dispatcher.clone(), app.surface_snapshot_sender());
+		app.gnative_tunnel.configure_media_bridge(media_bridge);
 
-		app.restore_workspace()?;
+		app.restore_workspace().map_err(AppError::RestoreWorkspace)?;
 
 		Ok(app)
 	}
 
-	pub fn run(&mut self, event_loop: EventLoop<RuntimeEvent>) -> Result<(), String> {
-		event_loop.run_app(self).map_err(|error| error.to_string())
+	pub fn run(&mut self, event_loop: EventLoop<RuntimeEvent>) -> AppResult<()> {
+		event_loop.run_app(self).map_err(AppError::RunEventLoop)
 	}
 
-	fn ensure_window_runtime(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+	fn ensure_window_runtime(&mut self, event_loop: &ActiveEventLoop) -> AppResult<()> {
 		if self.render_runtime.is_some() {
 			return Ok(());
 		}
@@ -106,15 +136,21 @@ impl App {
 			event_loop
 				.create_window(
 					winit::window::Window::default_attributes()
-						.with_title("Germinal")
-						.with_inner_size(winit::dpi::LogicalSize::new(960.0, 540.0)),
+						.with_title(self.config.window.title.as_str())
+						.with_inner_size(winit::dpi::LogicalSize::new(
+							f64::from(self.config.window.width_px),
+							f64::from(self.config.window.height_px),
+						)),
 				)
-				.map_err(|error| error.to_string())?,
+				.map_err(AppError::CreateWindow)?,
 		);
 		let window_id = window.id();
 		window.set_ime_allowed(true);
 
-		let runtime = self.render_runtime_factory.create_window_runtime(window)?;
+		let runtime = self
+			.render_runtime_factory
+			.create_window_runtime(window)
+			.map_err(|source| AppError::CreateWindowRuntime(source.into()))?;
 		self.render_runtime = Some(runtime);
 		self.render_window_id = Some(window_id);
 		Ok(())
@@ -124,9 +160,52 @@ impl App {
 		self.render_window_id.expect("window runtime must be initialized before use")
 	}
 
+	fn try_handle_paste_shortcut(
+		&mut self,
+		state: WindowInputElementState,
+		logical_key: &WindowInputKey,
+		physical_key: winit::keyboard::PhysicalKey,
+	) -> bool {
+		match self.paste_controller.handle_shortcut(
+			self.focused_gshell(),
+			state,
+			logical_key,
+			physical_key,
+		) {
+			Ok(HostPasteAction::NotHandled) => false,
+			Ok(HostPasteAction::Handled) => true,
+			Ok(HostPasteAction::HandledEmpty) => {
+				debug!("paste shortcut matched but clipboard text was empty");
+				true
+			}
+			Ok(HostPasteAction::Dispatch(input)) => {
+				self.route_input_to_gshell(input);
+				true
+			}
+			Err(error) => {
+				warn!(error = %error, "failed to paste from clipboard");
+				true
+			}
+		}
+	}
+
+	fn drain_media_bridge_frames(&self) {
+		let Some(render_runtime) = self.render_runtime.as_ref() else {
+			return;
+		};
+
+		for pending in self.media_bridge.drain_pending_video_surface_frames() {
+			let import_result =
+				render_runtime.import_video_surface_dma_buf_frame(&pending.surface_id, &pending.frame);
+			if let Err(error) = import_result {
+				warn!(surface_id = %pending.surface_id, error = %error, "failed to import video surface frame");
+			}
+		}
+	}
+
 	fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
 		if let Err(error) = self.persist_workspace() {
-			eprintln!("failed to persist workspace: {error}");
+			error!(error = %error, "failed to persist workspace");
 		}
 
 		event_loop.exit();
@@ -137,7 +216,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
 		let focused_gshell = self.focused_gshell();
 
-		if self.ensure_window_runtime(event_loop).is_err() {
+		if let Err(error) = self.ensure_window_runtime(event_loop) {
+			error!(error = %error, "failed to initialize Germinal window runtime");
 			self.exit_and_persist(event_loop);
 			return;
 		}
@@ -163,7 +243,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 		match event {
 			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id }) => {
 				if let Err(error) = self.enter_gnative_session(gshell_id) {
-					eprintln!("failed to enter gnative session for {}: {error}", gshell_id.value());
+					error!(gshell_id = gshell_id.value(), error = %error, "failed to enter gnative session");
 				} else {
 					self.enter_gnative_mode(gshell_id);
 					let size_info = self.current_terminal_size_info();
@@ -187,6 +267,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.exit_and_persist(event_loop);
 			}
 			RuntimeEvent::Workspace(_) => {
+				self.drain_media_bridge_frames();
 				self.request_redraw();
 			}
 		}
@@ -217,9 +298,14 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.set_window_focused(focused);
 			}
 			WindowEvent::RedrawRequested => {
+				self.drain_media_bridge_frames();
 				self.present_workspace();
 			}
 			WindowEvent::ModifiersChanged(modifiers) => {
+				self.paste_controller.set_modifiers(HostPasteModifiers {
+					control: modifiers.state().control_key(),
+					shift:   modifiers.state().shift_key(),
+				});
 				self.route_input_to_gshell(GShellInput {
 					gshell_id: self.focused_gshell(),
 					event:     GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(
@@ -228,15 +314,18 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				});
 			}
 			WindowEvent::KeyboardInput { event, .. } => {
-				let winit::event::KeyEvent { state, logical_key, text, .. } = event;
+				let winit::event::KeyEvent { state, logical_key, physical_key, text, .. } = event;
+				let logical_key = winit_key_to_port(logical_key);
+				let state = winit_element_state_to_port(state);
+				self.paste_controller.observe_key_event(state, physical_key);
+
+				if self.try_handle_paste_shortcut(state, &logical_key, physical_key) {
+					return;
+				}
 
 				self.route_input_to_gshell(GShellInput {
 					gshell_id: self.focused_gshell(),
-					event:     GShellInputEvent::Window(WindowInputEvent::Key {
-						state: winit_element_state_to_port(state),
-						logical_key: winit_key_to_port(logical_key),
-						text,
-					}),
+					event:     GShellInputEvent::Window(WindowInputEvent::Key { state, logical_key, text }),
 				});
 			}
 			WindowEvent::Ime(Ime::Commit(text)) => {

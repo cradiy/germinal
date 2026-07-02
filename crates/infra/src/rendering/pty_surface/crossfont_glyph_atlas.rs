@@ -8,15 +8,17 @@ use crossfont::{
 	BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
 };
 use germinal_ports::pty_host::width::terminal_char_cell_width;
+use thiserror::Error;
 
 use crate::rendering::pty_surface::glyph_atlas::{
 	WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
 	WgpuTerminalGlyphUvRect,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum WgpuCrossfontGlyphAtlasError {
-	Rasterizer(String),
+	#[error("crossfont rasterizer failed: {0}")]
+	Rasterizer(#[source] crossfont::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,17 +242,15 @@ impl WgpuCrossfontGlyphBackend {
 		font_size_px: f32,
 		bold_weight: WgpuTerminalFontWeight,
 	) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
-		let mut rasterizer = Rasterizer::new()
-			.map_err(|err| WgpuCrossfontGlyphAtlasError::Rasterizer(format!("{err:?}")))?;
+		let mut rasterizer = Rasterizer::new().map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
 		let size = Size::new(font_size_px);
 		let bold_family = font_family.clone();
 		let font_desc = FontDesc::new(font_family, Style::Description {
 			slant:  Slant::Normal,
 			weight: Weight::Normal,
 		});
-		let font_key = rasterizer
-			.load_font(&font_desc, size)
-			.map_err(|err| WgpuCrossfontGlyphAtlasError::Rasterizer(format!("{err:?}")))?;
+		let font_key =
+			rasterizer.load_font(&font_desc, size).map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
 		let bold_font_key =
 			load_font_for_terminal_weight(&mut rasterizer, &bold_family, size, bold_weight);
 		let emoji_font_key = load_optional_font(&mut rasterizer, "Noto Color Emoji", size);
@@ -262,7 +262,7 @@ impl WgpuCrossfontGlyphBackend {
 		// terminal columns collapse and text overlap.
 		rasterizer
 			.get_glyph(GlyphKey { font_key, character: 'm', size })
-			.map_err(|err| WgpuCrossfontGlyphAtlasError::Rasterizer(format!("{err:?}")))?;
+			.map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
 
 		let metrics = rasterizer.metrics(font_key, size).ok();
 		let average_advance_px = metrics

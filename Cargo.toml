@@ -22,37 +22,48 @@ repository = "https://github.com/zooeywm/germinal"
 authors    = ["zooeywm <zooeywm@gmail.com>"]
 
 [workspace.dependencies]
-germinal-domain                  = { path = "crates/domain" }
-germinal-ports                   = { path = "crates/ports" }
-germinal-application             = { path = "crates/application" }
-germinal-infra                   = { path = "crates/infra" }
-germinal-gnative-core            = { path = "crates/gnative_core" }
-germinal-gnative-protocol        = { path = "crates/gnative_protocol" }
-germinal-gnative-ui              = { path = "crates/gnative_ui" }
-germinal-gnative-widgets         = { path = "crates/gnative_widgets" }
-germinal-gnative-sdk             = { path = "crates/gnative_sdk" }
+germinal-domain           = { path = "crates/domain" }
+germinal-ports            = { path = "crates/ports" }
+germinal-application      = { path = "crates/application" }
+germinal-infra            = { path = "crates/infra" }
+germinal-gnative-core     = { path = "crates/gnative_core" }
+germinal-gnative-protocol = { path = "crates/gnative_protocol" }
+germinal-gnative-ui       = { path = "crates/gnative_ui" }
+germinal-gnative-widgets  = { path = "crates/gnative_widgets" }
+germinal-gnative-sdk      = { path = "crates/gnative_sdk" }
 
 # util
-smol_str      = "0.2"
-unicode-width = "0.2"
-serde         = { version = "1", features = ["derive"] }
-serde_json    = "1"
+smol_str           = "0.2"
+unicode-width      = "0.2"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+thiserror          = "2"
+eyre               = "0.6"
+tracing            = "0.1"
+tracing-subscriber = "0.3"
+toml               = "0.8"
 
 # application
 kudi = "0.1"
 
 # infra
-alacritty_terminal = "0.26"
-wgpu               = "29.0"
-crossfont          = "0.9"
-winit              = "0.30"
-pollster           = "0.4"
-portable-pty       = "0.9"
-rusqlite           = { version = "0.31", features = ["bundled"] }
-nix                = { version = "0.31", default-features = false }
-compio             = { version = "0.19", default-features = false }
-rayon              = "1"
-ash                = "0.38"
+alacritty_terminal   = "0.26"
+wgpu                 = "29.0"
+crossfont            = "0.9"
+winit                = "0.30"
+pollster             = "0.4"
+portable-pty         = "0.9"
+rusqlite             = { version = "0.31", features = ["bundled"] }
+nix                  = { version = "0.31", default-features = false }
+compio               = { version = "0.19", default-features = false }
+rayon                = "1"
+ash                  = "0.38"
+gstreamer            = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-app        = { version = "0.25.2", features = ["v1_28"] }
+gstreamer-audio      = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-video      = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-allocators = { version = "0.25.2", features = ["v1_28"] }
+arboard              = { version = "3", features = ["wayland-data-control"] }
 
 [profile.product]
 inherits      = "release"
