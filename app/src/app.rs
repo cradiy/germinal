@@ -262,6 +262,7 @@ fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
 fn winit_key_to_port(key: Key) -> WindowInputKey {
 	match key {
 		Key::Named(named) => match named {
+			NamedKey::F1 => WindowInputKey::Named(WindowInputNamedKey::F1),
 			NamedKey::Enter => WindowInputKey::Named(WindowInputNamedKey::Enter),
 			NamedKey::Tab => WindowInputKey::Named(WindowInputNamedKey::Tab),
 			NamedKey::Backspace => WindowInputKey::Named(WindowInputNamedKey::Backspace),

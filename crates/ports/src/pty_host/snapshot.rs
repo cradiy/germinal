@@ -101,6 +101,7 @@ pub fn render_surface_snapshot_from_terminal_snapshot(
 		target_id: snapshot.render_target_id,
 		latest_seq: snapshot.latest_seq,
 		rows,
+		video_surfaces: Vec::new(),
 		dirty_rows: snapshot.dirty_rows,
 		cursor: None,
 	}

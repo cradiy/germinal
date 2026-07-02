@@ -159,6 +159,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		});

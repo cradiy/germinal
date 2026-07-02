@@ -26,6 +26,7 @@ use crate::rendering::pty_surface::{
 	render_pass_plan::WgpuTerminalRenderPassPlan,
 	renderer_backend::{WgpuRendererBackend, WgpuRendererConfig},
 	shader::WgpuViewportUniform,
+	video_surface_registry::WgpuVideoSurfaceRegistry,
 	viewport_bind_group::{WgpuViewportBindGroupFactory, WgpuViewportUploadBytes},
 };
 
@@ -35,6 +36,7 @@ pub struct WgpuTerminalFrameBuilder {
 	glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder,
 	vertex_buffer_builder:     WgpuQuadVertexBufferBuilder,
 	renderer_backend:          Rc<RefCell<WgpuRendererBackend>>,
+	video_surface_registry:    WgpuVideoSurfaceRegistry,
 }
 
 impl WgpuTerminalFrameBuilder {
@@ -44,6 +46,7 @@ impl WgpuTerminalFrameBuilder {
 			glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7(),
 			vertex_buffer_builder: WgpuQuadVertexBufferBuilder::new(),
 			renderer_backend: Rc::new(RefCell::new(WgpuRendererBackend::new(renderer_config))),
+			video_surface_registry: WgpuVideoSurfaceRegistry::default(),
 		}
 	}
 
@@ -83,6 +86,8 @@ impl WgpuTerminalFrameBuilder {
 
 	pub fn renderer_config(&self) -> WgpuRendererConfig { self.renderer_config }
 
+	pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry { &self.video_surface_registry }
+
 	pub fn glyph_atlas_source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind {
 		self.glyph_atlas_frame_builder.source_kind()
 	}
@@ -102,6 +107,7 @@ impl WgpuTerminalFrameBuilder {
 		renderer_config: WgpuRendererConfig,
 	) -> WgpuTerminalPreparedFrame {
 		let total_started_at = Instant::now();
+		self.video_surface_registry.sync_snapshot(surface_snapshot);
 
 		let atlas_build_started_at = Instant::now();
 		let glyph_atlas_frame = self.glyph_atlas_frame_builder.build(surface_snapshot);

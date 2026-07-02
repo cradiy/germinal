@@ -87,6 +87,7 @@ pub struct PixelRect {
 pub enum LayoutPaint {
 	FillRect { rect: PixelRect, color: RgbaColorDto },
 	TextRun { origin: GridPoint, text: String, style: TextStyleDto },
+	VideoSurface { id: String, rect: PixelRect },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +120,7 @@ pub enum Element {
 	Div(Div),
 	Text(Text),
 	Input(InputElement),
+	Video(Video),
 }
 
 impl IntoElementNode for Element {
@@ -193,6 +195,15 @@ pub type Surface = Div;
 pub type Svg = Div;
 pub type UniformList = Div;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Video {
+	pub id: String,
+}
+
+impl Video {
+	pub fn new(id: impl Into<String>) -> Self { Self { id: id.into() } }
+}
+
 pub fn anchored() -> Anchored { div() }
 
 pub fn animation() -> Animation { div() }
@@ -211,6 +222,8 @@ pub fn svg() -> Svg { div() }
 
 pub fn uniform_list() -> UniformList { div() }
 
+pub fn video(id: impl Into<String>) -> Video { Video::new(id) }
+
 pub fn v_flex() -> Div { Div::new().v_flex() }
 
 pub fn h_flex() -> Div { Div::new().h_flex() }
@@ -221,6 +234,14 @@ pub fn text_input(value: impl Into<String>, focused: bool) -> Element {
 
 pub fn styled_text_input(value: impl Into<String>, focused: bool, style: TextStyleDto) -> Element {
 	Element::Input(InputElement { value: value.into(), style, focused })
+}
+
+impl IntoElementNode for Video {
+	fn into_element(self) -> Element { Element::Video(self) }
+}
+
+impl IntoDivChild for Video {
+	fn into_child(self, _inherited_style: TextStyleDto) -> Element { self.into_element() }
 }
 
 impl Div {
@@ -489,6 +510,13 @@ fn render_layout_node(node: &LayoutNode, commands: &mut Vec<RenderCommandDto>) {
 					style: *style,
 				})
 			}
+			LayoutPaint::VideoSurface { id, rect } => commands.push(RenderCommandDto::VideoSurface {
+				id:        id.clone(),
+				x_px:      rect.x_px,
+				y_px:      rect.y_px,
+				width_px:  rect.width_px,
+				height_px: rect.height_px,
+			}),
 		}
 	}
 
@@ -512,6 +540,7 @@ fn layout_element(
 		Element::Div(div) => layout_div(div, rect, state, inherited_style),
 		Element::Text(text) => layout_text(text, rect, inherited_style),
 		Element::Input(input) => layout_input(input, rect, state, inherited_style),
+		Element::Video(video) => layout_video(video, rect),
 	}
 }
 
@@ -756,6 +785,12 @@ fn layout_input(
 	node
 }
 
+fn layout_video(video: &Video, rect: Rect) -> LayoutNode {
+	let mut node = LayoutNode::new(rect);
+	node.paints.push(LayoutPaint::VideoSurface { id: video.id.clone(), rect: rect.pixel_rect() });
+	node
+}
+
 fn merge_styles(parent: TextStyleDto, child: TextStyleDto) -> TextStyleDto {
 	TextStyleDto {
 		foreground: child.foreground.or(parent.foreground),
@@ -789,7 +824,7 @@ fn child_fixed_extent(child: &Element, axis: Axis) -> u16 { intrinsic_extent(chi
 fn child_flex_grow(child: &Element) -> u16 {
 	match child {
 		Element::Div(div) => div.flex_grow,
-		Element::Text(_) | Element::Input(_) => 0,
+		Element::Text(_) | Element::Input(_) | Element::Video(_) => 0,
 	}
 }
 
@@ -801,6 +836,7 @@ fn intrinsic_extent(element: &Element, axis: Axis) -> u16 {
 	match element {
 		Element::Text(text) => intrinsic_text_extent(text, axis),
 		Element::Input(input) => intrinsic_input_extent(input, axis),
+		Element::Video(video) => intrinsic_video_extent(video, axis),
 		Element::Div(div) => intrinsic_div_extent(div, axis),
 	}
 }
@@ -815,6 +851,13 @@ fn intrinsic_text_extent(text: &Text, axis: Axis) -> u16 {
 fn intrinsic_input_extent(input: &InputElement, axis: Axis) -> u16 {
 	match axis {
 		Axis::Horizontal => display_width(&input.value).max(1),
+		Axis::Vertical => 1,
+	}
+}
+
+fn intrinsic_video_extent(_video: &Video, axis: Axis) -> u16 {
+	match axis {
+		Axis::Horizontal => 1,
 		Axis::Vertical => 1,
 	}
 }
@@ -907,6 +950,10 @@ pub mod elements {
 
 	pub mod uniform_list {
 		pub use crate::{UniformList, uniform_list};
+	}
+
+	pub mod video {
+		pub use crate::{Video, video};
 	}
 }
 
@@ -1077,6 +1124,21 @@ mod tests {
 					&& *width_px == 30
 					&& *height_px == 40
 					&& *color == rgba(1, 2, 3, 4)
+		)));
+	}
+
+	#[test]
+	fn video_element_compiles_to_video_surface_command() {
+		let compiled = UiTree::new(div().child(video("player-main"))).compile(GridSize::new(20, 5));
+
+		assert!(compiled.commands.iter().any(|command| matches!(
+			command,
+			RenderCommandDto::VideoSurface { id, x_px, y_px, width_px, height_px }
+				if id == "player-main"
+					&& *x_px == 0
+					&& *y_px == 0
+					&& *width_px == 20 * CELL_WIDTH_PX
+					&& *height_px == 5 * CELL_HEIGHT_PX
 		)));
 	}
 }

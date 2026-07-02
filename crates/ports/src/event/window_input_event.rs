@@ -22,6 +22,7 @@ impl WindowInputModifiers {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowInputNamedKey {
+	F1,
 	Enter,
 	Tab,
 	Backspace,

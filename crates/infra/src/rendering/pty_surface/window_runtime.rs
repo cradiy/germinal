@@ -15,6 +15,8 @@ use germinal_ports::{
 };
 use winit::window::{Window, WindowId};
 
+#[cfg(target_os = "linux")]
+use crate::rendering::pty_surface::video_surface_dmabuf_importer::import_nv12_dmabuf_frame;
 use crate::rendering::pty_surface::{
 	crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuTerminalFontWeight},
 	frame_builder::WgpuTerminalFrameBuilder,
@@ -27,6 +29,8 @@ use crate::rendering::pty_surface::{
 		WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
 		WgpuTerminalSurfacePresentInput,
 	},
+	video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
+	video_surface_registry::WgpuVideoSurfaceRegistry,
 };
 
 pub struct WgpuTerminalWindowRuntime {
@@ -112,11 +116,12 @@ impl WgpuTerminalWindowRuntime {
 		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer);
 
 		let surface_snapshot = RenderSurfaceSnapshot {
-			target_id:  germinal_ports::rendering::render_target_id::RenderTargetId::new(0),
-			latest_seq: Seq::ZERO,
-			rows:       Vec::new(),
-			dirty_rows: Vec::new(),
-			cursor:     None,
+			target_id:      germinal_ports::rendering::render_target_id::RenderTargetId::new(0),
+			latest_seq:     Seq::ZERO,
+			rows:           Vec::new(),
+			video_surfaces: Vec::new(),
+			dirty_rows:     Vec::new(),
+			cursor:         None,
 		};
 
 		Ok(Self {
@@ -138,6 +143,30 @@ impl WgpuTerminalWindowRuntime {
 	pub fn window_id(&self) -> WindowId { self.window.id() }
 
 	pub fn window_size(&self) -> winit::dpi::PhysicalSize<u32> { self.window.inner_size() }
+
+	pub fn render_target_id(&self) -> germinal_ports::rendering::render_target_id::RenderTargetId {
+		self.surface_snapshot.target_id
+	}
+
+	pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry {
+		self.presenter.frame_renderer().video_surface_registry()
+	}
+
+	#[cfg(target_os = "linux")]
+	pub fn import_video_surface_dma_buf_frame(
+		&self,
+		id: &str,
+		frame: &WgpuVideoSurfaceNv12DmaBufFrame,
+	) -> Result<(), String> {
+		let imported = import_nv12_dmabuf_frame(&self.device, frame)?;
+		let replaced =
+			self.video_surface_registry().replace_nv12_frame(self.render_target_id(), id, imported);
+		if !replaced {
+			return Err(format!("unknown video surface: {id}"));
+		}
+		self.request_window_redraw();
+		Ok(())
+	}
 
 	pub fn request_window_redraw(&self) { self.window.request_redraw(); }
 

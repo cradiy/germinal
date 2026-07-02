@@ -8,6 +8,7 @@ pub struct GNativeInputModifiers {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GNativeInputNamedKey {
+	F1,
 	Enter,
 	Tab,
 	Backspace,

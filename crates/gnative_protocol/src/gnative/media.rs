@@ -5,9 +5,7 @@ pub enum GNativeMediaControlCommand {
 	Play,
 	Pause,
 	Stop,
-	Seek {
-		position_us: u64,
-	},
+	Seek { position_us: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

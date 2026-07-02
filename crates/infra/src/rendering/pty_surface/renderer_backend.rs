@@ -613,9 +613,9 @@ mod tests {
 		});
 
 		backend.render_surface(&RenderSurfaceSnapshot {
-			target_id:  RenderTargetId::new(1),
-			latest_seq: Seq::new(1),
-			rows:       vec![RenderSurfaceRowSnapshot {
+			target_id:      RenderTargetId::new(1),
+			latest_seq:     Seq::new(1),
+			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
 					x:     0,
@@ -623,8 +623,9 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
-			dirty_rows: Vec::new(),
-			cursor:     None,
+			video_surfaces: vec![],
+			dirty_rows:     Vec::new(),
+			cursor:         None,
 		});
 
 		let state = backend.state();
@@ -652,9 +653,9 @@ mod tests {
 		});
 
 		backend.render_surface(&RenderSurfaceSnapshot {
-			target_id:  RenderTargetId::new(1),
-			latest_seq: Seq::new(1),
-			rows:       vec![RenderSurfaceRowSnapshot {
+			target_id:      RenderTargetId::new(1),
+			latest_seq:     Seq::new(1),
+			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
 					x:     0,
@@ -662,8 +663,9 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
-			dirty_rows: Vec::new(),
-			cursor:     None,
+			video_surfaces: vec![],
+			dirty_rows:     Vec::new(),
+			cursor:         None,
 		});
 
 		let state = backend.state();
@@ -690,9 +692,9 @@ mod tests {
 		});
 
 		backend.render_surface(&RenderSurfaceSnapshot {
-			target_id:  RenderTargetId::new(1),
-			latest_seq: Seq::new(1),
-			rows:       vec![RenderSurfaceRowSnapshot {
+			target_id:      RenderTargetId::new(1),
+			latest_seq:     Seq::new(1),
+			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
 					x:     0,
@@ -700,8 +702,9 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
-			dirty_rows: Vec::new(),
-			cursor:     None,
+			video_surfaces: vec![],
+			dirty_rows:     Vec::new(),
+			cursor:         None,
 		});
 
 		let state = backend.state();

@@ -250,6 +250,7 @@ mod tests {
 					},
 				],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -295,6 +296,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -324,6 +326,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -339,6 +342,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -367,6 +371,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -382,6 +387,7 @@ mod tests {
 					style: TextStyleDto::plain(),
 				}],
 			}],
+			video_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -405,6 +411,7 @@ mod tests {
 			target_id,
 			latest_seq: Seq::new(1),
 			rows: Vec::new(),
+			video_surfaces: vec![],
 			dirty_rows: Vec::new(),
 			cursor: None,
 		};

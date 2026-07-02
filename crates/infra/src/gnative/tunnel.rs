@@ -1,7 +1,10 @@
 use std::{
 	cell::RefCell,
 	collections::HashMap,
-	sync::mpsc::{self, Sender},
+	sync::{
+		Arc,
+		mpsc::{self, Sender},
+	},
 	thread,
 	time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,7 +19,6 @@ use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::{
 	frame::{GNativeFrame, GNativeFrameCursor},
 	input::GNativeInputEvent,
-	media::{GNativeAudioPacket, GNativeMediaControlCommand, GNativeVideoPacket},
 	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
 	tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame, GNativeHostToApp},
 };
@@ -36,13 +38,17 @@ use germinal_ports::{
 	service::gnative_tunnel::IGNativeTunnel,
 };
 
-use crate::rendering::text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter;
+use crate::{
+	gnative::media_bridge::{GNativeMediaBridgeHandle, IGNativeMediaBridge, NoopGNativeMediaBridge},
+	rendering::text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter,
+};
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 
 pub struct GNativeTunnel<Dispatch> {
 	command_tx:          flume::Sender<TunnelCommand<Dispatch>>,
 	dispatcher:          RefCell<Option<Dispatch>>,
+	media_bridge:        RefCell<GNativeMediaBridgeHandle>,
 	surface_snapshot_tx: RefCell<Option<Sender<RenderSurfaceSnapshot>>>,
 }
 
@@ -54,6 +60,10 @@ impl<Dispatch> GNativeTunnel<Dispatch> {
 	) {
 		*self.dispatcher.borrow_mut() = Some(dispatcher);
 		*self.surface_snapshot_tx.borrow_mut() = Some(surface_snapshot_tx);
+	}
+
+	pub fn configure_media_bridge(&self, media_bridge: GNativeMediaBridgeHandle) {
+		*self.media_bridge.borrow_mut() = media_bridge;
 	}
 }
 
@@ -71,7 +81,12 @@ where Dispatch: IRuntimeEventDispatcher
 			})
 			.expect("failed to spawn gnative tunnel runtime thread");
 
-		Self { command_tx, dispatcher: RefCell::new(None), surface_snapshot_tx: RefCell::new(None) }
+		Self {
+			command_tx,
+			dispatcher: RefCell::new(None),
+			media_bridge: RefCell::new(Arc::new(NoopGNativeMediaBridge)),
+			surface_snapshot_tx: RefCell::new(None),
+		}
 	}
 }
 
@@ -109,6 +124,7 @@ where Dispatch: IRuntimeEventDispatcher
 			.borrow()
 			.clone()
 			.ok_or_else(|| "gnative tunnel is not configured with a snapshot sender".to_string())?;
+		let media_bridge = self.media_bridge.borrow().clone();
 		let (response_tx, response_rx) = mpsc::channel();
 
 		self
@@ -116,6 +132,7 @@ where Dispatch: IRuntimeEventDispatcher
 			.send(TunnelCommand::AcceptSession {
 				gshell_id,
 				dispatcher,
+				media_bridge,
 				surface_snapshot_tx,
 				response_tx,
 			})
@@ -154,6 +171,7 @@ enum TunnelCommand<Dispatch> {
 	AcceptSession {
 		gshell_id:           GShellId,
 		dispatcher:          Dispatch,
+		media_bridge:        GNativeMediaBridgeHandle,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		response_tx:         mpsc::Sender<Result<GNativeSessionAccepted, String>>,
 	},
@@ -185,9 +203,21 @@ where Dispatch: IRuntimeEventDispatcher {
 				let result = ensure_session_descriptor_async(&mut slots, gshell_id, protocol_version).await;
 				let _ = response_tx.send(result);
 			}
-			TunnelCommand::AcceptSession { gshell_id, dispatcher, surface_snapshot_tx, response_tx } => {
-				let result =
-					accept_session_async(&mut slots, gshell_id, dispatcher, surface_snapshot_tx).await;
+			TunnelCommand::AcceptSession {
+				gshell_id,
+				dispatcher,
+				media_bridge,
+				surface_snapshot_tx,
+				response_tx,
+			} => {
+				let result = accept_session_async(
+					&mut slots,
+					gshell_id,
+					dispatcher,
+					media_bridge,
+					surface_snapshot_tx,
+				)
+				.await;
 				let _ = response_tx.send(result);
 			}
 			TunnelCommand::SendInput { gshell_id, input, response_tx } => {
@@ -229,6 +259,7 @@ async fn accept_session_async<Dispatch>(
 	slots: &mut HashMap<GShellId, TunnelSlot>,
 	gshell_id: GShellId,
 	dispatcher: Dispatch,
+	media_bridge: GNativeMediaBridgeHandle,
 	surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 ) -> Result<GNativeSessionAccepted, String>
 where
@@ -277,7 +308,7 @@ where
 	let gshell_id = descriptor.gshell_id;
 	let (reader, writer) = stream.into_split();
 	spawn(async move {
-		read_frames_loop(gshell_id, reader, dispatcher, surface_snapshot_tx).await;
+		read_frames_loop(gshell_id, reader, dispatcher, media_bridge, surface_snapshot_tx).await;
 	})
 	.detach();
 
@@ -370,6 +401,7 @@ async fn read_frames_loop<Dispatch>(
 	gshell_id: GShellId,
 	mut reader: TcpStream,
 	dispatcher: Dispatch,
+	media_bridge: GNativeMediaBridgeHandle,
 	surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 ) where
 	Dispatch: IRuntimeEventDispatcher,
@@ -387,9 +419,13 @@ async fn read_frames_loop<Dispatch>(
 		};
 
 		match message {
-			GNativeAppToHost::Mux(frame) => {
-				handle_app_mux_payload(frame.payload, &dispatcher, &surface_snapshot_tx, &presenter)
-			}
+			GNativeAppToHost::Mux(frame) => handle_app_mux_payload(
+				frame.payload,
+				&dispatcher,
+				media_bridge.as_ref(),
+				&surface_snapshot_tx,
+				&presenter,
+			),
 			GNativeAppToHost::Exit => {
 				dispatch_exit_gnative(gshell_id, &dispatcher);
 				exit_dispatched = true;
@@ -407,6 +443,7 @@ async fn read_frames_loop<Dispatch>(
 fn handle_app_mux_payload<Dispatch>(
 	payload: GNativeAppPayload,
 	dispatcher: &Dispatch,
+	media_bridge: &dyn IGNativeMediaBridge,
 	surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
 	presenter: &TextSurfaceFramePlanPresenter,
 ) where
@@ -417,22 +454,16 @@ fn handle_app_mux_payload<Dispatch>(
 			present_frame(frame, dispatcher, surface_snapshot_tx, presenter)
 		}
 		GNativeAppPayload::Control(command) => {
-			handle_media_control_command(command);
+			media_bridge.handle_media_control_command(command);
 		}
 		GNativeAppPayload::Audio(packet) => {
-			handle_audio_packet(packet);
+			media_bridge.handle_audio_packet(packet);
 		}
 		GNativeAppPayload::Video(packet) => {
-			handle_video_packet(packet);
+			media_bridge.handle_video_packet(packet);
 		}
 	}
 }
-
-fn handle_media_control_command(_command: GNativeMediaControlCommand) {}
-
-fn handle_audio_packet(_packet: GNativeAudioPacket) {}
-
-fn handle_video_packet(_packet: GNativeVideoPacket) {}
 
 fn present_frame<Dispatch>(
 	frame: GNativeFrame,

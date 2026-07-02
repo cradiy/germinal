@@ -163,6 +163,9 @@ fn gnative_input_key_from(
 	match key {
 		germinal_ports::event::window_input_event::WindowInputKey::Named(named) => {
 			GNativeInputKey::Named(match named {
+				germinal_ports::event::window_input_event::WindowInputNamedKey::F1 => {
+					GNativeInputNamedKey::F1
+				}
 				germinal_ports::event::window_input_event::WindowInputNamedKey::Enter => {
 					GNativeInputNamedKey::Enter
 				}
@@ -211,13 +214,17 @@ fn gnative_input_key_from(
 mod tests {
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::gnative::{
-		input::{GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers},
+		input::{
+			GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
+			GNativeInputNamedKey,
+		},
 		session::GNativeSessionAccepted,
 	};
 	use germinal_ports::event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
+			WindowInputNamedKey,
 		},
 	};
 
@@ -270,6 +277,29 @@ mod tests {
 				logical_key: GNativeInputKey::Character("a".to_string()),
 				text:        Some("a".to_string()),
 				modifiers:   GNativeInputModifiers { control: true, alt: false },
+			})
+		);
+	}
+
+	#[test]
+	fn maps_window_named_f1_to_gnative_named_f1() {
+		let input = GShellInput {
+			gshell_id: GShellId::new(2),
+			event:     GShellInputEvent::Window(WindowInputEvent::Key {
+				state:       WindowInputElementState::Pressed,
+				logical_key: WindowInputKey::Named(WindowInputNamedKey::F1),
+				text:        None,
+			}),
+		};
+
+		let mapped = gnative_input_event_from(input, WindowInputModifiers::new(false, false));
+		assert_eq!(
+			mapped,
+			Some(GNativeInputEvent::Key {
+				state:       GNativeInputElementState::Pressed,
+				logical_key: GNativeInputKey::Named(GNativeInputNamedKey::F1),
+				text:        None,
+				modifiers:   GNativeInputModifiers { control: false, alt: false },
 			})
 		);
 	}

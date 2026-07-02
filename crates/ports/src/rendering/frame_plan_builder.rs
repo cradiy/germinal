@@ -1,6 +1,7 @@
 pub use germinal_gnative_protocol::rendering::frame_plan_builder::{
 	PIXEL_FILL_RECT_MARKER, RenderCommandDto, RgbColorDto, RgbaColorDto, TextStyleDto,
-	decode_pixel_fill_rect_command, encode_pixel_fill_rect_command,
+	VIDEO_SURFACE_MARKER, decode_pixel_fill_rect_command, decode_video_surface_command,
+	encode_pixel_fill_rect_command, encode_video_surface_command,
 };
 
 use crate::{rendering::render_target_id::RenderTargetId, seq::Seq};

@@ -156,6 +156,7 @@ impl AlacrittyTerminalStore {
 			target_id: render_target_id,
 			latest_seq: state.latest_seq,
 			rows,
+			video_surfaces: Vec::new(),
 			dirty_rows,
 			cursor: None,
 		}

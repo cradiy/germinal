@@ -5,11 +5,12 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSurfaceSnapshot {
-	pub target_id:  RenderTargetId,
-	pub latest_seq: Seq,
-	pub rows:       Vec<RenderSurfaceRowSnapshot>,
-	pub dirty_rows: Vec<u32>,
-	pub cursor:     Option<RenderSurfaceCursorSnapshot>,
+	pub target_id:      RenderTargetId,
+	pub latest_seq:     Seq,
+	pub rows:           Vec<RenderSurfaceRowSnapshot>,
+	pub video_surfaces: Vec<RenderSurfaceVideoSurfaceSnapshot>,
+	pub dirty_rows:     Vec<u32>,
+	pub cursor:         Option<RenderSurfaceCursorSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,15 @@ pub struct RenderSurfaceRunSnapshot {
 	pub x:     u32,
 	pub text:  String,
 	pub style: TextStyleDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSurfaceVideoSurfaceSnapshot {
+	pub id:        String,
+	pub x_px:      u32,
+	pub y_px:      u32,
+	pub width_px:  u32,
+	pub height_px: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
