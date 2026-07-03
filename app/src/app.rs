@@ -88,6 +88,7 @@ impl App {
 			GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
 		);
 		let terminal_profile = config.terminal_profile();
+		let window_title = config.window.title.clone();
 
 		let app = Self {
 			workspace_service_state: WorkspaceServiceState::new(),
@@ -102,16 +103,18 @@ impl App {
 				.map_err(AppError::CreateGNativeTunnel)?,
 			media_bridge: std::sync::Arc::clone(&media_bridge),
 			terminal_worker_backend: PlatformTerminalWorkerBackend::new(runtime_event_dispatcher),
-			render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(terminal_profile),
+			render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(terminal_profile, window_title),
 			render_runtime: None,
 			render_window_id: None,
 			paste_controller: HostPasteController::default(),
 			config,
 		};
 
-		app
-			.gnative_tunnel
-			.configure(app.runtime_event_dispatcher.clone(), app.surface_snapshot_sender());
+		app.gnative_tunnel.configure(
+			app.runtime_event_dispatcher.clone(),
+			app.snapshot_wake_pending(),
+			app.surface_snapshot_sender(),
+		);
 		app.gnative_tunnel.configure_media_bridge(media_bridge);
 
 		app.restore_workspace().map_err(AppError::RestoreWorkspace)?;

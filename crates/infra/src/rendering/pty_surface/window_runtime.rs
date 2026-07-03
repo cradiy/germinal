@@ -1,4 +1,5 @@
 use std::{
+	collections::VecDeque,
 	env,
 	sync::Arc,
 	time::{Duration, Instant},
@@ -72,6 +73,7 @@ pub enum WindowRuntimeError {
 
 pub struct WgpuTerminalWindowRuntime {
 	window:         Arc<Window>,
+	base_title:     String,
 	surface:        wgpu::Surface<'static>,
 	device:         wgpu::Device,
 	queue:          wgpu::Queue,
@@ -83,22 +85,28 @@ pub struct WgpuTerminalWindowRuntime {
 	size_info:        TerminalSizeInfo,
 	profile:          TerminalProfile,
 	needs_redraw:     bool,
+	ui_stats:         WindowUiStats,
 	perf:             WgpuTerminalRenderPerf,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WgpuTerminalWindowRuntimeFactory {
-	profile: TerminalProfile,
+	profile:    TerminalProfile,
+	base_title: String,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
-	pub fn new(profile: TerminalProfile) -> Self { Self { profile } }
+	pub fn new(profile: TerminalProfile, base_title: String) -> Self { Self { profile, base_title } }
 
 	pub fn create_window_runtime(
 		&self,
 		window: Arc<Window>,
 	) -> Result<WgpuTerminalWindowRuntime, WindowRuntimeError> {
-		pollster::block_on(WgpuTerminalWindowRuntime::new(window, self.profile))
+		pollster::block_on(WgpuTerminalWindowRuntime::new(
+			window,
+			self.profile,
+			self.base_title.clone(),
+		))
 	}
 }
 
@@ -106,6 +114,7 @@ impl WgpuTerminalWindowRuntime {
 	pub async fn new(
 		window: Arc<Window>,
 		profile: TerminalProfile,
+		base_title: String,
 	) -> Result<Self, WindowRuntimeError> {
 		let instance = wgpu::Instance::default();
 
@@ -169,6 +178,7 @@ impl WgpuTerminalWindowRuntime {
 
 		Ok(Self {
 			window,
+			base_title,
 			surface,
 			device,
 			queue,
@@ -179,6 +189,7 @@ impl WgpuTerminalWindowRuntime {
 			size_info,
 			profile,
 			needs_redraw: false,
+			ui_stats: WindowUiStats::new(),
 			perf: WgpuTerminalRenderPerf::new(),
 		})
 	}
@@ -279,6 +290,10 @@ impl WgpuTerminalWindowRuntime {
 			renderer_config,
 		}) {
 			Ok(result) => {
+				if let Some(title) = self.ui_stats.record_presented_frame(Instant::now(), &self.base_title)
+				{
+					self.window.set_title(&title);
+				}
 				self.perf.record_frame(row_count, run_count, &result);
 			}
 			Err(error) => {
@@ -366,6 +381,45 @@ fn terminal_size_info(
 
 const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const RENDER_PERF_LOG_ENV: &str = "GERMINAL_RENDER_PERF_LOG";
+const UI_FPS_WINDOW: Duration = Duration::from_secs(1);
+const UI_TITLE_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+struct WindowUiStats {
+	frame_count:       u64,
+	presented_frames:  VecDeque<Instant>,
+	last_title_update: Option<Instant>,
+}
+
+impl WindowUiStats {
+	fn new() -> Self {
+		Self { frame_count: 0, presented_frames: VecDeque::new(), last_title_update: None }
+	}
+
+	fn record_presented_frame(&mut self, now: Instant, base_title: &str) -> Option<String> {
+		self.frame_count += 1;
+		self.presented_frames.push_back(now);
+		while let Some(oldest) = self.presented_frames.front().copied() {
+			if now.saturating_duration_since(oldest) <= UI_FPS_WINDOW {
+				break;
+			}
+			self.presented_frames.pop_front();
+		}
+
+		if self.last_title_update.is_some_and(|updated_at| {
+			now.saturating_duration_since(updated_at) < UI_TITLE_UPDATE_INTERVAL
+		}) {
+			return None;
+		}
+
+		self.last_title_update = Some(now);
+		Some(format!(
+			"{base_title} | ui_frame={} ui_fps={:.1}",
+			self.frame_count,
+			self.presented_frames.len() as f32 / UI_FPS_WINDOW.as_secs_f32()
+		))
+	}
+}
 
 struct WgpuTerminalRenderPerf {
 	logging_enabled:            bool,
@@ -615,4 +669,40 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 	}
 
 	fn render(&mut self) { WgpuTerminalWindowRuntime::render(self) }
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::{Duration, Instant};
+
+	use super::WindowUiStats;
+
+	#[test]
+	fn window_ui_stats_formats_presented_frame_fps() {
+		let mut stats = WindowUiStats::new();
+		let start = Instant::now();
+
+		let title =
+			stats.record_presented_frame(start, "germinal").expect("first frame should update title");
+		assert_eq!(title, "germinal | ui_frame=1 ui_fps=1.0");
+
+		assert!(stats.record_presented_frame(start + Duration::from_millis(100), "germinal").is_none());
+
+		let title = stats
+			.record_presented_frame(start + Duration::from_millis(300), "germinal")
+			.expect("title should refresh after throttle interval");
+		assert_eq!(title, "germinal | ui_frame=3 ui_fps=3.0");
+	}
+
+	#[test]
+	fn window_ui_stats_drops_frames_outside_fps_window() {
+		let mut stats = WindowUiStats::new();
+		let start = Instant::now();
+
+		stats.record_presented_frame(start, "germinal");
+		let title = stats
+			.record_presented_frame(start + Duration::from_millis(1250), "germinal")
+			.expect("title should refresh after throttle interval");
+		assert_eq!(title, "germinal | ui_frame=2 ui_fps=1.0");
+	}
 }

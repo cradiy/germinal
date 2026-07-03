@@ -233,7 +233,12 @@ fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::BinaryHeap, sync::mpsc, thread, time::Duration};
+	use std::{
+		collections::BinaryHeap,
+		sync::{Arc, atomic::AtomicBool, mpsc},
+		thread,
+		time::Duration,
+	};
 
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::{
@@ -271,7 +276,7 @@ mod tests {
 	fn bootstrap_connects_to_host_tunnel_and_reads_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
-		tunnel.configure(TestDispatcher, snapshot_tx);
+		tunnel.configure(TestDispatcher, Arc::new(AtomicBool::new(false)), snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(31), 1).expect("descriptor should exist");
 		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
@@ -300,7 +305,7 @@ mod tests {
 	fn frame_writer_sends_frame_back_to_host() {
 		let (snapshot_tx, snapshot_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
-		tunnel.configure(TestDispatcher, snapshot_tx);
+		tunnel.configure(TestDispatcher, Arc::new(AtomicBool::new(false)), snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(32), 1).expect("descriptor should exist");
 		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {

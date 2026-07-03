@@ -3,6 +3,7 @@ use std::{
 	collections::HashMap,
 	sync::{
 		Arc,
+		atomic::{AtomicBool, Ordering},
 		mpsc::{self, Sender},
 	},
 	thread,
@@ -47,19 +48,23 @@ use crate::{
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 
 pub struct GNativeTunnel<Dispatch> {
-	command_tx:          flume::Sender<TunnelCommand<Dispatch>>,
-	dispatcher:          RefCell<Option<Dispatch>>,
-	media_bridge:        RefCell<GNativeMediaBridgeHandle>,
-	surface_snapshot_tx: RefCell<Option<Sender<RenderSurfaceSnapshot>>>,
+	command_tx:            flume::Sender<TunnelCommand<Dispatch>>,
+	dispatcher:            RefCell<Option<Dispatch>>,
+	media_bridge:          RefCell<GNativeMediaBridgeHandle>,
+	snapshot_wake_pending: RefCell<Arc<AtomicBool>>,
+	surface_snapshot_tx:   RefCell<Option<Sender<RenderSurfaceSnapshot>>>,
 }
 
 impl<Dispatch> GNativeTunnel<Dispatch> {
 	pub fn configure(
 		&self,
 		dispatcher: Dispatch,
+		snapshot_wake_pending: Arc<AtomicBool>,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 	) {
 		*self.dispatcher.borrow_mut() = Some(dispatcher);
+		snapshot_wake_pending.store(false, Ordering::Release);
+		*self.snapshot_wake_pending.borrow_mut() = snapshot_wake_pending;
 		*self.surface_snapshot_tx.borrow_mut() = Some(surface_snapshot_tx);
 	}
 
@@ -100,6 +105,7 @@ where Dispatch: IRuntimeEventDispatcher
 			command_tx,
 			dispatcher: RefCell::new(None),
 			media_bridge: RefCell::new(Arc::new(NoopGNativeMediaBridge)),
+			snapshot_wake_pending: RefCell::new(Arc::new(AtomicBool::new(false))),
 			surface_snapshot_tx: RefCell::new(None),
 		})
 	}
@@ -133,6 +139,7 @@ where Dispatch: IRuntimeEventDispatcher
 			.borrow()
 			.clone()
 			.ok_or(GNativeTunnelError::SnapshotSenderNotConfigured)?;
+		let snapshot_wake_pending = Arc::clone(&self.snapshot_wake_pending.borrow());
 		let media_bridge = self.media_bridge.borrow().clone();
 		let (response_tx, response_rx) = mpsc::channel();
 
@@ -142,6 +149,7 @@ where Dispatch: IRuntimeEventDispatcher
 				gshell_id,
 				dispatcher,
 				media_bridge,
+				snapshot_wake_pending,
 				surface_snapshot_tx,
 				response_tx,
 			})
@@ -182,11 +190,12 @@ enum TunnelCommand<Dispatch> {
 		response_tx:      mpsc::Sender<Result<GNativeSessionDescriptor, GNativeTunnelError>>,
 	},
 	AcceptSession {
-		gshell_id:           GShellId,
-		dispatcher:          Dispatch,
-		media_bridge:        GNativeMediaBridgeHandle,
-		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-		response_tx:         mpsc::Sender<Result<GNativeSessionAccepted, GNativeTunnelError>>,
+		gshell_id:             GShellId,
+		dispatcher:            Dispatch,
+		media_bridge:          GNativeMediaBridgeHandle,
+		snapshot_wake_pending: Arc<AtomicBool>,
+		surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
+		response_tx:           mpsc::Sender<Result<GNativeSessionAccepted, GNativeTunnelError>>,
 	},
 	SendInput {
 		gshell_id:   GShellId,
@@ -220,6 +229,7 @@ where Dispatch: IRuntimeEventDispatcher {
 				gshell_id,
 				dispatcher,
 				media_bridge,
+				snapshot_wake_pending,
 				surface_snapshot_tx,
 				response_tx,
 			} => {
@@ -228,6 +238,7 @@ where Dispatch: IRuntimeEventDispatcher {
 					gshell_id,
 					dispatcher,
 					media_bridge,
+					snapshot_wake_pending,
 					surface_snapshot_tx,
 				)
 				.await;
@@ -279,6 +290,7 @@ async fn accept_session_async<Dispatch>(
 	gshell_id: GShellId,
 	dispatcher: Dispatch,
 	media_bridge: GNativeMediaBridgeHandle,
+	snapshot_wake_pending: Arc<AtomicBool>,
 	surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 ) -> Result<GNativeSessionAccepted, GNativeTunnelError>
 where
@@ -335,7 +347,15 @@ where
 	let gshell_id = descriptor.gshell_id;
 	let (reader, writer) = stream.into_split();
 	spawn(async move {
-		read_frames_loop(gshell_id, reader, dispatcher, media_bridge, surface_snapshot_tx).await;
+		read_frames_loop(
+			gshell_id,
+			reader,
+			dispatcher,
+			media_bridge,
+			snapshot_wake_pending,
+			surface_snapshot_tx,
+		)
+		.await;
 	})
 	.detach();
 
@@ -440,6 +460,7 @@ async fn read_frames_loop<Dispatch>(
 	mut reader: TcpStream,
 	dispatcher: Dispatch,
 	media_bridge: GNativeMediaBridgeHandle,
+	snapshot_wake_pending: Arc<AtomicBool>,
 	surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 ) where
 	Dispatch: IRuntimeEventDispatcher,
@@ -461,6 +482,7 @@ async fn read_frames_loop<Dispatch>(
 				frame.payload,
 				&dispatcher,
 				media_bridge.as_ref(),
+				snapshot_wake_pending.as_ref(),
 				&surface_snapshot_tx,
 				&presenter,
 			),
@@ -482,6 +504,7 @@ fn handle_app_mux_payload<Dispatch>(
 	payload: GNativeAppPayload,
 	dispatcher: &Dispatch,
 	media_bridge: &dyn IGNativeMediaBridge,
+	snapshot_wake_pending: &AtomicBool,
 	surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
 	presenter: &TextSurfaceFramePlanPresenter,
 ) where
@@ -489,7 +512,7 @@ fn handle_app_mux_payload<Dispatch>(
 {
 	match payload {
 		GNativeAppPayload::Render(frame) => {
-			present_frame(frame, dispatcher, surface_snapshot_tx, presenter)
+			present_frame(frame, dispatcher, snapshot_wake_pending, surface_snapshot_tx, presenter)
 		}
 		GNativeAppPayload::Control(command) => {
 			media_bridge.handle_media_control_command(command);
@@ -506,6 +529,7 @@ fn handle_app_mux_payload<Dispatch>(
 fn present_frame<Dispatch>(
 	frame: GNativeFrame,
 	dispatcher: &Dispatch,
+	snapshot_wake_pending: &AtomicBool,
 	surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
 	presenter: &TextSurfaceFramePlanPresenter,
 ) where
@@ -521,6 +545,10 @@ fn present_frame<Dispatch>(
 
 	if let Err(error) = surface_snapshot_tx.send(snapshot) {
 		warn!(gshell_id = frame.gshell_id.value(), error = %error, "failed to publish gnative surface snapshot");
+		return;
+	}
+
+	if snapshot_wake_pending.swap(true, Ordering::AcqRel) {
 		return;
 	}
 
@@ -562,4 +590,82 @@ fn next_host_mux_seq(slot: &mut TunnelSlot) -> u64 {
 fn unique_token() -> String {
 	let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
 	format!("gnative-{timestamp:x}")
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+
+	use germinal_domain::gshell::vo::gshell_id::GShellId;
+	use germinal_gnative_protocol::{
+		gnative::frame::GNativeFrame, rendering::frame_plan_builder::RenderCommandDto,
+	};
+	use germinal_ports::{
+		event::{
+			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+			runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
+		},
+		seq::Seq,
+	};
+
+	use super::{TextSurfaceFramePlanPresenter, present_frame};
+
+	#[derive(Clone, Default)]
+	struct TestDispatcher {
+		events: Arc<Mutex<Vec<RuntimeEvent>>>,
+	}
+
+	impl TestDispatcher {
+		fn events(&self) -> Vec<RuntimeEvent> { self.events.lock().expect("events lock").clone() }
+	}
+
+	impl IRuntimeEventDispatcher for TestDispatcher {
+		fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
+			self.events.lock().expect("events lock").push(event);
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn present_frame_coalesces_frame_ready_wakeups_while_snapshot_is_pending() {
+		let dispatcher = TestDispatcher::default();
+		let wake_pending = AtomicBool::new(false);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel();
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let gshell_id = GShellId::new(7);
+
+		present_frame(
+			GNativeFrame {
+				gshell_id,
+				seq: Seq::new(1),
+				commands: vec![RenderCommandDto::Clear],
+				cursor: None,
+			},
+			&dispatcher,
+			&wake_pending,
+			&snapshot_tx,
+			&presenter,
+		);
+		present_frame(
+			GNativeFrame {
+				gshell_id,
+				seq: Seq::new(2),
+				commands: vec![RenderCommandDto::Clear],
+				cursor: None,
+			},
+			&dispatcher,
+			&wake_pending,
+			&snapshot_tx,
+			&presenter,
+		);
+
+		let events = dispatcher.events();
+		assert_eq!(events.len(), 1);
+		assert_eq!(
+			events[0],
+			RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, seq: Seq::new(1) })
+		);
+		assert_eq!(snapshot_rx.recv().expect("first snapshot").latest_seq, Seq::new(1));
+		assert_eq!(snapshot_rx.recv().expect("second snapshot").latest_seq, Seq::new(2));
+	}
 }

@@ -1,11 +1,11 @@
 use std::{
-	collections::VecDeque,
+	collections::{BTreeMap, BTreeSet, VecDeque},
 	fs, io,
 	io::stdout,
 	path::{Path, PathBuf},
 	sync::mpsc::{self, RecvTimeoutError},
 	thread,
-	time::{Duration, Instant},
+	time::Duration,
 };
 
 use germinal_domain::gshell::vo::gshell_id::GShellId;
@@ -18,6 +18,7 @@ use germinal_gnative_protocol::{
 		},
 		media::GNativeMediaControlCommand,
 	},
+	rendering::frame_plan_builder::RenderCommandDto,
 	seq::Seq,
 };
 use germinal_gnative_sdk::{
@@ -37,7 +38,6 @@ use germinal_gnative_widgets::{
 };
 use thiserror::Error;
 
-const FPS_WINDOW: Duration = Duration::from_secs(1);
 const MAX_TODO_EVENTS: usize = 10;
 const VIDEO_SURFACE_ID: &str = "video-player-surface";
 const VIDEO_SEEK_STEP_US: u64 = 1_000_000;
@@ -173,7 +173,6 @@ fn draw_app(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) -> Result<(),
 	let layout = app.ui_tree().layout(app.size);
 	let compiled = layout.render();
 	emitter.send(compiled)?;
-	app.record_presented_frame(Instant::now());
 	Ok(())
 }
 
@@ -287,30 +286,123 @@ enum SessionMessage {
 }
 
 struct DemoFrameEmitter {
-	gshell_id: GShellId,
-	frame_seq: u64,
-	writer:    LocalGNativeFrameWriter,
+	gshell_id:     GShellId,
+	frame_seq:     u64,
+	writer:        LocalGNativeFrameWriter,
+	last_compiled: Option<CompiledUi>,
 }
 
 impl DemoFrameEmitter {
 	fn new(gshell_id: GShellId, writer: LocalGNativeFrameWriter) -> Self {
-		Self { gshell_id, frame_seq: 0, writer }
+		Self { gshell_id, frame_seq: 0, writer, last_compiled: None }
 	}
 
-	fn send(&mut self, compiled: CompiledUi) -> Result<(), DemoError> {
+	fn send(&mut self, compiled: CompiledUi) -> Result<bool, DemoError> {
+		let Some((commands, cursor)) = frame_delta(self.last_compiled.as_ref(), &compiled) else {
+			return Ok(false);
+		};
 		self.frame_seq += 1;
 		self.writer.send_frame(GNativeFrame {
 			gshell_id: self.gshell_id,
-			seq:       Seq::new(self.frame_seq),
-			commands:  compiled.commands,
-			cursor:    compiled.cursor.map(|cursor| GNativeFrameCursor { x: cursor.x, y: cursor.y }),
+			seq: Seq::new(self.frame_seq),
+			commands,
+			cursor,
 		})?;
-		Ok(())
+		self.last_compiled = Some(compiled);
+		Ok(true)
 	}
 
 	fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), DemoError> {
 		self.writer.send_control(command)?;
 		Ok(())
+	}
+}
+
+fn frame_delta(
+	previous: Option<&CompiledUi>,
+	current: &CompiledUi,
+) -> Option<(Vec<RenderCommandDto>, Option<GNativeFrameCursor>)> {
+	let commands = diff_compiled_commands(previous, current);
+	let cursor = current.cursor.map(|cursor| GNativeFrameCursor { x: cursor.x, y: cursor.y });
+	let previous_cursor = previous
+		.and_then(|previous| previous.cursor)
+		.map(|cursor| GNativeFrameCursor { x: cursor.x, y: cursor.y });
+	if commands.is_empty() && cursor == previous_cursor {
+		return None;
+	}
+	Some((commands, cursor))
+}
+
+fn diff_compiled_commands(
+	previous: Option<&CompiledUi>,
+	current: &CompiledUi,
+) -> Vec<RenderCommandDto> {
+	let Some(previous) = previous else {
+		return current.commands.clone();
+	};
+	let Some(previous_frame) = FullUiFrame::from_compiled(previous) else {
+		return current.commands.clone();
+	};
+	let Some(current_frame) = FullUiFrame::from_compiled(current) else {
+		return current.commands.clone();
+	};
+
+	if previous_frame.structural_commands != current_frame.structural_commands {
+		return current.commands.clone();
+	}
+
+	let changed_rows = previous_frame.changed_rows_against(&current_frame);
+	if changed_rows.is_empty() {
+		return Vec::new();
+	}
+
+	let mut commands = Vec::new();
+	for row in changed_rows {
+		commands.push(RenderCommandDto::ClearLine { y: row });
+		if let Some(row_commands) = current_frame.rows.get(&row) {
+			commands.extend(row_commands.iter().cloned());
+		}
+	}
+
+	commands
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FullUiFrame {
+	structural_commands: Vec<RenderCommandDto>,
+	rows:                BTreeMap<u32, Vec<RenderCommandDto>>,
+}
+
+impl FullUiFrame {
+	fn from_compiled(compiled: &CompiledUi) -> Option<Self> {
+		let mut commands = compiled.commands.iter();
+		if matches!(commands.next(), Some(RenderCommandDto::Clear)) {
+		} else {
+			return None;
+		}
+
+		let mut structural_commands = Vec::new();
+		let mut rows = BTreeMap::<u32, Vec<RenderCommandDto>>::new();
+		for command in commands {
+			match command {
+				RenderCommandDto::TextRun { y, .. } | RenderCommandDto::StyledTextRun { y, .. } => {
+					rows.entry(*y).or_default().push(command.clone());
+				}
+				RenderCommandDto::PixelFillRect { .. } | RenderCommandDto::VideoSurface { .. } => {
+					structural_commands.push(command.clone());
+				}
+				RenderCommandDto::Clear | RenderCommandDto::ClearLine { .. } => return None,
+			}
+		}
+
+		Some(Self { structural_commands, rows })
+	}
+
+	fn changed_rows_against(&self, other: &Self) -> BTreeSet<u32> {
+		let mut rows = BTreeSet::new();
+		rows.extend(self.rows.keys().copied());
+		rows.extend(other.rows.keys().copied());
+		rows.into_iter().filter(|row| self.rows.get(row) != other.rows.get(row)).collect()
 	}
 }
 
@@ -353,9 +445,6 @@ struct DemoHostApp {
 	pending_controls: Vec<GNativeMediaControlCommand>,
 	notice:           Option<String>,
 	should_quit:      bool,
-	frame_count:      u64,
-	fps:              f32,
-	presented_frames: VecDeque<Instant>,
 }
 
 impl DemoHostApp {
@@ -367,9 +456,6 @@ impl DemoHostApp {
 			pending_controls: Vec::new(),
 			notice: Some("F1 opens demo list. j/k switches. space confirms.".to_string()),
 			should_quit: false,
-			frame_count: 0,
-			fps: 0.0,
-			presented_frames: VecDeque::new(),
 		}
 	}
 
@@ -379,18 +465,6 @@ impl DemoHostApp {
 	}
 
 	fn push_notice(&mut self, notice: String) { self.notice = Some(notice); }
-
-	fn record_presented_frame(&mut self, now: Instant) {
-		self.frame_count += 1;
-		self.presented_frames.push_back(now);
-		while let Some(oldest) = self.presented_frames.front().copied() {
-			if now.saturating_duration_since(oldest) <= FPS_WINDOW {
-				break;
-			}
-			self.presented_frames.pop_front();
-		}
-		self.fps = self.presented_frames.len() as f32 / FPS_WINDOW.as_secs_f32();
-	}
 
 	fn toggle_switcher(&mut self) { self.switcher.open = !self.switcher.open; }
 
@@ -466,12 +540,9 @@ impl DemoHostApp {
 			.fill()
 			.title("Demo Host")
 			.child(
-				Label::new(format!(
-					"demo={} viewport={}x{} frame={} fps={:.1}",
-					title, self.size.columns, self.size.rows, self.frame_count, self.fps
-				))
-				.font_semibold()
-				.text_color(rgb(80, 220, 255)),
+				Label::new(format!("demo={} viewport={}x{}", title, self.size.columns, self.size.rows))
+					.font_semibold()
+					.text_color(rgb(80, 220, 255)),
 			)
 			.child(Label::new("F1 demos  j/k navigate  space confirm or play/pause  Ctrl+C quit"))
 			.child(Label::new(help).secondary(notice))
@@ -1320,16 +1391,13 @@ impl VideoPlayerDemo {
 				"queued"
 			};
 
-			let mut row = v_flex()
+			let row = v_flex()
 				.child(
 					Label::new(format!("{} {}", if selected { ">" } else { " " }, entry.name))
 						.font_semibold()
 						.text_color(if selected { rgb(255, 214, 92) } else { rgb(226, 230, 238) }),
 				)
 				.child(Label::new(entry.path.display().to_string()).secondary(state_label));
-			if selected {
-				row = row.bg(rgba(22, 36, 72, 220));
-			}
 			rows = rows.child(row);
 		}
 
@@ -1428,8 +1496,12 @@ mod tests {
 		time::{SystemTime, UNIX_EPOCH},
 	};
 
+	use germinal_gnative_protocol::rendering::frame_plan_builder::RenderCommandDto;
+	use germinal_gnative_ui::CompiledUi;
+
 	use super::{
-		ActiveDemo, DemoHostApp, DemoId, VIDEO_EXTENSIONS, format_duration_us, scan_video_entries,
+		ActiveDemo, DemoHostApp, DemoId, VIDEO_EXTENSIONS, diff_compiled_commands, format_duration_us,
+		frame_delta, scan_video_entries,
 	};
 
 	#[test]
@@ -1466,8 +1538,99 @@ mod tests {
 		assert_eq!(format_duration_us(61_000_000), "01:01");
 	}
 
+	#[test]
+	fn compiled_ui_diff_emits_only_changed_rows_when_structure_matches() {
+		let previous = compiled_ui(vec![
+			RenderCommandDto::Clear,
+			RenderCommandDto::PixelFillRect {
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+				color:     germinal_gnative_ui::rgba(1, 2, 3, 4),
+			},
+			RenderCommandDto::VideoSurface {
+				id:        "player".to_string(),
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+			},
+			RenderCommandDto::TextRun { x: 0, y: 0, text: "alpha".to_string() },
+			RenderCommandDto::TextRun { x: 0, y: 1, text: "beta".to_string() },
+		]);
+		let current = compiled_ui(vec![
+			RenderCommandDto::Clear,
+			RenderCommandDto::PixelFillRect {
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+				color:     germinal_gnative_ui::rgba(1, 2, 3, 4),
+			},
+			RenderCommandDto::VideoSurface {
+				id:        "player".to_string(),
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+			},
+			RenderCommandDto::TextRun { x: 0, y: 0, text: "alpha".to_string() },
+			RenderCommandDto::TextRun { x: 0, y: 1, text: "gamma".to_string() },
+		]);
+
+		assert_eq!(diff_compiled_commands(Some(&previous), &current), vec![
+			RenderCommandDto::ClearLine { y: 1 },
+			RenderCommandDto::TextRun { x: 0, y: 1, text: "gamma".to_string() },
+		]);
+	}
+
+	#[test]
+	fn compiled_ui_diff_falls_back_to_full_frame_when_structure_changes() {
+		let previous = compiled_ui(vec![
+			RenderCommandDto::Clear,
+			RenderCommandDto::VideoSurface {
+				id:        "player".to_string(),
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+			},
+			RenderCommandDto::TextRun { x: 0, y: 0, text: "alpha".to_string() },
+		]);
+		let current = compiled_ui(vec![
+			RenderCommandDto::Clear,
+			RenderCommandDto::VideoSurface {
+				id:        "player".to_string(),
+				x_px:      1,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+			},
+			RenderCommandDto::TextRun { x: 0, y: 0, text: "alpha".to_string() },
+		]);
+
+		assert_eq!(diff_compiled_commands(Some(&previous), &current), current.commands);
+	}
+
+	#[test]
+	fn frame_delta_returns_none_when_ui_and_cursor_are_unchanged() {
+		let compiled = compiled_ui(vec![RenderCommandDto::Clear, RenderCommandDto::TextRun {
+			x:    0,
+			y:    0,
+			text: "stable".to_string(),
+		}]);
+
+		assert_eq!(frame_delta(None, &compiled).unwrap().0, compiled.commands);
+		assert!(frame_delta(Some(&compiled), &compiled).is_none());
+	}
+
 	fn unique_temp_dir(prefix: &str) -> PathBuf {
 		let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
 		std::env::temp_dir().join(format!("{prefix}-{unique}"))
+	}
+
+	fn compiled_ui(commands: Vec<RenderCommandDto>) -> CompiledUi {
+		CompiledUi { commands, cursor: None }
 	}
 }
