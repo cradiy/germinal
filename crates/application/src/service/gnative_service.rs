@@ -9,13 +9,12 @@ use germinal_gnative_protocol::gnative::{
 	session::GNativeSessionAccepted,
 };
 use germinal_ports::{
-	error::BoxResult,
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		window_input_event::{WindowInputEvent, WindowInputModifiers},
 	},
 	service::{
-		gnative_service::IGNativeService,
+		gnative_service::{GNativeServiceError, IGNativeService},
 		gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
 		worker_service::IWorkerService,
 	},
@@ -75,8 +74,10 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 {
 	fn ensure_gshell_gnative(&self, _gshell_id: GShellId) { self.prj_ref().start_worker_pool(); }
 
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> BoxResult<()> {
-		let accepted = self.prj_ref().gnative_tunnel().accept_session(gshell_id)?;
+	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
+		let accepted = self.prj_ref().gnative_tunnel().accept_session(gshell_id).map_err(|source| {
+			GNativeServiceError::EnterSession { gshell_id: gshell_id.value(), source }
+		})?;
 		let runtime = GNativeSessionRuntime { accepted };
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
 		state.upsert_session(runtime);

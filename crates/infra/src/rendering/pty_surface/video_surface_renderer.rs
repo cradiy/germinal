@@ -397,7 +397,7 @@ impl WgpuVideoSurfacePipeline {
 			vertex:         wgpu::VertexState {
 				module:              &shader_module,
 				entry_point:         Some("vs_main"),
-				buffers:             &[WgpuVideoSurfaceVertex::vertex_buffer_layout()],
+				buffers:             &[Some(WgpuVideoSurfaceVertex::vertex_buffer_layout())],
 				compilation_options: wgpu::PipelineCompilationOptions::default(),
 			},
 			fragment:       Some(wgpu::FragmentState {
@@ -471,7 +471,11 @@ fn create_color_conversion_buffer(
 		usage:              wgpu::BufferUsages::UNIFORM,
 		mapped_at_creation: true,
 	});
-	buffer.slice(..).get_mapped_range_mut().copy_from_slice(&bytes);
+	buffer
+		.slice(..)
+		.get_mapped_range_mut()
+		.expect("mapped_at_creation buffer must provide mutable mapped range")
+		.copy_from_slice(&bytes);
 	buffer.unmap();
 	buffer
 }
@@ -498,7 +502,11 @@ fn create_vertex_buffer(
 		usage:              wgpu::BufferUsages::VERTEX,
 		mapped_at_creation: true,
 	});
-	buffer.slice(..).get_mapped_range_mut().copy_from_slice(&bytes);
+	buffer
+		.slice(..)
+		.get_mapped_range_mut()
+		.expect("mapped_at_creation buffer must provide mutable mapped range")
+		.copy_from_slice(&bytes);
 	buffer.unmap();
 	buffer
 }

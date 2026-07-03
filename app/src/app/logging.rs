@@ -63,12 +63,18 @@ impl SharedFileWriter {
 
 impl Write for SharedFileWriter {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		let mut file = self.file.lock().expect("log file lock poisoned");
+		let mut file = match self.file.lock() {
+			Ok(file) => file,
+			Err(poisoned) => poisoned.into_inner(),
+		};
 		file.write(buf)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		let mut file = self.file.lock().expect("log file lock poisoned");
+		let mut file = match self.file.lock() {
+			Ok(file) => file,
+			Err(poisoned) => poisoned.into_inner(),
+		};
 		file.flush()
 	}
 }

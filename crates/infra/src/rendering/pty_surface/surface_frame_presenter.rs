@@ -80,7 +80,7 @@ impl WgpuTerminalSurfaceFramePresenter {
 		let submit = submit_started_at.elapsed();
 
 		let present_started_at = Instant::now();
-		surface_texture.present();
+		input.queue.present(surface_texture);
 		let present = present_started_at.elapsed();
 
 		Ok(WgpuTerminalSurfaceFramePresentResult {

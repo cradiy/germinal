@@ -23,7 +23,6 @@ use germinal_gnative_protocol::gnative::{
 	tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame, GNativeHostToApp},
 };
 use germinal_ports::{
-	error::BoxResult,
 	event::{
 		runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 		runtime_event_dispatcher::IRuntimeEventDispatcher,
@@ -36,9 +35,9 @@ use germinal_ports::{
 			RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
 		},
 	},
-	service::gnative_tunnel::IGNativeTunnel,
+	service::gnative_tunnel::{GNativeTunnelError, IGNativeTunnel},
 };
-use thiserror::Error;
+use tracing::warn;
 
 use crate::{
 	gnative::media_bridge::{GNativeMediaBridgeHandle, IGNativeMediaBridge, NoopGNativeMediaBridge},
@@ -46,38 +45,6 @@ use crate::{
 };
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
-
-#[derive(Debug, Error)]
-enum GNativeTunnelError {
-	#[error("gnative tunnel command channel is closed")]
-	CommandChannelClosed,
-	#[error("gnative tunnel response channel is closed: {0}")]
-	ResponseChannelClosed(#[source] mpsc::RecvError),
-	#[error("gnative tunnel is not configured with a dispatcher")]
-	DispatcherNotConfigured,
-	#[error("gnative tunnel is not configured with a snapshot sender")]
-	SnapshotSenderNotConfigured,
-	#[error("no gnative tunnel slot for gshell {gshell_id}")]
-	MissingTunnelSlot { gshell_id: u64 },
-	#[error("no active gnative tunnel session for gshell {gshell_id}")]
-	InactiveSession { gshell_id: u64 },
-	#[error("gnative app closed before hello")]
-	AppClosedBeforeHello,
-	#[error("expected gnative hello during handshake")]
-	UnexpectedHandshakeMessage,
-	#[error("gnative hello token mismatch")]
-	TokenMismatch,
-	#[error("gnative protocol version mismatch: expected {expected}, got {actual}")]
-	ProtocolVersionMismatch { expected: u32, actual: u32 },
-	#[error("I/O error: {0}")]
-	Io(#[from] std::io::Error),
-	#[error("failed to encode gnative tunnel message: {0}")]
-	EncodeMessage(#[source] serde_json::Error),
-	#[error("failed to decode gnative tunnel message: {0}")]
-	DecodeMessage(#[source] serde_json::Error),
-	#[error("gnative app closed mid-message")]
-	AppClosedMidMessage,
-}
 
 pub struct GNativeTunnel<Dispatch> {
 	command_tx:          flume::Sender<TunnelCommand<Dispatch>>,
@@ -104,30 +71,38 @@ impl<Dispatch> GNativeTunnel<Dispatch> {
 impl<Dispatch> GNativeTunnel<Dispatch>
 where Dispatch: IRuntimeEventDispatcher
 {
-	pub fn new() -> Self {
+	pub fn new() -> Result<Self, GNativeTunnelError> {
 		let (command_tx, command_rx) = flume::unbounded();
+		let (ready_tx, ready_rx) = mpsc::channel();
 
 		thread::Builder::new()
 			.name("gnative-tunnel".to_string())
 			.spawn(move || {
-				let runtime = Runtime::new().expect("failed to create gnative tunnel runtime");
+				let runtime = match Runtime::new() {
+					Ok(runtime) => {
+						let _ = ready_tx.send(Ok(()));
+						runtime
+					}
+					Err(source) => {
+						let _ = ready_tx.send(Err(source));
+						return;
+					}
+				};
 				runtime.block_on(run_tunnel_runtime(command_rx));
 			})
-			.expect("failed to spawn gnative tunnel runtime thread");
+			.map_err(|source| GNativeTunnelError::SpawnRuntimeThread { source })?;
+		ready_rx
+			.recv()
+			.map_err(GNativeTunnelError::RuntimeBootstrapChannelClosed)?
+			.map_err(|source| GNativeTunnelError::CreateRuntime { source })?;
 
-		Self {
+		Ok(Self {
 			command_tx,
 			dispatcher: RefCell::new(None),
 			media_bridge: RefCell::new(Arc::new(NoopGNativeMediaBridge)),
 			surface_snapshot_tx: RefCell::new(None),
-		}
+		})
 	}
-}
-
-impl<Dispatch> Default for GNativeTunnel<Dispatch>
-where Dispatch: IRuntimeEventDispatcher
-{
-	fn default() -> Self { Self::new() }
 }
 
 impl<Dispatch> IGNativeTunnel for GNativeTunnel<Dispatch>
@@ -137,7 +112,7 @@ where Dispatch: IRuntimeEventDispatcher
 		&self,
 		gshell_id: GShellId,
 		protocol_version: u32,
-	) -> BoxResult<GNativeSessionDescriptor> {
+	) -> Result<GNativeSessionDescriptor, GNativeTunnelError> {
 		let (response_tx, response_rx) = mpsc::channel();
 		self
 			.command_tx
@@ -147,7 +122,10 @@ where Dispatch: IRuntimeEventDispatcher
 		response_rx.recv().map_err(GNativeTunnelError::ResponseChannelClosed)?
 	}
 
-	fn accept_session(&self, gshell_id: GShellId) -> BoxResult<GNativeSessionAccepted> {
+	fn accept_session(
+		&self,
+		gshell_id: GShellId,
+	) -> Result<GNativeSessionAccepted, GNativeTunnelError> {
 		let dispatcher =
 			self.dispatcher.borrow().clone().ok_or(GNativeTunnelError::DispatcherNotConfigured)?;
 		let surface_snapshot_tx = self
@@ -172,7 +150,11 @@ where Dispatch: IRuntimeEventDispatcher
 		response_rx.recv().map_err(GNativeTunnelError::ResponseChannelClosed)?
 	}
 
-	fn send_input(&self, gshell_id: GShellId, input: GNativeInputEvent) -> BoxResult<()> {
+	fn send_input(
+		&self,
+		gshell_id: GShellId,
+		input: GNativeInputEvent,
+	) -> Result<(), GNativeTunnelError> {
 		let (response_tx, response_rx) = mpsc::channel();
 		self
 			.command_tx
@@ -182,7 +164,7 @@ where Dispatch: IRuntimeEventDispatcher
 		response_rx.recv().map_err(GNativeTunnelError::ResponseChannelClosed)?
 	}
 
-	fn close_session(&self, gshell_id: GShellId) -> BoxResult<()> {
+	fn close_session(&self, gshell_id: GShellId) -> Result<(), GNativeTunnelError> {
 		let (response_tx, response_rx) = mpsc::channel();
 		self
 			.command_tx
@@ -197,23 +179,23 @@ enum TunnelCommand<Dispatch> {
 	EnsureSessionDescriptor {
 		gshell_id:        GShellId,
 		protocol_version: u32,
-		response_tx:      mpsc::Sender<BoxResult<GNativeSessionDescriptor>>,
+		response_tx:      mpsc::Sender<Result<GNativeSessionDescriptor, GNativeTunnelError>>,
 	},
 	AcceptSession {
 		gshell_id:           GShellId,
 		dispatcher:          Dispatch,
 		media_bridge:        GNativeMediaBridgeHandle,
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-		response_tx:         mpsc::Sender<BoxResult<GNativeSessionAccepted>>,
+		response_tx:         mpsc::Sender<Result<GNativeSessionAccepted, GNativeTunnelError>>,
 	},
 	SendInput {
 		gshell_id:   GShellId,
 		input:       GNativeInputEvent,
-		response_tx: mpsc::Sender<BoxResult<()>>,
+		response_tx: mpsc::Sender<Result<(), GNativeTunnelError>>,
 	},
 	CloseSession {
 		gshell_id:   GShellId,
-		response_tx: mpsc::Sender<BoxResult<()>>,
+		response_tx: mpsc::Sender<Result<(), GNativeTunnelError>>,
 	},
 }
 
@@ -267,13 +249,19 @@ async fn ensure_session_descriptor_async(
 	slots: &mut HashMap<GShellId, TunnelSlot>,
 	gshell_id: GShellId,
 	protocol_version: u32,
-) -> BoxResult<GNativeSessionDescriptor> {
+) -> Result<GNativeSessionDescriptor, GNativeTunnelError> {
 	if let Some(slot) = slots.get(&gshell_id) {
 		return Ok(slot.descriptor.clone());
 	}
 
-	let listener = TcpListener::bind("127.0.0.1:0").await?;
-	let endpoint = encode_tcp_endpoint(listener.local_addr()?);
+	let listener = TcpListener::bind("127.0.0.1:0")
+		.await
+		.map_err(|source| GNativeTunnelError::BindListener { source })?;
+	let endpoint = encode_tcp_endpoint(
+		listener
+			.local_addr()
+			.map_err(|source| GNativeTunnelError::ResolveListenerAddress { source })?,
+	);
 	let descriptor =
 		GNativeSessionDescriptor { gshell_id, endpoint, token: unique_token(), protocol_version };
 
@@ -292,7 +280,7 @@ async fn accept_session_async<Dispatch>(
 	dispatcher: Dispatch,
 	media_bridge: GNativeMediaBridgeHandle,
 	surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-) -> BoxResult<GNativeSessionAccepted>
+) -> Result<GNativeSessionAccepted, GNativeTunnelError>
 where
 	Dispatch: IRuntimeEventDispatcher,
 {
@@ -310,7 +298,9 @@ where
 		return Ok(accepted);
 	}
 
-	let (mut stream, _) = slot.listener.accept().await?;
+	let (mut stream, _) = slot.listener.accept().await.map_err(|source| {
+		GNativeTunnelError::AcceptConnection { gshell_id: gshell_id.value(), source }
+	})?;
 	stream.set_nodelay(true).ok();
 
 	let message = read_app_message(&mut stream, &mut Vec::new())
@@ -358,7 +348,7 @@ async fn send_input_async(
 	slots: &mut HashMap<GShellId, TunnelSlot>,
 	gshell_id: GShellId,
 	input: GNativeInputEvent,
-) -> BoxResult<()> {
+) -> Result<(), GNativeTunnelError> {
 	let mut slot = slots
 		.remove(&gshell_id)
 		.ok_or(GNativeTunnelError::MissingTunnelSlot { gshell_id: gshell_id.value() })?;
@@ -379,34 +369,42 @@ async fn send_input_async(
 async fn close_session_async(
 	slots: &mut HashMap<GShellId, TunnelSlot>,
 	gshell_id: GShellId,
-) -> BoxResult<()> {
+) -> Result<(), GNativeTunnelError> {
 	let Some(mut slot) = slots.remove(&gshell_id) else {
 		return Ok(());
 	};
 
 	if let Some(mut writer) = slot.writer.take() {
-		writer.shutdown().await?;
+		writer.shutdown().await.map_err(|source| GNativeTunnelError::ShutdownSession {
+			gshell_id: gshell_id.value(),
+			source,
+		})?;
 	}
 
 	slots.insert(gshell_id, slot);
 	Ok(())
 }
 
-async fn write_host_message<W>(writer: &mut W, message: &GNativeHostToApp) -> BoxResult<()>
-where W: AsyncWrite + Unpin + ?Sized {
+async fn write_host_message<W>(
+	writer: &mut W,
+	message: &GNativeHostToApp,
+) -> Result<(), GNativeTunnelError>
+where
+	W: AsyncWrite + Unpin + ?Sized,
+{
 	let mut payload = serde_json::to_vec(message).map_err(GNativeTunnelError::EncodeMessage)?;
 	payload.push(b'\n');
 
 	let BufResult(result, _) = writer.write_all(payload).await;
-	result?;
-	writer.flush().await?;
+	result.map_err(|source| GNativeTunnelError::WriteMessage { source })?;
+	writer.flush().await.map_err(|source| GNativeTunnelError::FlushMessage { source })?;
 	Ok(())
 }
 
 async fn read_app_message<R>(
 	reader: &mut R,
 	read_buffer: &mut Vec<u8>,
-) -> BoxResult<Option<GNativeAppToHost>>
+) -> Result<Option<GNativeAppToHost>, GNativeTunnelError>
 where
 	R: AsyncRead + Unpin + ?Sized,
 {
@@ -422,7 +420,7 @@ where
 		}
 
 		let BufResult(result, mut chunk) = reader.read(Vec::with_capacity(4096)).await;
-		match result? {
+		match result.map_err(|source| GNativeTunnelError::ReadMessage { source })? {
 			0 => {
 				if read_buffer.is_empty() {
 					return Ok(None);
@@ -521,14 +519,21 @@ fn present_frame<Dispatch>(
 	};
 	snapshot.cursor = frame.cursor.map(cursor_snapshot);
 
-	if surface_snapshot_tx.send(snapshot).is_err() {
+	if let Err(error) = surface_snapshot_tx.send(snapshot) {
+		warn!(gshell_id = frame.gshell_id.value(), error = %error, "failed to publish gnative surface snapshot");
 		return;
 	}
 
-	let _ = dispatcher.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady {
+	if let Err(error) = dispatcher.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady {
 		gshell_id: frame.gshell_id,
 		seq:       frame.seq,
-	}));
+	})) {
+		warn!(
+			gshell_id = frame.gshell_id.value(),
+			error = %error,
+			"failed to dispatch gnative frame-ready event"
+		);
+	}
 }
 
 fn cursor_snapshot(cursor: GNativeFrameCursor) -> RenderSurfaceCursorSnapshot {
@@ -537,7 +542,11 @@ fn cursor_snapshot(cursor: GNativeFrameCursor) -> RenderSurfaceCursorSnapshot {
 
 fn dispatch_exit_gnative<Dispatch>(gshell_id: GShellId, dispatcher: &Dispatch)
 where Dispatch: IRuntimeEventDispatcher {
-	let _ = dispatcher.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }));
+	if let Err(error) =
+		dispatcher.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }))
+	{
+		warn!(gshell_id = gshell_id.value(), error = %error, "failed to dispatch gnative exit event");
+	}
 }
 
 fn encode_tcp_endpoint(addr: std::net::SocketAddr) -> String {
@@ -551,7 +560,6 @@ fn next_host_mux_seq(slot: &mut TunnelSlot) -> u64 {
 }
 
 fn unique_token() -> String {
-	let timestamp =
-		SystemTime::now().duration_since(UNIX_EPOCH).expect("clock should be after epoch").as_nanos();
+	let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
 	format!("gnative-{timestamp:x}")
 }

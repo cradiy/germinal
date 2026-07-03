@@ -1,7 +1,5 @@
 pub mod rendering;
 
-pub mod error;
-
 pub mod gshell;
 
 pub mod pty_host;

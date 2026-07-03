@@ -16,13 +16,11 @@ use crate::app::error::{AppError, AppResult};
 pub const APP_NAME: &str = "germinal";
 
 const CONFIG_FILE_NAME: &str = "config.toml";
-const DEFAULT_WORKSPACE_DATABASE_PATH: &str = "workspace.sqlite3";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
 	config_dir:  PathBuf,
 	config_file: PathBuf,
-	state_dir:   PathBuf,
 	log_dir:     PathBuf,
 }
 
@@ -33,29 +31,22 @@ impl AppPaths {
 		let config_file = config_dir.join(CONFIG_FILE_NAME);
 		let log_dir = state_dir.join("logs");
 
-		Ok(Self { config_dir, config_file, state_dir, log_dir })
+		Ok(Self { config_dir, config_file, log_dir })
 	}
 
 	pub fn config_dir(&self) -> &Path { &self.config_dir }
 
 	pub fn config_file(&self) -> &Path { &self.config_file }
 
-	pub fn state_dir(&self) -> &Path { &self.state_dir }
-
 	pub fn log_dir(&self) -> &Path { &self.log_dir }
-
-	pub fn workspace_database_path(&self, config: &GerminalConfig) -> PathBuf {
-		resolve_configured_path(self.state_dir(), &config.workspace.database_path)
-	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GerminalConfig {
-	pub window:    WindowConfig,
-	pub terminal:  TerminalConfig,
-	pub workspace: WorkspaceConfig,
-	pub logging:   LoggingConfig,
+	pub window:   WindowConfig,
+	pub terminal: TerminalConfig,
+	pub logging:  LoggingConfig,
 }
 
 impl GerminalConfig {
@@ -78,10 +69,9 @@ impl GerminalConfig {
 impl Default for GerminalConfig {
 	fn default() -> Self {
 		Self {
-			window:    WindowConfig::default(),
-			terminal:  TerminalConfig::default(),
-			workspace: WorkspaceConfig::default(),
-			logging:   LoggingConfig::default(),
+			window:   WindowConfig::default(),
+			terminal: TerminalConfig::default(),
+			logging:  LoggingConfig::default(),
 		}
 	}
 }
@@ -116,16 +106,6 @@ impl Default for TerminalConfig {
 			dynamic_padding:  false,
 		}
 	}
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WorkspaceConfig {
-	pub database_path: PathBuf,
-}
-
-impl Default for WorkspaceConfig {
-	fn default() -> Self { Self { database_path: PathBuf::from(DEFAULT_WORKSPACE_DATABASE_PATH) } }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,14 +153,6 @@ fn write_default_config(paths: &AppPaths) -> AppResult<()> {
 		toml::to_string_pretty(&GerminalConfig::default()).map_err(AppError::SerializeConfig)?;
 	fs::write(paths.config_file(), contents)
 		.map_err(|source| AppError::WriteConfig { path: paths.config_file().to_path_buf(), source })
-}
-
-fn resolve_configured_path(base_dir: &Path, configured_path: &Path) -> PathBuf {
-	if configured_path.is_absolute() {
-		configured_path.to_path_buf()
-	} else {
-		base_dir.join(configured_path)
-	}
 }
 
 fn xdg_dir(env_name: &str, home_suffix: &str) -> AppResult<PathBuf> {

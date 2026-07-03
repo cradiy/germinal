@@ -26,7 +26,7 @@ use nix::{
 	unistd::dup,
 };
 use portable_pty::{CommandBuilder, native_pty_system};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::pty::portable_pty_bridge::{
 	PtyBridgeConfig, apply_default_terminal_env, apply_shell_env, to_portable_pty_size,
@@ -44,7 +44,11 @@ pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
 	Dispatch: IRuntimeEventDispatcher,
 {
 	thread::spawn(move || {
-		let runtime = compio::runtime::Runtime::new().expect("failed to create compio runtime");
+		let Ok(runtime) = compio::runtime::Runtime::new() else {
+			error!(gshell_id = gshell_id.value(), "failed to create compio runtime for pty bridge");
+			let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+			return;
+		};
 		runtime.block_on(run_compio_bridge(
 			proxy,
 			gshell_id,
@@ -67,8 +71,11 @@ async fn run_compio_bridge<Dispatch>(
 	Dispatch: IRuntimeEventDispatcher,
 {
 	let pty_system = native_pty_system();
-	let pair =
-		pty_system.openpty(to_portable_pty_size(config.initial_size)).expect("failed to open pty");
+	let Ok(pair) = pty_system.openpty(to_portable_pty_size(config.initial_size)) else {
+		error!(gshell_id = gshell_id.value(), "failed to open pty");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
 
 	let mut command = CommandBuilder::new(&config.shell.program);
 	for arg in &config.shell.args {
@@ -77,21 +84,40 @@ async fn run_compio_bridge<Dispatch>(
 	apply_default_terminal_env(&mut command);
 	apply_shell_env(&mut command, &config.shell_env);
 
-	let mut child =
-		pair.slave.spawn_command(command).expect("failed to spawn interactive shell in pty");
+	let Ok(mut child) = pair.slave.spawn_command(command) else {
+		error!(gshell_id = gshell_id.value(), "failed to spawn interactive shell in pty");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
 	drop(pair.slave);
 
 	let master = pair.master;
-	let master_fd = master.as_raw_fd().expect("unix pty master must expose a raw fd");
-	let reader_fd =
-		dup(unsafe { BorrowedFd::borrow_raw(master_fd) }).expect("failed to dup pty reader fd");
-	let writer_fd =
-		dup(unsafe { BorrowedFd::borrow_raw(master_fd) }).expect("failed to dup pty writer fd");
+	let Some(master_fd) = master.as_raw_fd() else {
+		error!(gshell_id = gshell_id.value(), "unix pty master does not expose a raw fd");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
+	let Ok(reader_fd) = dup(unsafe { BorrowedFd::borrow_raw(master_fd) }) else {
+		error!(gshell_id = gshell_id.value(), "failed to dup pty reader fd");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
+	let Ok(writer_fd) = dup(unsafe { BorrowedFd::borrow_raw(master_fd) }) else {
+		error!(gshell_id = gshell_id.value(), "failed to dup pty writer fd");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
 
-	let mut reader =
-		AsyncFd::<OwnedFd>::new(reader_fd).expect("failed to attach pty reader to compio");
-	let mut writer =
-		AsyncFd::<OwnedFd>::new(writer_fd).expect("failed to attach pty writer to compio");
+	let Ok(mut reader) = AsyncFd::<OwnedFd>::new(reader_fd) else {
+		error!(gshell_id = gshell_id.value(), "failed to attach pty reader to compio");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
+	let Ok(mut writer) = AsyncFd::<OwnedFd>::new(writer_fd) else {
+		error!(gshell_id = gshell_id.value(), "failed to attach pty writer to compio");
+		let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }));
+		return;
+	};
 
 	let read_task = spawn(async move {
 		read_pty_to_terminal_worker_async(&mut reader, &terminal_worker_tx).await;

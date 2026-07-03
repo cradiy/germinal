@@ -262,7 +262,7 @@ mod tests {
 		fn dispatch(
 			&self,
 			_event: germinal_ports::event::runtime_event::RuntimeEvent,
-		) -> germinal_ports::error::BoxResult<()> {
+		) -> Result<(), germinal_ports::event::runtime_event_dispatcher::RuntimeEventDispatchError> {
 			Ok(())
 		}
 	}
@@ -270,7 +270,7 @@ mod tests {
 	#[test]
 	fn bootstrap_connects_to_host_tunnel_and_reads_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
-		let tunnel = GNativeTunnel::new();
+		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
 		tunnel.configure(TestDispatcher, snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(31), 1).expect("descriptor should exist");
@@ -299,7 +299,7 @@ mod tests {
 	#[test]
 	fn frame_writer_sends_frame_back_to_host() {
 		let (snapshot_tx, snapshot_rx) = mpsc::channel();
-		let tunnel = GNativeTunnel::new();
+		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
 		tunnel.configure(TestDispatcher, snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(32), 1).expect("descriptor should exist");

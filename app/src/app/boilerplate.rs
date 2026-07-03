@@ -11,17 +11,18 @@ use germinal_application::service::{
 	pty_service::{PtyService, PtyServiceState},
 	render_service::{RenderService, RenderServiceState},
 	worker_service::{WorkerService, WorkerServiceState},
-	workspace_service::WorkspaceServiceState,
+	workspace_service::{WorkspaceService, WorkspaceServiceState},
 };
 use germinal_domain::{
 	gshell::vo::gshell_id::GShellId,
 	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
 use germinal_ports::{
-	error::BoxResult,
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
-		runtime_event_dispatcher::{IRuntimeEventDispatcher, IRuntimeEventDispatcherProvider},
+		runtime_event_dispatcher::{
+			IRuntimeEventDispatcher, IRuntimeEventDispatcherProvider, RuntimeEventDispatchError,
+		},
 	},
 	pty_host::{
 		pty_backend::IPtyBackendProvider, size_info::TerminalSizeInfo, terminal_size::TerminalPtySize,
@@ -32,20 +33,27 @@ use germinal_ports::{
 		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
 		window_runtime::IRenderRuntimeStore,
 	},
-	repository::IRepository,
+	repository::{IRepository, RepositoryError},
 	service::{
-		gnative_service::IGNativeService, gnative_tunnel::IGNativeTunnelProvider,
-		gshell_service::IGShellService, layout_service::ILayoutService, pty_service::IPtyService,
-		render_service::IRenderService, worker_service::IWorkerService,
-		workspace_service::IWorkspaceService,
+		gnative_service::{GNativeServiceError, IGNativeService},
+		gnative_tunnel::IGNativeTunnelProvider,
+		gshell_service::IGShellService,
+		layout_service::ILayoutService,
+		pty_service::IPtyService,
+		render_service::IRenderService,
+		worker_service::IWorkerService,
+		workspace_service::{IWorkspaceService, WorkspaceServiceError},
 	},
 };
 
 use crate::app::{App, AppRuntimeEventDispatcher};
 
 impl IRuntimeEventDispatcher for AppRuntimeEventDispatcher {
-	fn dispatch(&self, event: germinal_ports::event::runtime_event::RuntimeEvent) -> BoxResult<()> {
-		self.proxy.send_event(event)?;
+	fn dispatch(
+		&self,
+		event: germinal_ports::event::runtime_event::RuntimeEvent,
+	) -> Result<(), RuntimeEventDispatchError> {
+		self.proxy.send_event(event).map_err(|_| RuntimeEventDispatchError::Closed)?;
 		Ok(())
 	}
 }
@@ -74,24 +82,39 @@ impl IRepository for App {
 	type Aggregate = germinal_domain::workspace::entity::workspace::Workspace;
 	type Id = u64;
 
-	fn get(&self, id: Self::Id) -> BoxResult<Option<Self::Aggregate>> {
-		self.workspace_persistence_repository.get(id)
+	fn get(&self, id: Self::Id) -> Result<Option<Self::Aggregate>, RepositoryError> {
+		Ok(self.workspace_repository.borrow().clone().filter(|_| id == 1))
 	}
 
-	fn list(&self) -> BoxResult<Vec<(Self::Id, Self::Aggregate)>> {
-		self.workspace_persistence_repository.list()
+	fn list(&self) -> Result<Vec<(Self::Id, Self::Aggregate)>, RepositoryError> {
+		Ok(
+			self
+				.workspace_repository
+				.borrow()
+				.clone()
+				.into_iter()
+				.map(|workspace| (1, workspace))
+				.collect(),
+		)
 	}
 
-	fn insert(&self, aggregate: Self::Aggregate) -> BoxResult<Self::Id> {
-		self.workspace_persistence_repository.insert(aggregate)
+	fn insert(&self, aggregate: Self::Aggregate) -> Result<Self::Id, RepositoryError> {
+		*self.workspace_repository.borrow_mut() = Some(aggregate);
+		Ok(1)
 	}
 
-	fn update(&self, id: Self::Id, aggregate: Self::Aggregate) -> BoxResult<()> {
-		self.workspace_persistence_repository.update(id, aggregate)
+	fn update(&self, id: Self::Id, aggregate: Self::Aggregate) -> Result<(), RepositoryError> {
+		if id == 1 {
+			*self.workspace_repository.borrow_mut() = Some(aggregate);
+		}
+		Ok(())
 	}
 
-	fn delete(&self, id: Self::Id) -> BoxResult<()> {
-		self.workspace_persistence_repository.delete(id)
+	fn delete(&self, id: Self::Id) -> Result<(), RepositoryError> {
+		if id == 1 {
+			self.workspace_repository.borrow_mut().take();
+		}
+		Ok(())
 	}
 }
 
@@ -234,7 +257,7 @@ impl IGNativeService for App {
 		GNativeService::inj_ref(self).ensure_gshell_gnative(gshell_id)
 	}
 
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> BoxResult<()> {
+	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
 		GNativeService::inj_ref(self).enter_gnative_session(gshell_id)
 	}
 
@@ -311,19 +334,14 @@ impl IRenderService for App {
 }
 
 impl IWorkspaceService for App {
-	fn focused_gshell(&self) -> GShellId {
-		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
-			.focused_gshell()
+	fn focused_gshell(&self) -> GShellId { WorkspaceService::inj_ref(self).focused_gshell() }
+
+	fn restore_workspace(&self) -> Result<(), WorkspaceServiceError> {
+		WorkspaceService::inj_ref(self).restore_workspace()
 	}
 
-	fn restore_workspace(&self) -> BoxResult<()> {
-		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
-			.restore_workspace()
-	}
-
-	fn persist_workspace(&self) -> BoxResult<()> {
-		germinal_application::service::workspace_service::WorkspaceService::inj_ref(self)
-			.persist_workspace()
+	fn persist_workspace(&self) -> Result<(), WorkspaceServiceError> {
+		WorkspaceService::inj_ref(self).persist_workspace()
 	}
 }
 

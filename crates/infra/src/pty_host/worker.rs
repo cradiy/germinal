@@ -29,7 +29,7 @@ use germinal_ports::{
 	seq::Seq,
 };
 use rayon::ThreadPool;
-use tracing::info;
+use tracing::{debug, error, info};
 
 use crate::{
 	gnative::control_sequence::GNativeEnterControlSequenceDecoder,
@@ -120,7 +120,7 @@ where Dispatch: IRuntimeEventDispatcher
 }
 
 struct TerminalWorkerPool<Dispatch> {
-	_thread_pool:     ThreadPool,
+	_thread_pool:     Option<ThreadPool>,
 	registration_txs: Vec<Sender<TerminalWorkerRegistration<Dispatch>>>,
 	next_lane:        AtomicUsize,
 }
@@ -133,15 +133,25 @@ where Dispatch: IRuntimeEventDispatcher
 		let thread_pool = rayon::ThreadPoolBuilder::new()
 			.num_threads(worker_count)
 			.thread_name(|lane_index| format!("terminal-worker-{lane_index}"))
-			.build()
-			.expect("failed to build terminal worker thread pool");
+			.build();
+		if let Err(error) = &thread_pool {
+			error!(error = %error, "failed to build terminal worker thread pool; falling back to std threads");
+		}
+		let thread_pool = thread_pool.ok();
 		let mut registration_txs = Vec::with_capacity(worker_count);
 
-		for _lane_index in 0..worker_count {
+		for lane_index in 0..worker_count {
 			let (registration_tx, registration_rx) =
 				mpsc::channel::<TerminalWorkerRegistration<Dispatch>>();
 
-			thread_pool.spawn_fifo(move || run_terminal_worker_lane(registration_rx));
+			if let Some(thread_pool) = thread_pool.as_ref() {
+				thread_pool.spawn_fifo(move || run_terminal_worker_lane(registration_rx));
+			} else if let Err(error) = thread::Builder::new()
+				.name(format!("terminal-worker-fallback-{lane_index}"))
+				.spawn(move || run_terminal_worker_lane(registration_rx))
+			{
+				error!(error = %error, lane_index, "failed to spawn fallback terminal worker lane");
+			}
 
 			registration_txs.push(registration_tx);
 		}
@@ -168,9 +178,9 @@ where Dispatch: IRuntimeEventDispatcher
 			input_rx: rx,
 		};
 
-		self.registration_txs[lane_index]
-			.send(registration)
-			.expect("terminal worker lane should accept registrations");
+		if let Err(error) = self.registration_txs[lane_index].send(registration) {
+			error!(error = %error, lane_index, "failed to register terminal worker with worker lane");
+		}
 
 		tx
 	}
@@ -432,10 +442,15 @@ where Dispatch: IRuntimeEventDispatcher
 
 		let started_at = Instant::now();
 		let snapshot_started_at = Instant::now();
-		let mut snapshot = self
-			.terminal_store
-			.render_surface_snapshot_of(self.target_id)
-			.expect("surface snapshot should exist");
+		let Some(mut snapshot) = self.terminal_store.render_surface_snapshot_of(self.target_id) else {
+			debug!(
+				gshell_id = self.gshell_id.value(),
+				seq = seq.value(),
+				"no terminal surface snapshot to publish"
+			);
+			self.unpublished_seq = Some(seq);
+			return;
+		};
 		self.perf.publish_snapshot += snapshot_started_at.elapsed();
 
 		let cursor_started_at = Instant::now();
@@ -747,8 +762,13 @@ mod tests {
 	}
 
 	impl IRuntimeEventDispatcher for TestDispatcher {
-		fn dispatch(&self, event: RuntimeEvent) -> germinal_ports::error::BoxResult<()> {
-			self.tx.send(event)?;
+		fn dispatch(
+			&self,
+			event: RuntimeEvent,
+		) -> Result<(), germinal_ports::event::runtime_event_dispatcher::RuntimeEventDispatchError> {
+			self.tx.send(event).map_err(|_| {
+				germinal_ports::event::runtime_event_dispatcher::RuntimeEventDispatchError::Closed
+			})?;
 			Ok(())
 		}
 	}

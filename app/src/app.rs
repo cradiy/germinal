@@ -1,10 +1,12 @@
+use std::cell::RefCell;
+
 mod boilerplate;
 mod config;
 mod error;
 mod logging;
 mod paste;
 
-pub use config::{AppPaths, GerminalConfig, load_or_create_config};
+pub use config::{GerminalConfig, load_or_create_config};
 pub use error::{AppError, AppResult};
 use germinal_application::service::{
 	gshell_service::GShellServiceState, layout_service::LayoutServiceState,
@@ -19,7 +21,6 @@ use germinal_infra::{
 	rendering::pty_surface::window_runtime::{
 		WgpuTerminalWindowRuntime, WgpuTerminalWindowRuntimeFactory,
 	},
-	repositories::sqlite_repository::SqliteRepository,
 };
 use germinal_ports::{
 	event::{
@@ -55,29 +56,28 @@ pub struct AppRuntimeEventDispatcher {
 }
 
 pub struct App {
-	workspace_service_state:          WorkspaceServiceState,
-	gshell_service_state:             GShellServiceState,
-	worker_service_state:             WorkerServiceState,
-	render_service_state:             RenderServiceState,
-	layout_service_state:             LayoutServiceState,
-	workspace_persistence_repository: SqliteRepository<Workspace>,
-	runtime_event_dispatcher:         AppRuntimeEventDispatcher,
-	pty_backend:                      PlatformPtyBackend,
+	workspace_service_state:  WorkspaceServiceState,
+	gshell_service_state:     GShellServiceState,
+	worker_service_state:     WorkerServiceState,
+	render_service_state:     RenderServiceState,
+	layout_service_state:     LayoutServiceState,
+	workspace_repository:     RefCell<Option<Workspace>>,
+	runtime_event_dispatcher: AppRuntimeEventDispatcher,
+	pty_backend:              PlatformPtyBackend,
 	gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>,
-	media_bridge:                     std::sync::Arc<GstVideoPlayerBridge>,
-	terminal_worker_backend:          PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
-	render_runtime_factory:           WgpuTerminalWindowRuntimeFactory,
-	render_runtime:                   Option<WgpuTerminalWindowRuntime>,
-	render_window_id:                 Option<WindowId>,
-	paste_controller:                 HostPasteController,
-	config:                           GerminalConfig,
+	media_bridge:             std::sync::Arc<GstVideoPlayerBridge>,
+	terminal_worker_backend:  PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
+	render_runtime_factory:   WgpuTerminalWindowRuntimeFactory,
+	render_runtime:           Option<WgpuTerminalWindowRuntime>,
+	render_window_id:         Option<WindowId>,
+	paste_controller:         HostPasteController,
+	config:                   GerminalConfig,
 }
 
 impl App {
 	pub fn new(
 		runtime_event_proxy: EventLoopProxy<RuntimeEvent>,
 		config: GerminalConfig,
-		paths: AppPaths,
 	) -> AppResult<Self> {
 		let runtime_event_dispatcher = AppRuntimeEventDispatcher { proxy: runtime_event_proxy };
 		let media_dispatcher = {
@@ -88,7 +88,6 @@ impl App {
 			GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
 		);
 		let terminal_profile = config.terminal_profile();
-		let workspace_database_path = paths.workspace_database_path(&config);
 
 		let app = Self {
 			workspace_service_state: WorkspaceServiceState::new(),
@@ -96,14 +95,11 @@ impl App {
 			worker_service_state: WorkerServiceState::new(),
 			render_service_state: RenderServiceState::new(),
 			layout_service_state: LayoutServiceState::new(terminal_profile),
-			workspace_persistence_repository: SqliteRepository::new(
-				&workspace_database_path,
-				"workspace",
-			)
-			.map_err(|source| AppError::WorkspaceRepository { path: workspace_database_path, source })?,
+			workspace_repository: RefCell::new(None),
 			runtime_event_dispatcher: runtime_event_dispatcher.clone(),
 			pty_backend: PlatformPtyBackend::new(),
-			gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new(),
+			gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new()
+				.map_err(AppError::CreateGNativeTunnel)?,
 			media_bridge: std::sync::Arc::clone(&media_bridge),
 			terminal_worker_backend: PlatformTerminalWorkerBackend::new(runtime_event_dispatcher),
 			render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(terminal_profile),
@@ -150,15 +146,13 @@ impl App {
 		let runtime = self
 			.render_runtime_factory
 			.create_window_runtime(window)
-			.map_err(|source| AppError::CreateWindowRuntime(source.into()))?;
+			.map_err(AppError::CreateWindowRuntime)?;
 		self.render_runtime = Some(runtime);
 		self.render_window_id = Some(window_id);
 		Ok(())
 	}
 
-	fn current_window_id(&self) -> WindowId {
-		self.render_window_id.expect("window runtime must be initialized before use")
-	}
+	fn current_window_id(&self) -> Option<WindowId> { self.render_window_id }
 
 	fn try_handle_paste_shortcut(
 		&mut self,
@@ -279,7 +273,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
 		window_id: WindowId,
 		event: WindowEvent,
 	) {
-		let current_window_id = self.current_window_id();
+		let Some(current_window_id) = self.current_window_id() else {
+			return;
+		};
 
 		if window_id != current_window_id {
 			return;
@@ -317,6 +313,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				let winit::event::KeyEvent { state, logical_key, physical_key, text, .. } = event;
 				let logical_key = winit_key_to_port(logical_key);
 				let state = winit_element_state_to_port(state);
+				let text = text.map(|text| text.to_string());
 				self.paste_controller.observe_key_event(state, physical_key);
 
 				if self.try_handle_paste_shortcut(state, &logical_key, physical_key) {
@@ -365,7 +362,7 @@ fn winit_key_to_port(key: Key) -> WindowInputKey {
 			NamedKey::Delete => WindowInputKey::Named(WindowInputNamedKey::Delete),
 			_ => WindowInputKey::Unidentified,
 		},
-		Key::Character(text) => WindowInputKey::Character(text),
+		Key::Character(text) => WindowInputKey::Character(text.to_string()),
 		_ => WindowInputKey::Unidentified,
 	}
 }
