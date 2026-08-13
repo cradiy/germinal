@@ -178,7 +178,7 @@ fn draw_app(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) -> Result<(),
 
 fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<GridSize, DemoError> {
 	while let Some(input) = session.read_input()? {
-		if let GNativeInputEvent::Resize { columns, rows } = input {
+		if let GNativeInputEvent::Resize { columns, rows, .. } = input {
 			return Ok(clamped_size(columns, rows));
 		}
 	}
@@ -187,7 +187,7 @@ fn wait_for_initial_size(session: &mut LocalGNativeSession) -> Result<GridSize, 
 
 fn handle_input(app: &mut DemoHostApp, input: GNativeInputEvent) {
 	match input {
-		GNativeInputEvent::Resize { columns, rows } => {
+		GNativeInputEvent::Resize { columns, rows, .. } => {
 			let size = clamped_size(columns, rows);
 			app.resize(size);
 			app.push_notice(format!("resize {}x{}", columns, rows));

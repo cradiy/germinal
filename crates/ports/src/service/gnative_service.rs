@@ -1,8 +1,12 @@
-use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::session::GNativeSessionAccepted;
 use thiserror::Error;
 
-use crate::{event::gshell_input::GShellInput, service::gnative_tunnel::GNativeTunnelError};
+use crate::{
+	event::gshell_input::GShellInput,
+	pty_host::size_info::TerminalSizeInfo,
+	service::gnative_tunnel::GNativeTunnelError,
+};
 
 #[derive(Debug, Error)]
 pub enum GNativeServiceError {
@@ -21,5 +25,5 @@ pub trait IGNativeService {
 	fn fail_gnative_session(&self, gshell_id: GShellId);
 	fn exit_gnative_session(&self, gshell_id: GShellId);
 	fn route_gnative_input(&self, input: GShellInput);
-	fn resize_gnative_session(&self, gshell_id: GShellId, term_size: TerminalGridSize);
+	fn resize_gnative_session(&self, gshell_id: GShellId, size_info: TerminalSizeInfo);
 }

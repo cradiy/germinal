@@ -47,7 +47,11 @@ pub enum GNativeInputEvent {
 	},
 	Ime(String),
 	Resize {
-		columns: u32,
-		rows:    u32,
+		columns:           u32,
+		rows:              u32,
+		content_width_px:  u32,
+		content_height_px: u32,
+		cell_width_px:     u32,
+		cell_height_px:    u32,
 	},
 }

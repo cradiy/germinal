@@ -201,11 +201,7 @@ impl App {
 
 		for placement in placements {
 			let size_info = self.terminal_size_info_for_surface(placement);
-			self.resize_gshell(
-				GShellId::new(placement.target_id.value()),
-				size_info.pty_size(),
-				size_info.grid_size(),
-			);
+			self.resize_gshell(GShellId::new(placement.target_id.value()), size_info);
 		}
 	}
 
@@ -342,7 +338,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.activate_gnative_session(accepted);
 				self.enter_gnative_mode(gshell_id);
 				if let Some(size_info) = self.current_gshell_size_info(gshell_id) {
-					self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
+					self.resize_gshell(gshell_id, size_info);
 				}
 			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnectionFailed {

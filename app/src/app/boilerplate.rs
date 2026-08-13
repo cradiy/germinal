@@ -218,13 +218,8 @@ impl IGShellService for App {
 		GShellService::inj_ref(self).route_input_to_gshell(input)
 	}
 
-	fn resize_gshell(
-		&self,
-		gshell_id: GShellId,
-		pty_size: TerminalPtySize,
-		term_size: TerminalGridSize,
-	) {
-		GShellService::inj_ref(self).resize_gshell(gshell_id, pty_size, term_size)
+	fn resize_gshell(&self, gshell_id: GShellId, size_info: TerminalSizeInfo) {
+		GShellService::inj_ref(self).resize_gshell(gshell_id, size_info)
 	}
 }
 
@@ -291,8 +286,8 @@ impl IGNativeService for App {
 		GNativeService::inj_ref(self).route_gnative_input(input)
 	}
 
-	fn resize_gnative_session(&self, gshell_id: GShellId, term_size: TerminalGridSize) {
-		GNativeService::inj_ref(self).resize_gnative_session(gshell_id, term_size)
+	fn resize_gnative_session(&self, gshell_id: GShellId, size_info: TerminalSizeInfo) {
+		GNativeService::inj_ref(self).resize_gnative_session(gshell_id, size_info)
 	}
 }
 

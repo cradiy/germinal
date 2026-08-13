@@ -13,7 +13,7 @@ use germinal_domain::{
 };
 use germinal_ports::{
 	event::gshell_input::GShellInput,
-	pty_host::terminal_size::TerminalPtySize,
+	pty_host::{size_info::TerminalSizeInfo, terminal_size::TerminalPtySize},
 	rendering::surface_snapshot::RenderSurfaceSnapshot,
 	service::{
 		gnative_service::IGNativeService, gshell_service::IGShellService, pty_service::IPtyService,
@@ -174,13 +174,10 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		}
 	}
 
-	fn resize_gshell(
-		&self,
-		gshell_id: GShellId,
-		pty_size: TerminalPtySize,
-		term_size: TerminalGridSize,
-	) {
+	fn resize_gshell(&self, gshell_id: GShellId, size_info: TerminalSizeInfo) {
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+		let pty_size = size_info.pty_size();
+		let term_size = size_info.grid_size();
 
 		match state.mode_of(gshell_id) {
 			GShellMode::Pty | GShellMode::GNativeConnecting => {
@@ -190,7 +187,7 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 				state.sync_pty_host_size(pty_host_id, term_size);
 				self.prj_ref().resize_pty_host(pty_host_id, pty_size, term_size);
 			}
-			GShellMode::GNative => self.prj_ref().resize_gnative_session(gshell_id, term_size),
+			GShellMode::GNative => self.prj_ref().resize_gnative_session(gshell_id, size_info),
 		}
 	}
 }

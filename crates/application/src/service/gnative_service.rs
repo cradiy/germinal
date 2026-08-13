@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::{
 	input::{
 		GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
@@ -13,6 +13,7 @@ use germinal_ports::{
 		gshell_input::{GShellInput, GShellInputEvent},
 		window_input_event::{WindowInputEvent, WindowInputModifiers},
 	},
+	pty_host::size_info::TerminalSizeInfo,
 	service::{
 		gnative_service::{GNativeServiceError, IGNativeService},
 		gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
@@ -117,15 +118,26 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 		}
 	}
 
-	fn resize_gnative_session(&self, gshell_id: GShellId, term_size: TerminalGridSize) {
-		let event = GNativeInputEvent::Resize {
-			columns: term_size.columns() as u32,
-			rows:    term_size.rows() as u32,
-		};
+	fn resize_gnative_session(&self, gshell_id: GShellId, size_info: TerminalSizeInfo) {
+		let event = gnative_resize_event(size_info);
 
 		if let Err(error) = self.prj_ref().gnative_tunnel().send_input(gshell_id, event) {
 			warn!(gshell_id = gshell_id.value(), error = %error, "failed to send gnative resize");
 		}
+	}
+}
+
+fn gnative_resize_event(size_info: TerminalSizeInfo) -> GNativeInputEvent {
+	let grid_size = size_info.grid_size();
+	let cell_size = size_info.cell_size();
+
+	GNativeInputEvent::Resize {
+		columns: grid_size.columns() as u32,
+		rows: grid_size.rows() as u32,
+		content_width_px: size_info.content_width_px(),
+		content_height_px: size_info.content_height_px(),
+		cell_width_px: cell_size.width_px(),
+		cell_height_px: cell_size.height_px(),
 	}
 }
 
@@ -230,15 +242,24 @@ mod tests {
 		},
 		session::GNativeSessionAccepted,
 	};
-	use germinal_ports::event::{
-		gshell_input::{GShellInput, GShellInputEvent},
-		window_input_event::{
-			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-			WindowInputNamedKey,
+	use germinal_ports::{
+		event::{
+			gshell_input::{GShellInput, GShellInputEvent},
+			window_input_event::{
+				WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
+				WindowInputNamedKey,
+			},
+		},
+		pty_host::{
+			cell_size::TerminalCellSize,
+			size_info::{TerminalPadding, TerminalSizeInfo},
+			window_size::TerminalWindowSize,
 		},
 	};
 
-	use super::{GNativeServiceState, GNativeSessionRuntime, gnative_input_event_from};
+	use super::{
+		GNativeServiceState, GNativeSessionRuntime, gnative_input_event_from, gnative_resize_event,
+	};
 
 	#[test]
 	fn state_stores_session_runtime_by_gshell_id() {
@@ -311,6 +332,27 @@ mod tests {
 				text:        None,
 				modifiers:   GNativeInputModifiers { control: false, alt: false },
 			})
+		);
+	}
+
+	#[test]
+	fn resize_event_includes_grid_content_and_cell_dimensions() {
+		let size_info = TerminalSizeInfo::new(
+			TerminalWindowSize::new(101, 55),
+			TerminalCellSize::new(10, 20),
+			TerminalPadding::new(3, 4),
+		);
+
+		assert_eq!(
+			gnative_resize_event(size_info),
+			GNativeInputEvent::Resize {
+				columns: 9,
+				rows: 2,
+				content_width_px: 95,
+				content_height_px: 47,
+				cell_width_px: 10,
+				cell_height_px: 20,
+			}
 		);
 	}
 }

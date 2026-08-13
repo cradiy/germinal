@@ -246,6 +246,7 @@ mod tests {
 			frame::GNativeFrame,
 			input::GNativeInputEvent,
 			media::GNativeMediaControlCommand,
+			session::GNATIVE_PROTOCOL_VERSION,
 			tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeStreamPriority},
 		},
 		rendering::frame_plan_builder::{RenderCommandDto, TextStyleDto},
@@ -293,13 +294,14 @@ mod tests {
 	}
 
 	#[test]
-	fn bootstrap_connects_to_host_tunnel_and_reads_input() {
+	fn bootstrap_connects_to_host_tunnel_and_reads_viewport_resize() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
 		let (event_tx, event_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
 		tunnel.configure(TestDispatcher(event_tx), Arc::new(AtomicBool::new(false)), snapshot_tx);
-		let descriptor =
-			tunnel.ensure_session_descriptor(GShellId::new(31), 1).expect("descriptor should exist");
+		let descriptor = tunnel
+			.ensure_session_descriptor(GShellId::new(31), GNATIVE_PROTOCOL_VERSION)
+			.expect("descriptor should exist");
 		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
 			endpoint:         descriptor.endpoint.clone(),
 			token:            descriptor.token.clone(),
@@ -313,14 +315,19 @@ mod tests {
 
 		tunnel.begin_accept_session(GShellId::new(31)).expect("handshake should begin");
 		wait_for_connected(&event_rx, GShellId::new(31));
+		let resize = GNativeInputEvent::Resize {
+			columns: 80,
+			rows: 24,
+			content_width_px: 960,
+			content_height_px: 576,
+			cell_width_px: 12,
+			cell_height_px: 24,
+		};
 		tunnel
-			.send_input(GShellId::new(31), GNativeInputEvent::Paste("hello".to_string()))
+			.send_input(GShellId::new(31), resize.clone())
 			.expect("host should send input");
 
-		assert_eq!(
-			app.join().expect("app thread should join"),
-			Some(GNativeInputEvent::Paste("hello".to_string()))
-		);
+		assert_eq!(app.join().expect("app thread should join"), Some(resize));
 	}
 
 	#[test]
