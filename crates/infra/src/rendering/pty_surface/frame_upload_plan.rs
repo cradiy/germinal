@@ -50,8 +50,12 @@ impl<'a> WgpuTerminalFrameUploadPlan<'a> {
 		&self,
 		context: WgpuTerminalUploadContext<'_, 'a>,
 	) -> WgpuTerminalUploadedFrame<'a> {
-		let uploaded_buffers =
-			context.buffer_uploader.upload_bytes(context.device, context.queue, self.vertex_upload);
+		let uploaded_buffers = context.buffer_uploader.upload_bytes(
+			context.device,
+			context.queue,
+			self.target_id,
+			self.vertex_upload,
+		);
 
 		let viewport_factory = WgpuViewportBindGroupFactory::new();
 

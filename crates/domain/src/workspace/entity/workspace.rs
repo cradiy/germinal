@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
 	aggregate_root::AggregateRoot,
-	gshell::vo::gshell_id::GShellId,
-	workspace::{entity::workspace_tab::WorkspaceTab, vo::pane_split_direction::PaneSplitDirection},
+	workspace::{
+		entity::workspace_tab::WorkspaceTab,
+		vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection},
+	},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,8 +15,8 @@ pub struct Workspace {
 }
 
 impl Workspace {
-	pub fn new(focused_gshell: GShellId) -> Self {
-		Self { active_tab_index: 0, tabs: vec![WorkspaceTab::new(focused_gshell)] }
+	pub fn new(focused_pane: PaneId) -> Self {
+		Self { active_tab_index: 0, tabs: vec![WorkspaceTab::new(focused_pane)] }
 	}
 
 	pub fn from_tabs(tabs: Vec<WorkspaceTab>, active_tab_index: usize) -> Self {
@@ -24,15 +26,21 @@ impl Workspace {
 		Self { active_tab_index, tabs }
 	}
 
-	pub fn main() -> Self { Self::new(GShellId::new(0)) }
+	pub fn main() -> Self { Self::new(PaneId::new(0)) }
 
-	pub fn focused_gshell(&self) -> GShellId { self.active_tab().focused_gshell() }
-
-	pub fn set_focused_gshell(&mut self, gshell_id: GShellId) -> bool {
-		self.active_tab_mut().focus_gshell(gshell_id)
+	pub fn two_pane() -> Self {
+		let mut workspace = Self::main();
+		workspace.split_focused_pane(PaneSplitDirection::Horizontal);
+		workspace
 	}
 
-	pub fn split_focused_pane(&mut self, direction: PaneSplitDirection) -> GShellId {
+	pub fn focused_pane(&self) -> PaneId { self.active_tab().focused_pane() }
+
+	pub fn set_focused_pane(&mut self, pane_id: PaneId) -> bool {
+		self.active_tab_mut().focus_pane(pane_id)
+	}
+
+	pub fn split_focused_pane(&mut self, direction: PaneSplitDirection) -> PaneId {
 		self.active_tab_mut().split_focused_pane(direction)
 	}
 
@@ -54,15 +62,13 @@ impl AggregateRoot for Workspace {}
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{
-		gshell::vo::gshell_id::GShellId, workspace::vo::pane_split_direction::PaneSplitDirection,
-	};
+	use crate::workspace::vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection};
 
 	#[test]
 	fn main_workspace_starts_with_single_focused_pane() {
 		let workspace = Workspace::main();
 
-		assert_eq!(workspace.focused_gshell(), GShellId::new(0));
+		assert_eq!(workspace.focused_pane(), PaneId::new(0));
 		assert_eq!(workspace.active_tab().pane_count(), 1);
 	}
 
@@ -72,18 +78,18 @@ mod tests {
 
 		let new_pane = workspace.split_focused_pane(PaneSplitDirection::Horizontal);
 
-		assert_eq!(new_pane, GShellId::new(1));
-		assert_eq!(workspace.focused_gshell(), new_pane);
+		assert_eq!(new_pane, PaneId::new(1));
+		assert_eq!(workspace.focused_pane(), new_pane);
 		assert_eq!(workspace.active_tab().pane_count(), 2);
-		assert!(workspace.active_tab().contains_gshell(GShellId::new(0)));
-		assert!(workspace.active_tab().contains_gshell(GShellId::new(1)));
+		assert!(workspace.active_tab().contains_pane(PaneId::new(0)));
+		assert!(workspace.active_tab().contains_pane(PaneId::new(1)));
 	}
 
 	#[test]
 	fn set_focused_pane_rejects_unknown_pane() {
 		let mut workspace = Workspace::main();
 
-		assert!(!workspace.set_focused_gshell(GShellId::new(7)));
-		assert_eq!(workspace.focused_gshell(), GShellId::new(0));
+		assert!(!workspace.set_focused_pane(PaneId::new(7)));
+		assert_eq!(workspace.focused_pane(), PaneId::new(0));
 	}
 }

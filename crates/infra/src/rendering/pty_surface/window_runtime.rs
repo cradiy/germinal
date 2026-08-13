@@ -1,5 +1,5 @@
 use std::{
-	collections::VecDeque,
+	collections::{HashMap, VecDeque},
 	env,
 	sync::Arc,
 	time::{Duration, Instant},
@@ -11,8 +11,10 @@ use germinal_ports::{
 		scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
 		window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
 	},
-	rendering::{surface_snapshot::RenderSurfaceSnapshot, window_runtime::ITerminalWindowRuntime},
-	seq::Seq,
+	rendering::{
+		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+		window_runtime::ITerminalWindowRuntime, workspace_layout::RenderSurfacePlacement,
+	},
 };
 use thiserror::Error;
 use tracing::info;
@@ -30,11 +32,11 @@ use crate::rendering::pty_surface::{
 	frame_renderer::WgpuTerminalFrameRenderer,
 	pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
 	pipeline_spec::WgpuTerminalPipelineSpec,
-	render_target_plan::WgpuTerminalRenderTargetPlan,
+	render_target_plan::{WgpuTerminalLoadOp, WgpuTerminalRenderTargetPlan},
 	renderer_backend::WgpuRendererConfig,
 	surface_frame_presenter::{
 		WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
-		WgpuTerminalSurfacePresentInput,
+		WgpuTerminalWorkspacePresentInput, WgpuTerminalWorkspaceSurface,
 	},
 	video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
 	video_surface_registry::WgpuVideoSurfaceRegistry,
@@ -81,12 +83,13 @@ pub struct WgpuTerminalWindowRuntime {
 	pipeline:       WgpuTerminalPipeline,
 	presenter:      WgpuTerminalSurfaceFramePresenter,
 
-	surface_snapshot: RenderSurfaceSnapshot,
-	size_info:        TerminalSizeInfo,
-	profile:          TerminalProfile,
-	needs_redraw:     bool,
-	ui_stats:         WindowUiStats,
-	perf:             WgpuTerminalRenderPerf,
+	surface_snapshots: HashMap<RenderTargetId, RenderSurfaceSnapshot>,
+	workspace_layout:  Vec<RenderSurfacePlacement>,
+	size_info:         TerminalSizeInfo,
+	profile:           TerminalProfile,
+	needs_redraw:      bool,
+	ui_stats:          WindowUiStats,
+	perf:              WgpuTerminalRenderPerf,
 }
 
 #[derive(Debug, Clone)]
@@ -167,15 +170,6 @@ impl WgpuTerminalWindowRuntime {
 		let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);
 		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer);
 
-		let surface_snapshot = RenderSurfaceSnapshot {
-			target_id:      germinal_ports::rendering::render_target_id::RenderTargetId::new(0),
-			latest_seq:     Seq::ZERO,
-			rows:           Vec::new(),
-			video_surfaces: Vec::new(),
-			dirty_rows:     Vec::new(),
-			cursor:         None,
-		};
-
 		Ok(Self {
 			window,
 			base_title,
@@ -185,7 +179,8 @@ impl WgpuTerminalWindowRuntime {
 			surface_config,
 			pipeline,
 			presenter,
-			surface_snapshot,
+			surface_snapshots: HashMap::new(),
+			workspace_layout: Vec::new(),
 			size_info,
 			profile,
 			needs_redraw: false,
@@ -198,10 +193,6 @@ impl WgpuTerminalWindowRuntime {
 
 	pub fn window_size(&self) -> winit::dpi::PhysicalSize<u32> { self.window.inner_size() }
 
-	pub fn render_target_id(&self) -> germinal_ports::rendering::render_target_id::RenderTargetId {
-		self.surface_snapshot.target_id
-	}
-
 	pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry {
 		self.presenter.frame_renderer().video_surface_registry()
 	}
@@ -212,30 +203,39 @@ impl WgpuTerminalWindowRuntime {
 		id: &str,
 		frame: &WgpuVideoSurfaceNv12DmaBufFrame,
 	) -> Result<bool, WindowRuntimeError> {
-		if self.video_surface_registry().registration(self.render_target_id(), id).is_none() {
-			return Ok(false);
-		}
+		let targets = self
+			.surface_snapshots
+			.values()
+			.filter(|snapshot| snapshot.video_surfaces.iter().any(|surface| surface.id == id))
+			.map(|snapshot| snapshot.target_id)
+			.collect::<Vec<_>>();
+		let mut replaced_any = false;
 
-		let imported = import_nv12_dmabuf_frame(&self.device, frame)
-			.map_err(|source| WindowRuntimeError::ImportVideoSurfaceFrame { source })?;
-		let replaced =
-			self.video_surface_registry().replace_nv12_frame(self.render_target_id(), id, imported);
-		if !replaced {
-			return Ok(false);
+		for target_id in targets {
+			let imported = import_nv12_dmabuf_frame(&self.device, frame)
+				.map_err(|source| WindowRuntimeError::ImportVideoSurfaceFrame { source })?;
+			replaced_any |= self.video_surface_registry().replace_nv12_frame(target_id, id, imported);
 		}
-		self.request_window_redraw();
-		Ok(true)
+		if replaced_any {
+			self.request_window_redraw();
+		}
+		Ok(replaced_any)
 	}
 
 	pub fn request_window_redraw(&self) { self.window.request_redraw(); }
 
 	pub fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
-		self.surface_snapshot = snapshot;
+		self.surface_snapshots.insert(snapshot.target_id, snapshot);
 		self.request_redraw();
 	}
 
-	pub fn surface_snapshot_mut(&mut self) -> &mut RenderSurfaceSnapshot {
-		&mut self.surface_snapshot
+	pub fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot> {
+		self.surface_snapshots.values_mut().collect()
+	}
+
+	pub fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+		self.workspace_layout = placements;
+		self.request_redraw();
 	}
 
 	pub fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
@@ -266,6 +266,13 @@ impl WgpuTerminalWindowRuntime {
 		self.size_info
 	}
 
+	pub fn terminal_size_info_for_window_size(
+		&self,
+		window_size: TerminalWindowSize,
+	) -> TerminalSizeInfo {
+		self.size_info_for_window_size(window_size)
+	}
+
 	fn size_info_for_window_size(&self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		self.profile.size_info_for_window_metrics(TerminalWindowMetrics::new(
 			window_size,
@@ -274,20 +281,37 @@ impl WgpuTerminalWindowRuntime {
 	}
 
 	pub fn render(&mut self) {
-		let size_info = self.terminal_size_info();
-		let render_target_plan = WgpuTerminalRenderTargetPlan::from_size_info(size_info);
-		let renderer_config = WgpuRendererConfig::from(size_info);
-		let row_count = self.surface_snapshot.rows.len() as u64;
-		let run_count = self.surface_snapshot.rows.iter().map(|row| row.runs.len() as u64).sum();
+		let surfaces = self
+			.workspace_layout
+			.iter()
+			.filter_map(|placement| {
+				let surface_snapshot = self.surface_snapshots.get(&placement.target_id)?;
+				let size_info = self.terminal_size_info_for_window_size(placement.window_size());
+				Some(WgpuTerminalWorkspaceSurface {
+					render_target_plan: WgpuTerminalRenderTargetPlan::new(
+						placement.width_px,
+						placement.height_px,
+					)
+					.with_origin(placement.x_px, placement.y_px)
+					.with_load_op(WgpuTerminalLoadOp::Load),
+					surface_snapshot,
+					renderer_config: WgpuRendererConfig::from(size_info),
+				})
+			})
+			.collect::<Vec<_>>();
+		let row_count = surfaces.iter().map(|surface| surface.surface_snapshot.rows.len() as u64).sum();
+		let run_count = surfaces
+			.iter()
+			.flat_map(|surface| &surface.surface_snapshot.rows)
+			.map(|row| row.runs.len() as u64)
+			.sum();
 
-		match self.presenter.present_surface_frame(WgpuTerminalSurfacePresentInput {
+		match self.presenter.present_workspace_frame(WgpuTerminalWorkspacePresentInput {
 			surface: &self.surface,
 			device: &self.device,
 			queue: &self.queue,
-			render_target_plan,
 			pipeline: &self.pipeline,
-			surface_snapshot: &self.surface_snapshot,
-			renderer_config,
+			surfaces: &surfaces,
 		}) {
 			Ok(result) => {
 				if let Some(title) = self.ui_stats.record_presented_frame(Instant::now(), &self.base_title)
@@ -492,7 +516,7 @@ impl WgpuTerminalRenderPerf {
 		&mut self,
 		row_count: u64,
 		run_count: u64,
-		result: &crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentResult,
+		result: &crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalWorkspaceFramePresentResult,
 	) {
 		if !self.logging_enabled {
 			return;
@@ -501,33 +525,33 @@ impl WgpuTerminalRenderPerf {
 		self.frame_count += 1;
 		self.row_count += row_count;
 		self.run_count += run_count;
-		self.quad_count += result.render_result.quad_count as u64;
-		self.vertex_count += result.render_result.vertex_count as u64;
-		self.glyph_count += result.render_result.glyph_count as u64;
-		self.prepare_time += result.render_result.timings.prepare;
-		self.prepare_render_surface += result.render_result.timings.prepared_frame.render_surface;
-		self.prepare_quads_clone += result.render_result.timings.prepared_frame.quads_clone;
-		self.prepare_vertex_build += result.render_result.timings.prepared_frame.vertex_build;
-		self.prepare_atlas_build += result.render_result.timings.prepared_frame.atlas_build;
-		self.prepare_uv_map += result.render_result.timings.prepared_frame.uv_map;
-		self.prepare_upload_bytes += result.render_result.timings.prepared_frame.upload_bytes;
-		self.upload_time += result.render_result.timings.upload;
-		self.encode_time += result.render_result.timings.encode;
-		self.render_total += result.render_result.timings.total;
+		for render_result in &result.render_results {
+			self.quad_count += render_result.quad_count as u64;
+			self.vertex_count += render_result.vertex_count as u64;
+			self.glyph_count += render_result.glyph_count as u64;
+			self.prepare_time += render_result.timings.prepare;
+			self.prepare_render_surface += render_result.timings.prepared_frame.render_surface;
+			self.prepare_quads_clone += render_result.timings.prepared_frame.quads_clone;
+			self.prepare_vertex_build += render_result.timings.prepared_frame.vertex_build;
+			self.prepare_atlas_build += render_result.timings.prepared_frame.atlas_build;
+			self.prepare_uv_map += render_result.timings.prepared_frame.uv_map;
+			self.prepare_upload_bytes += render_result.timings.prepared_frame.upload_bytes;
+			self.upload_time += render_result.timings.upload;
+			self.encode_time += render_result.timings.encode;
+			self.render_total += render_result.timings.total;
+			self.prepare_max = self.prepare_max.max(render_result.timings.prepare);
+			self.upload_max = self.upload_max.max(render_result.timings.upload);
+			self.render_max = self.render_max.max(render_result.timings.total);
+			if render_result.glyph_atlas_cpu_cache_hit {
+				self.glyph_atlas_cpu_cache_hits += 1;
+			}
+			if render_result.glyph_atlas_gpu_cache_hit {
+				self.glyph_atlas_gpu_cache_hits += 1;
+			}
+		}
 		self.present_total += result.timings.render_to_view;
 		self.publish_total += result.timings.total;
-		self.prepare_max = self.prepare_max.max(result.render_result.timings.prepare);
-		self.upload_max = self.upload_max.max(result.render_result.timings.upload);
-		self.render_max = self.render_max.max(result.render_result.timings.total);
 		self.present_max = self.present_max.max(result.timings.total);
-
-		if result.render_result.glyph_atlas_cpu_cache_hit {
-			self.glyph_atlas_cpu_cache_hits += 1;
-		}
-
-		if result.render_result.glyph_atlas_gpu_cache_hit {
-			self.glyph_atlas_gpu_cache_hits += 1;
-		}
 
 		self.maybe_log();
 	}
@@ -654,12 +678,23 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 		WgpuTerminalWindowRuntime::set_surface_snapshot(self, snapshot);
 	}
 
-	fn surface_snapshot_mut(&mut self) -> &mut RenderSurfaceSnapshot {
-		WgpuTerminalWindowRuntime::surface_snapshot_mut(self)
+	fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot> {
+		WgpuTerminalWindowRuntime::surface_snapshots_mut(self)
+	}
+
+	fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+		WgpuTerminalWindowRuntime::set_workspace_layout(self, placements);
 	}
 
 	fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		WgpuTerminalWindowRuntime::resize_surface_size_info(self, window_size)
+	}
+
+	fn terminal_size_info_for_window_size(
+		&self,
+		window_size: TerminalWindowSize,
+	) -> TerminalSizeInfo {
+		WgpuTerminalWindowRuntime::terminal_size_info_for_window_size(self, window_size)
 	}
 
 	fn take_redraw_request(&mut self) -> bool { WgpuTerminalWindowRuntime::take_redraw_request(self) }

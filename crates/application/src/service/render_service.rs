@@ -1,7 +1,10 @@
-use std::sync::{
-	Arc,
-	atomic::{AtomicBool, Ordering},
-	mpsc::{self, Receiver, Sender, TryRecvError},
+use std::{
+	collections::HashMap,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+		mpsc::{self, Receiver, Sender, TryRecvError},
+	},
 };
 
 use germinal_ports::{
@@ -9,6 +12,7 @@ use germinal_ports::{
 	rendering::{
 		render_target_id::RenderTargetId,
 		surface_snapshot::RenderSurfaceSnapshot,
+		workspace_layout::RenderSurfacePlacement,
 		window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
 	},
 	service::render_service::IRenderService,
@@ -39,20 +43,27 @@ impl RenderServiceState {
 		}
 	}
 
-	fn take_latest_surface_snapshot(&self) -> Option<RenderSurfaceSnapshot> {
+	fn take_latest_surface_snapshots(&self) -> Vec<RenderSurfaceSnapshot> {
 		self.snapshot_wake_pending.store(false, Ordering::Release);
 
-		let mut latest_snapshot = None;
+		let mut latest_by_target = HashMap::<RenderTargetId, RenderSurfaceSnapshot>::new();
 
 		loop {
 			match self.surface_snapshot_rx.try_recv() {
-				Ok(snapshot) => latest_snapshot = Some(snapshot),
+				Ok(snapshot) => {
+					let replace = latest_by_target
+						.get(&snapshot.target_id)
+						.is_none_or(|current| snapshot.latest_seq >= current.latest_seq);
+					if replace {
+						latest_by_target.insert(snapshot.target_id, snapshot);
+					}
+				}
 				Err(TryRecvError::Empty) => break,
 				Err(TryRecvError::Disconnected) => break,
 			}
 		}
 
-		latest_snapshot
+		latest_by_target.into_values().collect()
 	}
 
 	fn set_window_focused(&mut self, focused: bool) -> bool {
@@ -106,26 +117,27 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 	}
 
 	fn consume_latest_terminal_snapshot(&mut self) {
-		let snapshot = {
+		let snapshots = {
 			let state: &RenderServiceState = self.prj_ref().as_ref();
-			state.take_latest_surface_snapshot()
+			state.take_latest_surface_snapshots()
 		};
 
-		let Some(snapshot) = snapshot else {
+		if snapshots.is_empty() {
 			return;
-		};
-
-		let mut snapshot = snapshot;
-		{
-			let state: &RenderServiceState = self.prj_ref().as_ref();
-			state.apply_cursor_focus(&mut snapshot);
 		}
 
-		self
-			.prj_ref_mut()
-			.window_runtime_mut()
-			.expect("window runtime must be initialized before use")
-			.set_surface_snapshot(snapshot);
+		for mut snapshot in snapshots {
+			{
+				let state: &RenderServiceState = self.prj_ref().as_ref();
+				state.apply_cursor_focus(&mut snapshot);
+			}
+
+			self
+				.prj_ref_mut()
+				.window_runtime_mut()
+				.expect("window runtime must be initialized before use")
+				.set_surface_snapshot(snapshot);
+		}
 
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
 		state.redraw_pending = true;
@@ -137,6 +149,26 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 			.window_runtime()
 			.expect("window runtime must be initialized before use")
 			.terminal_size_info()
+	}
+
+	fn terminal_size_info_for_surface(
+		&self,
+		placement: RenderSurfacePlacement,
+	) -> TerminalSizeInfo {
+		self
+			.prj_ref()
+			.window_runtime()
+			.expect("window runtime must be initialized before use")
+			.terminal_size_info_for_window_size(placement.window_size())
+	}
+
+	fn set_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+		self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use")
+			.set_workspace_layout(placements);
+		self.prj_ref_mut().as_mut().redraw_pending = true;
 	}
 
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
@@ -219,12 +251,64 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 
 	let runtime = deps.window_runtime_mut().expect("window runtime must be initialized before use");
 
-	let snapshot = runtime.surface_snapshot_mut();
-	let target_id = snapshot.target_id;
-
-	if let Some(cursor) = snapshot.cursor.as_mut() {
-		cursor.focused = window_focused && focused_render_target == Some(target_id);
+	for snapshot in runtime.surface_snapshots_mut() {
+		let target_id = snapshot.target_id;
+		if let Some(cursor) = snapshot.cursor.as_mut() {
+			cursor.focused = window_focused && focused_render_target == Some(target_id);
+		}
 	}
 
 	deps.as_mut().redraw_pending = true;
+}
+
+#[cfg(test)]
+mod tests {
+	use germinal_ports::{
+		rendering::{
+			render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+		},
+		seq::Seq,
+	};
+
+	use super::RenderServiceState;
+
+	fn snapshot(target: u64, seq: u64) -> RenderSurfaceSnapshot {
+		RenderSurfaceSnapshot {
+			target_id: RenderTargetId::new(target),
+			latest_seq: Seq::new(seq),
+			rows: Vec::new(),
+			video_surfaces: Vec::new(),
+			dirty_rows: Vec::new(),
+			cursor: None,
+		}
+	}
+
+	#[test]
+	fn draining_snapshots_keeps_latest_update_for_every_target() {
+		let state = RenderServiceState::new();
+		state.surface_snapshot_tx.send(snapshot(1, 1)).expect("first target snapshot");
+		state.surface_snapshot_tx.send(snapshot(2, 4)).expect("second target snapshot");
+		state.surface_snapshot_tx.send(snapshot(1, 3)).expect("newer first target snapshot");
+
+		let mut snapshots = state.take_latest_surface_snapshots();
+		snapshots.sort_by_key(|snapshot| snapshot.target_id.value());
+
+		assert_eq!(snapshots.len(), 2);
+		assert_eq!(snapshots[0].target_id, RenderTargetId::new(1));
+		assert_eq!(snapshots[0].latest_seq, Seq::new(3));
+		assert_eq!(snapshots[1].target_id, RenderTargetId::new(2));
+		assert_eq!(snapshots[1].latest_seq, Seq::new(4));
+	}
+
+	#[test]
+	fn draining_snapshots_does_not_replace_newer_seq_with_stale_update() {
+		let state = RenderServiceState::new();
+		state.surface_snapshot_tx.send(snapshot(7, 5)).expect("new snapshot");
+		state.surface_snapshot_tx.send(snapshot(7, 2)).expect("stale snapshot");
+
+		let snapshots = state.take_latest_surface_snapshots();
+
+		assert_eq!(snapshots.len(), 1);
+		assert_eq!(snapshots[0].latest_seq, Seq::new(5));
+	}
 }

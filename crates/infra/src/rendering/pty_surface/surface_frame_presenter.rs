@@ -22,10 +22,10 @@ impl WgpuTerminalSurfaceFramePresenter {
 
 	pub fn frame_renderer(&self) -> &WgpuTerminalFrameRenderer { &self.frame_renderer }
 
-	pub fn present_surface_frame(
+	pub fn present_workspace_frame(
 		&self,
-		input: WgpuTerminalSurfacePresentInput<'_, '_>,
-	) -> Result<WgpuTerminalSurfaceFramePresentResult, WgpuTerminalSurfaceFramePresentError> {
+		input: WgpuTerminalWorkspacePresentInput<'_, '_>,
+	) -> Result<WgpuTerminalWorkspaceFramePresentResult, WgpuTerminalSurfaceFramePresentError> {
 		let total_started_at = Instant::now();
 
 		let acquire_started_at = Instant::now();
@@ -60,19 +60,26 @@ impl WgpuTerminalSurfaceFramePresenter {
 				label: Some("germinal.terminal.command_encoder"),
 			});
 		let create_command_encoder = create_encoder_started_at.elapsed();
+		clear_target_view(&mut command_encoder, &target_view);
 
 		let render_to_view_started_at = Instant::now();
-		let render_result = self.frame_renderer.render_to_view(
-			WgpuTerminalGpuContext { device: input.device, queue: input.queue },
-			WgpuTerminalRenderView {
-				command_encoder:    &mut command_encoder,
-				target_view:        &target_view,
-				render_target_plan: input.render_target_plan,
-				pipeline:           input.pipeline,
-				surface_snapshot:   input.surface_snapshot,
-				renderer_config:    input.renderer_config,
-			},
-		);
+		let render_results = input
+			.surfaces
+			.iter()
+			.map(|surface| {
+				self.frame_renderer.render_to_view(
+					WgpuTerminalGpuContext { device: input.device, queue: input.queue },
+					WgpuTerminalRenderView {
+						command_encoder:    &mut command_encoder,
+						target_view:        &target_view,
+						render_target_plan: surface.render_target_plan,
+						pipeline:           input.pipeline,
+						surface_snapshot:   surface.surface_snapshot,
+						renderer_config:    surface.renderer_config,
+					},
+				)
+			})
+			.collect();
 		let render_to_view = render_to_view_started_at.elapsed();
 
 		let submit_started_at = Instant::now();
@@ -83,8 +90,8 @@ impl WgpuTerminalSurfaceFramePresenter {
 		input.queue.present(surface_texture);
 		let present = present_started_at.elapsed();
 
-		Ok(WgpuTerminalSurfaceFramePresentResult {
-			render_result,
+		Ok(WgpuTerminalWorkspaceFramePresentResult {
+			render_results,
 			acquired_surface_frame: true,
 			submitted: true,
 			presented: true,
@@ -101,12 +108,38 @@ impl WgpuTerminalSurfaceFramePresenter {
 	}
 }
 
-pub struct WgpuTerminalSurfacePresentInput<'a, 'window> {
-	pub surface:            &'a wgpu::Surface<'window>,
-	pub device:             &'a wgpu::Device,
-	pub queue:              &'a wgpu::Queue,
+fn clear_target_view(command_encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+	let color_attachment = Some(wgpu::RenderPassColorAttachment {
+		view: target_view,
+		depth_slice: None,
+		resolve_target: None,
+		ops: wgpu::Operations {
+			load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+			store: wgpu::StoreOp::Store,
+		},
+	});
+	let color_attachments = [color_attachment];
+	let render_pass = command_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+		label: Some("germinal.workspace.clear_pass"),
+		color_attachments: &color_attachments,
+		depth_stencil_attachment: None,
+		timestamp_writes: None,
+		occlusion_query_set: None,
+		multiview_mask: None,
+	});
+	drop(render_pass);
+}
+
+pub struct WgpuTerminalWorkspacePresentInput<'a, 'window> {
+	pub surface:  &'a wgpu::Surface<'window>,
+	pub device:   &'a wgpu::Device,
+	pub queue:    &'a wgpu::Queue,
+	pub pipeline: &'a WgpuTerminalPipeline,
+	pub surfaces: &'a [WgpuTerminalWorkspaceSurface<'a>],
+}
+
+pub struct WgpuTerminalWorkspaceSurface<'a> {
 	pub render_target_plan: WgpuTerminalRenderTargetPlan,
-	pub pipeline:           &'a WgpuTerminalPipeline,
 	pub surface_snapshot:   &'a RenderSurfaceSnapshot,
 	pub renderer_config:    WgpuRendererConfig,
 }
@@ -126,21 +159,23 @@ pub struct WgpuTerminalSurfaceFrameTimings {
 	pub total:                   Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WgpuTerminalSurfaceFramePresentResult {
-	pub render_result:          WgpuTerminalFrameRenderResult,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WgpuTerminalWorkspaceFramePresentResult {
+	pub render_results:         Vec<WgpuTerminalFrameRenderResult>,
 	pub acquired_surface_frame: bool,
 	pub submitted:              bool,
 	pub presented:              bool,
 	pub timings:                WgpuTerminalSurfaceFrameTimings,
 }
 
-impl WgpuTerminalSurfaceFramePresentResult {
+impl WgpuTerminalWorkspaceFramePresentResult {
 	pub fn completed(&self) -> bool {
 		self.acquired_surface_frame && self.submitted && self.presented
 	}
 
-	pub fn rendered(&self) -> bool { self.render_result.rendered() }
+	pub fn rendered(&self) -> bool {
+		self.render_results.iter().any(WgpuTerminalFrameRenderResult::rendered)
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

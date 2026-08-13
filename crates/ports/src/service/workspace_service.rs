@@ -1,7 +1,11 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 use thiserror::Error;
 
-use crate::repository::RepositoryError;
+use crate::{
+	pty_host::window_size::TerminalWindowSize,
+	rendering::workspace_layout::RenderSurfacePlacement,
+	repository::RepositoryError,
+};
 
 #[derive(Debug, Error)]
 pub enum WorkspaceServiceError {
@@ -16,6 +20,11 @@ pub enum WorkspaceServiceError {
 
 pub trait IWorkspaceService {
 	fn focused_gshell(&self) -> GShellId;
+	fn visible_gshells(&self) -> Vec<GShellId>;
+	fn workspace_render_layout(
+		&self,
+		window_size: TerminalWindowSize,
+	) -> Vec<RenderSurfacePlacement>;
 	fn restore_workspace(&self) -> Result<(), WorkspaceServiceError>;
 	fn persist_workspace(&self) -> Result<(), WorkspaceServiceError>;
 }

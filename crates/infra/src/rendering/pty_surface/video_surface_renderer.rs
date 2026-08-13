@@ -161,6 +161,7 @@ impl WgpuVideoSurfaceRenderer {
 				multiview_mask:           None,
 			});
 
+			render_target_plan.apply_viewport(&mut render_pass);
 			render_pass.set_pipeline(&pipeline.render_pipeline);
 			render_pass.set_vertex_buffer(0, buffer.slice(..));
 

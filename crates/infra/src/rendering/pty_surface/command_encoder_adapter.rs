@@ -55,6 +55,7 @@ impl WgpuTerminalCommandEncoderAdapter {
 		});
 
 		let frame_encoder = WgpuTerminalFrameEncoder::new();
+		render_target_plan.apply_viewport(&mut render_pass);
 
 		let encode_result =
 			frame_encoder.encode_render_pass(&mut render_pass, pipeline, uploaded_frame);

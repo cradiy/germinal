@@ -13,7 +13,10 @@ use germinal_application::service::{
 	render_service::RenderServiceState, worker_service::WorkerServiceState,
 	workspace_service::WorkspaceServiceState,
 };
-use germinal_domain::workspace::entity::workspace::Workspace;
+use germinal_domain::{
+	gshell::vo::gshell_id::GShellId,
+	workspace::entity::workspace::Workspace,
+};
 use germinal_infra::{
 	gnative::gst_video_player_bridge::GstVideoPlayerBridge,
 	pty::PlatformPtyBackend,
@@ -32,7 +35,7 @@ use germinal_ports::{
 			WindowInputNamedKey,
 		},
 	},
-	pty_host::window_size::TerminalWindowSize,
+	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
 	rendering::render_target_id::RenderTargetId,
 	service::{
 		gnative_service::IGNativeService, gshell_service::IGShellService,
@@ -79,6 +82,14 @@ impl App {
 		runtime_event_proxy: EventLoopProxy<RuntimeEvent>,
 		config: GerminalConfig,
 	) -> AppResult<Self> {
+		Self::new_with_workspace(runtime_event_proxy, config, Workspace::main())
+	}
+
+	pub fn new_with_workspace(
+		runtime_event_proxy: EventLoopProxy<RuntimeEvent>,
+		config: GerminalConfig,
+		workspace: Workspace,
+	) -> AppResult<Self> {
 		let runtime_event_dispatcher = AppRuntimeEventDispatcher { proxy: runtime_event_proxy };
 		let media_dispatcher = {
 			let runtime_event_dispatcher = runtime_event_dispatcher.clone();
@@ -91,7 +102,7 @@ impl App {
 		let window_title = config.window.title.clone();
 
 		let app = Self {
-			workspace_service_state: WorkspaceServiceState::new(),
+			workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
 			gshell_service_state: GShellServiceState::new(),
 			worker_service_state: WorkerServiceState::new(),
 			render_service_state: RenderServiceState::new(),
@@ -157,6 +168,48 @@ impl App {
 
 	fn current_window_id(&self) -> Option<WindowId> { self.render_window_id }
 
+	fn ensure_workspace_gshells(&mut self) {
+		let window_size = self.current_terminal_size_info().window_size();
+		let placements = self.workspace_render_layout(window_size);
+		self.set_workspace_render_layout(placements.clone());
+
+		let surface_snapshot_tx = self.surface_snapshot_sender();
+		let snapshot_wake_pending = self.snapshot_wake_pending();
+		for placement in placements {
+			let size_info = self.terminal_size_info_for_surface(placement);
+			self.ensure_gshell(
+				GShellId::new(placement.target_id.value()),
+				size_info.pty_size(),
+				size_info.grid_size(),
+				surface_snapshot_tx.clone(),
+				std::sync::Arc::clone(&snapshot_wake_pending),
+			);
+		}
+	}
+
+	fn resize_workspace_gshells(&mut self, window_size: TerminalWindowSize) {
+		let placements = self.workspace_render_layout(window_size);
+		self.set_workspace_render_layout(placements.clone());
+
+		for placement in placements {
+			let size_info = self.terminal_size_info_for_surface(placement);
+			self.resize_gshell(
+				GShellId::new(placement.target_id.value()),
+				size_info.pty_size(),
+				size_info.grid_size(),
+			);
+		}
+	}
+
+	fn current_gshell_size_info(&self, gshell_id: GShellId) -> Option<TerminalSizeInfo> {
+		let window_size = self.current_terminal_size_info().window_size();
+		self
+			.workspace_render_layout(window_size)
+			.into_iter()
+			.find(|placement| placement.target_id.value() == gshell_id.value())
+			.map(|placement| self.terminal_size_info_for_surface(placement))
+	}
+
 	fn try_handle_paste_shortcut(
 		&mut self,
 		state: WindowInputElementState,
@@ -211,27 +264,14 @@ impl App {
 
 impl ApplicationHandler<RuntimeEvent> for App {
 	fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-		let focused_gshell = self.focused_gshell();
-
 		if let Err(error) = self.ensure_window_runtime(event_loop) {
 			error!(error = %error, "failed to initialize Germinal window runtime");
 			self.exit_and_persist(event_loop);
 			return;
 		}
 
-		let size_info = self.current_terminal_size_info();
-		let pty_size = size_info.pty_size();
-		let term_size = size_info.grid_size();
-		let surface_snapshot_tx = self.surface_snapshot_sender();
-		let snapshot_wake_pending = self.snapshot_wake_pending();
-
-		self.ensure_gshell(
-			focused_gshell,
-			pty_size,
-			term_size,
-			surface_snapshot_tx,
-			snapshot_wake_pending,
-		);
+		self.ensure_workspace_gshells();
+		let focused_gshell = self.focused_gshell();
 		self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
 		self.prepare_render_backend();
 	}
@@ -249,8 +289,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				let gshell_id = accepted.gshell_id;
 				self.activate_gnative_session(accepted);
 				self.enter_gnative_mode(gshell_id);
-				let size_info = self.current_terminal_size_info();
-				self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
+				if let Some(size_info) = self.current_gshell_size_info(gshell_id) {
+					self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
+				}
 			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnectionFailed {
 				gshell_id,
@@ -306,7 +347,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 			WindowEvent::Resized(size) => {
 				let size_info = self
 					.resize_window_size_info(TerminalWindowSize::new(size.width.max(1), size.height.max(1)));
-				self.resize_gshell(self.focused_gshell(), size_info.pty_size(), size_info.grid_size());
+				self.resize_workspace_gshells(size_info.window_size());
 			}
 			WindowEvent::Focused(focused) => {
 				self.set_window_focused(focused);

@@ -8,10 +8,11 @@ title: Germinal Domain Design
 
 `GShell` is the core domain of Germinal.
 
-A `GShell` is the main runtime unit of Germinal. It starts in `PtyHostMode`, switches to `GNativeMode` when a native structured application is requested, and returns to `PtyHostMode` after the native session exits.
+A `GShell` is the main runtime unit of Germinal. It starts in `PtyHostMode`, enters a non-blocking connecting state when a native structured application is requested, switches to `GNativeMode` after the tunnel accepts the session, and returns to `PtyHostMode` after the native session exits or connection fails.
 
 ```text
-PtyHostMode -> GNativeMode -> PtyHostMode
+PtyHostMode -> GNativeConnectingMode -> GNativeMode -> PtyHostMode
+                         \-> connection failed -> PtyHostMode
 ```
 
 ---
@@ -22,7 +23,7 @@ PtyHostMode -> GNativeMode -> PtyHostMode
 
 Workspace organizes where GShell instances appear.
 
-It manages visible structure and focus but does not own runtime behavior.
+It owns the pane tree, visible structure, split direction, and focused `PaneId`, but does not own GShell runtime behavior. The application layer binds visible panes to GShell instances and turns the pane tree into pixel placements for rendering.
 
 ---
 
@@ -30,7 +31,7 @@ It manages visible structure and focus but does not own runtime behavior.
 
 Rendering defines what Germinal wants to draw.
 
-It does not define how drawing is executed.
+It does not define how drawing is executed. A window frame may contain multiple render targets; infrastructure composes them into one swapchain image using target-specific viewport and scissor rectangles.
 
 ---
 

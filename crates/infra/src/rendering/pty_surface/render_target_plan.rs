@@ -2,6 +2,8 @@ use germinal_ports::pty_host::{size_info::TerminalSizeInfo, window_size::Termina
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WgpuTerminalRenderTargetPlan {
+	pub x_px:        u32,
+	pub y_px:        u32,
 	pub width_px:    u32,
 	pub height_px:   u32,
 	pub clear_color: WgpuTerminalClearColor,
@@ -12,12 +14,20 @@ pub struct WgpuTerminalRenderTargetPlan {
 impl WgpuTerminalRenderTargetPlan {
 	pub fn new(width_px: u32, height_px: u32) -> Self {
 		Self {
+			x_px: 0,
+			y_px: 0,
 			width_px,
 			height_px,
 			clear_color: WgpuTerminalClearColor::default(),
 			load_op: WgpuTerminalLoadOp::Clear,
 			store: true,
 		}
+	}
+
+	pub fn with_origin(mut self, x_px: u32, y_px: u32) -> Self {
+		self.x_px = x_px;
+		self.y_px = y_px;
+		self
 	}
 
 	pub fn from_window_size(window_size: TerminalWindowSize) -> Self {
@@ -46,6 +56,18 @@ impl WgpuTerminalRenderTargetPlan {
 	pub fn viewport_width_px(&self) -> f32 { self.width_px as f32 }
 
 	pub fn viewport_height_px(&self) -> f32 { self.height_px as f32 }
+
+	pub fn apply_viewport(&self, render_pass: &mut wgpu::RenderPass<'_>) {
+		render_pass.set_viewport(
+			self.x_px as f32,
+			self.y_px as f32,
+			self.width_px as f32,
+			self.height_px as f32,
+			0.0,
+			1.0,
+		);
+		render_pass.set_scissor_rect(self.x_px, self.y_px, self.width_px, self.height_px);
+	}
 
 	pub fn is_empty(&self) -> bool { self.width_px == 0 || self.height_px == 0 }
 
@@ -103,12 +125,24 @@ mod tests {
 
 		assert_eq!(plan.width_px, 1280);
 		assert_eq!(plan.height_px, 720);
+		assert_eq!(plan.x_px, 0);
+		assert_eq!(plan.y_px, 0);
 		assert_eq!(plan.viewport_width_px(), 1280.0);
 		assert_eq!(plan.viewport_height_px(), 720.0);
 		assert_eq!(plan.clear_color, WgpuTerminalClearColor::black());
 		assert_eq!(plan.load_op, WgpuTerminalLoadOp::Clear);
 		assert!(plan.store);
 		assert!(!plan.is_empty());
+	}
+
+	#[test]
+	fn positions_render_target_inside_window() {
+		let plan = WgpuTerminalRenderTargetPlan::new(640, 720).with_origin(640, 0);
+
+		assert_eq!(plan.x_px, 640);
+		assert_eq!(plan.y_px, 0);
+		assert_eq!(plan.width_px, 640);
+		assert_eq!(plan.height_px, 720);
 	}
 
 	#[test]

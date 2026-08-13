@@ -32,6 +32,7 @@ use germinal_ports::{
 	},
 	rendering::{
 		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+		workspace_layout::RenderSurfacePlacement,
 		window_runtime::IRenderRuntimeStore,
 	},
 	repository::{IRepository, RepositoryError},
@@ -327,6 +328,17 @@ impl IRenderService for App {
 		RenderService::inj_ref(self).current_terminal_size_info()
 	}
 
+	fn terminal_size_info_for_surface(
+		&self,
+		placement: RenderSurfacePlacement,
+	) -> TerminalSizeInfo {
+		RenderService::inj_ref(self).terminal_size_info_for_surface(placement)
+	}
+
+	fn set_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+		RenderService::inj_ref_mut(self).set_workspace_render_layout(placements)
+	}
+
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
 		RenderService::inj_ref_mut(self).resize_window_size_info(window_size)
 	}
@@ -348,6 +360,17 @@ impl IRenderService for App {
 
 impl IWorkspaceService for App {
 	fn focused_gshell(&self) -> GShellId { WorkspaceService::inj_ref(self).focused_gshell() }
+
+	fn visible_gshells(&self) -> Vec<GShellId> {
+		WorkspaceService::inj_ref(self).visible_gshells()
+	}
+
+	fn workspace_render_layout(
+		&self,
+		window_size: TerminalWindowSize,
+	) -> Vec<RenderSurfacePlacement> {
+		WorkspaceService::inj_ref(self).workspace_render_layout(window_size)
+	}
 
 	fn restore_workspace(&self) -> Result<(), WorkspaceServiceError> {
 		WorkspaceService::inj_ref(self).restore_workspace()

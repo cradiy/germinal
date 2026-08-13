@@ -11,3 +11,5 @@ pub mod surface_snapshot;
 pub mod renderer_backend;
 
 pub mod window_runtime;
+
+pub mod workspace_layout;

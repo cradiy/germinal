@@ -1,4 +1,6 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
+
+use germinal_ports::rendering::render_target_id::RenderTargetId;
 
 use crate::rendering::pty_surface::quad_vertex_buffer_builder::WgpuVertexBuffer;
 pub use crate::rendering::pty_surface::quad_vertex_buffer_builder::{
@@ -7,11 +9,11 @@ pub use crate::rendering::pty_surface::quad_vertex_buffer_builder::{
 
 #[derive(Debug, Clone, Default)]
 pub struct WgpuBufferUploader {
-	cached_buffers: RefCell<Option<WgpuBufferUploadCache>>,
+	cached_buffers: RefCell<HashMap<RenderTargetId, WgpuBufferUploadCache>>,
 }
 
 impl WgpuBufferUploader {
-	pub fn new() -> Self { Self { cached_buffers: RefCell::new(None) } }
+	pub fn new() -> Self { Self { cached_buffers: RefCell::new(HashMap::new()) } }
 
 	pub fn build_upload_bytes(&self, buffer: &WgpuVertexBuffer) -> WgpuBufferUploadBytes {
 		WgpuBufferUploadBytes {
@@ -26,6 +28,7 @@ impl WgpuBufferUploader {
 		&self,
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
+		target_id: RenderTargetId,
 		upload_bytes: &WgpuBufferUploadBytes,
 	) -> WgpuUploadedBuffers {
 		let mut cache = self.cached_buffers.borrow_mut();
@@ -33,7 +36,8 @@ impl WgpuBufferUploader {
 		let index_byte_len = upload_bytes.index_byte_len() as u64;
 
 		let cached = cache
-			.get_or_insert_with(|| WgpuBufferUploadCache::new(device, vertex_byte_len, index_byte_len));
+			.entry(target_id)
+			.or_insert_with(|| WgpuBufferUploadCache::new(device, vertex_byte_len, index_byte_len));
 
 		if cached.vertex_capacity_bytes < vertex_byte_len
 			|| cached.index_capacity_bytes < index_byte_len
