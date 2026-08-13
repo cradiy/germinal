@@ -19,6 +19,7 @@ use germinal_ports::{
 	pty_host::{
 		pty_input::{PtyInput, PtyInputSender},
 		snapshot::TerminalSnapshotProvider,
+		terminal_input_mode::TerminalInputModeState,
 		worker_backend::ITerminalWorkerBackend,
 		worker_input::TerminalWorkerInput,
 	},
@@ -97,20 +98,18 @@ where Dispatch: IRuntimeEventDispatcher
 			Err(TryRecvError::Disconnected) => disconnected = true,
 		}
 
-		let had_unpublished = self.runtime.unpublished_seq.is_some();
-		self.runtime.publish_unpublished_snapshot();
-		progressed |= had_unpublished || self.runtime.unpublished_seq.is_some();
+		progressed |= self.runtime.publish_unpublished_snapshot();
 
 		if disconnected {
 			self.runtime.flush_pending_input();
-			self.runtime.publish_unpublished_snapshot();
+			let published = self.runtime.publish_unpublished_snapshot();
 
 			if self.runtime.unpublished_seq.is_none() {
 				self.runtime.perf.maybe_force_log();
 				return TerminalWorkerTick::Finished;
 			}
 
-			progressed = true;
+			progressed |= published;
 		}
 
 		self.runtime.perf.maybe_log();
@@ -264,6 +263,7 @@ struct TerminalWorkerRuntime<Dispatch> {
 	perf: TerminalWorkerPerf,
 
 	pty_input_tx:          Option<PtyInputSender>,
+	input_modes:           Option<TerminalInputModeState>,
 	gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
 }
 
@@ -300,6 +300,7 @@ where Dispatch: IRuntimeEventDispatcher
 			perf: TerminalWorkerPerf::new(),
 
 			pty_input_tx: None,
+			input_modes: None,
 			gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
 		}
 	}
@@ -339,8 +340,10 @@ where Dispatch: IRuntimeEventDispatcher
 				self.flush_pending_input();
 				self.unpublished_seq = Some(self.resize(to_alacritty_term_size(size)));
 			}
-			TerminalWorkerInput::SetPtyInput(tx) => {
-				self.pty_input_tx = Some(tx);
+			TerminalWorkerInput::SetPtyInput { sender, input_modes } => {
+				self.pty_input_tx = Some(sender);
+				self.input_modes = Some(input_modes);
+				self.publish_input_modes();
 			}
 		}
 	}
@@ -370,6 +373,12 @@ where Dispatch: IRuntimeEventDispatcher
 		}
 	}
 
+	fn publish_input_modes(&self) {
+		if let Some(input_modes) = &self.input_modes {
+			input_modes.store(self.terminal_store.input_modes(self.target_id));
+		}
+	}
+
 	fn apply_byte_chunks(&mut self, chunks: &[Vec<u8>]) -> Option<Seq> {
 		self.seq += 1;
 
@@ -392,6 +401,7 @@ where Dispatch: IRuntimeEventDispatcher
 			let pending_pty_writes = self.terminal_store.take_pending_pty_writes(self.target_id);
 			self.forward_pty_writes(pending_pty_writes);
 		}
+		self.publish_input_modes();
 
 		if enter_gnative {
 			let _ = self.proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative {
@@ -426,18 +436,28 @@ where Dispatch: IRuntimeEventDispatcher
 		seq
 	}
 
-	fn publish_unpublished_snapshot(&mut self) {
+	fn publish_unpublished_snapshot(&mut self) -> bool {
 		if self.unpublished_seq.is_none() {
-			return;
+			return false;
+		}
+
+		if self
+			.terminal_store
+			.finish_expired_synchronized_update(self.target_id, Instant::now())
+		{
+			self.publish_input_modes();
+		}
+		if self.terminal_store.synchronized_update_pending(self.target_id) {
+			return false;
 		}
 
 		if self.snapshot_wake_pending.load(Ordering::Acquire) {
 			self.perf.coalesced_wakeups += 1;
-			return;
+			return false;
 		}
 
 		let Some(seq) = self.unpublished_seq.take() else {
-			return;
+			return false;
 		};
 
 		let started_at = Instant::now();
@@ -449,7 +469,7 @@ where Dispatch: IRuntimeEventDispatcher
 				"no terminal surface snapshot to publish"
 			);
 			self.unpublished_seq = Some(seq);
-			return;
+			return false;
 		};
 		self.perf.publish_snapshot += snapshot_started_at.elapsed();
 
@@ -477,13 +497,13 @@ where Dispatch: IRuntimeEventDispatcher
 		self.perf.publish_max = self.perf.publish_max.max(elapsed);
 
 		if !snapshot_sent {
-			return;
+			return true;
 		}
 
 		if wake_already_pending {
 			self.perf.coalesced_wakeups += 1;
 			self.unpublished_seq = Some(seq);
-			return;
+			return true;
 		}
 
 		let dispatch_started_at = Instant::now();
@@ -492,6 +512,7 @@ where Dispatch: IRuntimeEventDispatcher
 			seq,
 		}));
 		self.perf.publish_dispatch += dispatch_started_at.elapsed();
+		true
 	}
 }
 
@@ -738,7 +759,7 @@ where Dispatch: IRuntimeEventDispatcher
 mod tests {
 	use std::sync::{
 		Arc,
-		atomic::AtomicBool,
+		atomic::{AtomicBool, Ordering},
 		mpsc::{self, Sender},
 	};
 
@@ -750,11 +771,16 @@ mod tests {
 			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 			runtime_event_dispatcher::IRuntimeEventDispatcher,
 		},
-		pty_host::worker_backend::ITerminalWorkerBackend,
+		pty_host::{
+			pty_input::pty_input_channel,
+			terminal_input_mode::TerminalInputModeState,
+			worker_backend::ITerminalWorkerBackend,
+			worker_input::TerminalWorkerInput,
+		},
 		rendering::surface_snapshot::RenderSurfaceSnapshot,
 	};
 
-	use super::PlatformTerminalWorkerBackend;
+	use super::{PlatformTerminalWorkerBackend, TerminalWorkerRuntime};
 
 	#[derive(Clone)]
 	struct TestDispatcher {
@@ -868,6 +894,82 @@ mod tests {
 				..
 			}) if gshell_id == GShellId::new(3)
 		));
+	}
+
+	#[test]
+	fn terminal_worker_publishes_parsed_input_modes() {
+		let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
+		let backend =
+			PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+		let input = backend.spawn_terminal_worker(
+			GShellId::new(4),
+			TerminalGridSize::new(80, 24),
+			snapshot_tx,
+			Arc::new(AtomicBool::new(false)),
+		);
+		let (pty_tx, _pty_rx) = pty_input_channel();
+		let input_modes = TerminalInputModeState::default();
+		input
+			.send(TerminalWorkerInput::SetPtyInput {
+				sender: pty_tx,
+				input_modes: input_modes.clone(),
+			})
+			.expect("PTY input state should send");
+		input
+			.send(TerminalWorkerInput::Bytes(
+				b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h".to_vec(),
+			))
+			.expect("terminal mode sequences should send");
+
+		snapshot_rx
+			.recv_timeout(std::time::Duration::from_secs(1))
+			.expect("surface snapshot should arrive after mode update");
+		let modes = input_modes.load();
+		assert!(modes.app_cursor());
+		assert!(modes.bracketed_paste());
+		assert!(modes.focus_in_out());
+		assert!(modes.sgr_mouse());
+		assert!(modes.mouse_report_click());
+	}
+
+	#[test]
+	fn terminal_worker_does_not_publish_mid_synchronized_update() {
+		let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
+		let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+		let wake_pending = Arc::new(AtomicBool::new(false));
+		let mut runtime = TerminalWorkerRuntime::new(
+			TestDispatcher { tx: event_tx },
+			GShellId::new(5),
+			super::AlacrittyTermSize::new(20, 4),
+			snapshot_tx,
+			wake_pending.clone(),
+		);
+
+		let initial_seq = runtime.apply_byte_chunks(&[b"old".to_vec()]).unwrap();
+		runtime.unpublished_seq = Some(initial_seq);
+		assert!(runtime.publish_unpublished_snapshot());
+		snapshot_rx.try_recv().expect("initial snapshot should publish");
+		wake_pending.store(false, Ordering::Release);
+
+		let pending_seq = runtime
+			.apply_byte_chunks(&[b"\x1b[?2026h\x1b[2J\x1b[Hreplacement".to_vec()])
+			.unwrap();
+		runtime.unpublished_seq = Some(pending_seq);
+		assert!(!runtime.publish_unpublished_snapshot());
+		assert!(snapshot_rx.try_recv().is_err());
+
+		let completed_seq = runtime.apply_byte_chunks(&[b"\x1b[?2026l".to_vec()]).unwrap();
+		runtime.unpublished_seq = Some(completed_seq);
+		assert!(runtime.publish_unpublished_snapshot());
+		let snapshot = snapshot_rx.try_recv().expect("completed snapshot should publish");
+		let text: String = snapshot
+			.rows
+			.iter()
+			.flat_map(|row| &row.runs)
+			.map(|run| run.text.as_str())
+			.collect();
+		assert!(text.contains("replacement"));
 	}
 
 	fn gshell_id_of(event: RuntimeEvent) -> u64 {

@@ -19,12 +19,13 @@ use germinal_ports::{
 		runtime_event_dispatcher::IRuntimeEventDispatcherProvider,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-			WindowInputNamedKey,
+			WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
 		},
 	},
 	pty_host::{
 		pty_backend::{IPtyBackend, IPtyBackendProvider},
 		pty_input::{PtyInput, PtyInputSender},
+		terminal_input_mode::TerminalInputModeState,
 		terminal_size::TerminalPtySize,
 		worker_input::TerminalWorkerInput,
 	},
@@ -37,10 +38,15 @@ use germinal_ports::{
 };
 use tracing::warn;
 
-#[derive(Debug, Clone)]
+use super::pty_input_encoder::{
+	PtyMouseEncoder, encode_focus_changed, encode_ime_commit, encode_key_event, encode_paste,
+};
+
 struct PtyPaneRuntime {
 	pty_input_sender:       PtyInputSender,
 	terminal_worker_sender: SyncSender<TerminalWorkerInput>,
+	input_modes:            TerminalInputModeState,
+	mouse:                  PtyMouseEncoder,
 }
 
 #[derive(kudi::DepInj)]
@@ -114,46 +120,78 @@ where Deps: AsRef<PtyServiceState>
 			terminal_worker_sender.clone(),
 		);
 
-		let _ = terminal_worker_sender.send(TerminalWorkerInput::SetPtyInput(pty_input_sender.clone()));
+		let input_modes = TerminalInputModeState::default();
+		let _ = terminal_worker_sender.send(TerminalWorkerInput::SetPtyInput {
+			sender: pty_input_sender.clone(),
+			input_modes: input_modes.clone(),
+		});
 
-		state
-			.pty_host_runtimes
-			.borrow_mut()
-			.insert(pty_host_id, PtyPaneRuntime { pty_input_sender, terminal_worker_sender });
+		state.pty_host_runtimes.borrow_mut().insert(
+			pty_host_id,
+			PtyPaneRuntime {
+				pty_input_sender,
+				terminal_worker_sender,
+				input_modes,
+				mouse: PtyMouseEncoder::new(pty_size),
+			},
+		);
 	}
 
 	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent) {
 		let state: &PtyServiceState = self.prj_ref().as_ref();
 		match event {
 			GShellInputEvent::Bytes(bytes) => send_pty_host_bytes(state, pty_host_id, bytes),
-			GShellInputEvent::Paste(text) => {
-				send_pty_host_bytes(state, pty_host_id, text.into_bytes());
-			}
+			GShellInputEvent::Paste(text) => send_pty_host_paste(state, pty_host_id, &text),
 			GShellInputEvent::Window(window_input) => match window_input {
 				WindowInputEvent::ModifiersChanged(modifiers) => {
 					*state.modifiers.borrow_mut() = modifiers;
 				}
-				WindowInputEvent::FocusChanged(_) => {}
+				WindowInputEvent::FocusChanged(focused) => {
+					send_pty_host_focus(state, pty_host_id, focused);
+				}
 				WindowInputEvent::Key { state: key_state, logical_key, text } => {
 					let modifiers = *state.modifiers.borrow();
-					if let Some(bytes) =
-						translate_key_event(modifiers, key_state, &logical_key, text.as_deref())
-					{
-						send_pty_host_bytes(state, pty_host_id, bytes);
-					}
+					send_pty_host_key(
+						state,
+						pty_host_id,
+						modifiers,
+						key_state,
+						&logical_key,
+						text.as_deref(),
+					);
 				}
 				WindowInputEvent::Ime(text) => {
-					if let Some(bytes) = translate_ime_commit(&text) {
+					if let Some(bytes) = encode_ime_commit(&text) {
 						send_pty_host_bytes(state, pty_host_id, bytes);
 					}
 				}
-				WindowInputEvent::Paste(text) => {
-					send_pty_host_bytes(state, pty_host_id, text.into_bytes());
+				WindowInputEvent::Paste(text) => send_pty_host_paste(state, pty_host_id, &text),
+				WindowInputEvent::PointerMoved { position, modifiers } => {
+					send_pty_host_pointer_moved(state, pty_host_id, position, modifiers);
 				}
-				WindowInputEvent::PointerMoved { .. }
-				| WindowInputEvent::PointerLeft
-				| WindowInputEvent::PointerButton { .. }
-				| WindowInputEvent::Scroll { .. } => {}
+				WindowInputEvent::PointerLeft => {
+					if let Some(runtime) = state.pty_host_runtimes.borrow_mut().get_mut(&pty_host_id) {
+						runtime.mouse.pointer_left();
+					}
+				}
+				WindowInputEvent::PointerButton {
+					state: button_state,
+					button,
+					position,
+					modifiers,
+				} => {
+					send_pty_host_pointer_button(
+						state,
+						pty_host_id,
+						button_state,
+						button,
+						position,
+						modifiers,
+					);
+				}
+				WindowInputEvent::Scroll { delta, position, modifiers } => {
+					send_pty_host_scroll(state, pty_host_id, delta, position, modifiers);
+				}
 			},
 		}
 	}
@@ -170,138 +208,130 @@ where Deps: AsRef<PtyServiceState>
 		term_size: TerminalGridSize,
 	) {
 		let state: &PtyServiceState = self.prj_ref().as_ref();
-		let Some(runtime) = state.pty_host_runtimes.borrow().get(&pty_host_id).cloned() else {
+		let mut runtimes = state.pty_host_runtimes.borrow_mut();
+		let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
 			return;
 		};
 
+		runtime.mouse.resize(pty_size);
 		let _ = runtime.pty_input_sender.send(PtyInput::Resize(pty_size));
 		let _ = runtime.terminal_worker_sender.send(TerminalWorkerInput::Resize(term_size));
 	}
 }
 
 fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
-	let Some(runtime) = state.pty_host_runtimes.borrow().get(&pty_host_id).cloned() else {
+	let runtimes = state.pty_host_runtimes.borrow();
+	let Some(runtime) = runtimes.get(&pty_host_id) else {
 		return;
 	};
 
 	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
-fn translate_ime_commit(text: &str) -> Option<Vec<u8>> {
-	if text.is_empty() {
-		return None;
-	}
+fn send_pty_host_paste(state: &PtyServiceState, pty_host_id: PtyHostId, text: &str) {
+	let runtimes = state.pty_host_runtimes.borrow();
+	let Some(runtime) = runtimes.get(&pty_host_id) else {
+		return;
+	};
+	let Some(bytes) = encode_paste(runtime.input_modes.load(), text) else {
+		return;
+	};
 
-	Some(text.as_bytes().to_vec())
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
-fn translate_key_event(
+fn send_pty_host_focus(state: &PtyServiceState, pty_host_id: PtyHostId, focused: bool) {
+	let runtimes = state.pty_host_runtimes.borrow();
+	let Some(runtime) = runtimes.get(&pty_host_id) else {
+		return;
+	};
+	let Some(bytes) = encode_focus_changed(runtime.input_modes.load(), focused) else {
+		return;
+	};
+
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn send_pty_host_key(
+	state: &PtyServiceState,
+	pty_host_id: PtyHostId,
 	modifiers: WindowInputModifiers,
-	state: WindowInputElementState,
+	key_state: WindowInputElementState,
 	logical_key: &WindowInputKey,
 	text: Option<&str>,
-) -> Option<Vec<u8>> {
-	if state != WindowInputElementState::Pressed {
-		return None;
-	}
-
-	if let Some(bytes) = named_key_bytes(logical_key) {
-		return Some(bytes);
-	}
-
-	if modifiers.control_key() {
-		return ctrl_bytes_from_key(logical_key);
-	}
-
-	if modifiers.alt_key() {
-		if let Some(bytes) = text_bytes(logical_key, text) {
-			let mut escaped = Vec::with_capacity(bytes.len() + 1);
-			escaped.push(0x1B);
-			escaped.extend(bytes);
-			return Some(escaped);
-		}
-
-		return None;
-	}
-
-	text_bytes(logical_key, text)
-}
-
-fn named_key_bytes(key: &WindowInputKey) -> Option<Vec<u8>> {
-	match key {
-		WindowInputKey::Named(WindowInputNamedKey::Enter) => Some(b"\r".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Tab) => Some(b"\t".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Backspace) => Some(vec![0x7F]),
-		WindowInputKey::Named(WindowInputNamedKey::Escape) => Some(vec![0x1B]),
-		WindowInputKey::Named(WindowInputNamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Home) => Some(b"\x1b[H".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::End) => Some(b"\x1b[F".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-		_ => None,
-	}
-}
-
-fn text_bytes(key: &WindowInputKey, text: Option<&str>) -> Option<Vec<u8>> {
-	if let Some(text) = text
-		&& !text.is_empty()
-	{
-		return Some(text.as_bytes().to_vec());
-	}
-
-	match key {
-		WindowInputKey::Character(text) if !text.is_empty() => Some(text.as_bytes().to_vec()),
-		_ => None,
-	}
-}
-
-fn ctrl_bytes_from_key(key: &WindowInputKey) -> Option<Vec<u8>> {
-	let WindowInputKey::Character(text) = key else {
-		return None;
+) {
+	let runtimes = state.pty_host_runtimes.borrow();
+	let Some(runtime) = runtimes.get(&pty_host_id) else {
+		return;
+	};
+	let Some(bytes) = encode_key_event(
+		runtime.input_modes.load(),
+		modifiers,
+		key_state,
+		logical_key,
+		text,
+	) else {
+		return;
 	};
 
-	let mut chars = text.chars();
-	let c = chars.next()?.to_ascii_lowercase();
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
 
-	if chars.next().is_some() {
-		return None;
-	}
-
-	let byte = match c {
-		'a' => 0x01,
-		'b' => 0x02,
-		'c' => 0x03,
-		'd' => 0x04,
-		'e' => 0x05,
-		'f' => 0x06,
-		'h' => 0x08,
-		'i' => 0x09,
-		'j' => 0x0A,
-		'k' => 0x0B,
-		'l' => 0x0C,
-		'm' => 0x0D,
-		'n' => 0x0E,
-		'o' => 0x0F,
-		'p' => 0x10,
-		'q' => 0x11,
-		'r' => 0x12,
-		's' => 0x13,
-		't' => 0x14,
-		'u' => 0x15,
-		'v' => 0x16,
-		'w' => 0x17,
-		'x' => 0x18,
-		'y' => 0x19,
-		'z' => 0x1A,
-		'[' => 0x1B,
-		'\\' => 0x1C,
-		']' => 0x1D,
-		'^' => 0x1E,
-		'_' => 0x1F,
-		_ => return None,
+fn send_pty_host_pointer_moved(
+	state: &PtyServiceState,
+	pty_host_id: PtyHostId,
+	position: WindowPointerPosition,
+	modifiers: WindowInputModifiers,
+) {
+	let mut runtimes = state.pty_host_runtimes.borrow_mut();
+	let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+		return;
+	};
+	let Some(bytes) = runtime.mouse.moved(runtime.input_modes.load(), position, modifiers) else {
+		return;
 	};
 
-	Some(vec![byte])
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn send_pty_host_pointer_button(
+	state: &PtyServiceState,
+	pty_host_id: PtyHostId,
+	button_state: WindowInputElementState,
+	button: WindowPointerButton,
+	position: WindowPointerPosition,
+	modifiers: WindowInputModifiers,
+) {
+	let mut runtimes = state.pty_host_runtimes.borrow_mut();
+	let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+		return;
+	};
+	let Some(bytes) = runtime.mouse.button(
+		runtime.input_modes.load(),
+		button_state,
+		button,
+		position,
+		modifiers,
+	) else {
+		return;
+	};
+
+	let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn send_pty_host_scroll(
+	state: &PtyServiceState,
+	pty_host_id: PtyHostId,
+	delta: WindowScrollDelta,
+	position: WindowPointerPosition,
+	modifiers: WindowInputModifiers,
+) {
+	let mut runtimes = state.pty_host_runtimes.borrow_mut();
+	let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+		return;
+	};
+	let reports = runtime.mouse.scroll(runtime.input_modes.load(), delta, position, modifiers);
+	for bytes in reports {
+		let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+	}
 }

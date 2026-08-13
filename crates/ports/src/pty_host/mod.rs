@@ -12,6 +12,7 @@ pub mod render_viewport;
 pub mod scale_factor;
 pub mod size_info;
 pub mod terminal_geometric_glyph;
+pub mod terminal_input_mode;
 pub mod terminal_size;
 pub mod output_applier;
 pub mod snapshot;

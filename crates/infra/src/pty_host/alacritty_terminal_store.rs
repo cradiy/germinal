@@ -3,6 +3,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
 	rc::Rc,
 	sync::mpsc::{self, Receiver, Sender},
+	time::Instant,
 };
 
 use alacritty_terminal::{
@@ -16,6 +17,7 @@ use germinal_ports::{
 		snapshot::{
 			TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider, TerminalTextRunSnapshot,
 		},
+		terminal_input_mode::TerminalInputModes,
 		width::terminal_char_cell_width,
 	},
 	rendering::{
@@ -220,6 +222,50 @@ impl AlacrittyTerminalStore {
 		state.take_pending_writes()
 	}
 
+	pub fn input_modes(&self, render_target_id: RenderTargetId) -> TerminalInputModes {
+		let inner = self.inner.borrow();
+		let Some(state) = inner.get(&render_target_id) else {
+			return TerminalInputModes::default();
+		};
+		let mode = state.term.mode();
+
+		TerminalInputModes::new(
+			mode.contains(TermMode::APP_CURSOR),
+			mode.contains(TermMode::BRACKETED_PASTE),
+			mode.contains(TermMode::FOCUS_IN_OUT),
+			mode.contains(TermMode::SGR_MOUSE),
+			mode.contains(TermMode::MOUSE_REPORT_CLICK),
+			mode.contains(TermMode::MOUSE_DRAG),
+			mode.contains(TermMode::MOUSE_MOTION),
+		)
+	}
+
+	pub fn synchronized_update_pending(&self, render_target_id: RenderTargetId) -> bool {
+		let inner = self.inner.borrow();
+		inner.get(&render_target_id).is_some_and(AlacrittyTermState::synchronized_update_pending)
+	}
+
+	pub fn synchronized_update_deadline(
+		&self,
+		render_target_id: RenderTargetId,
+	) -> Option<Instant> {
+		let inner = self.inner.borrow();
+		inner.get(&render_target_id)?.synchronized_update_deadline()
+	}
+
+	pub fn finish_expired_synchronized_update(
+		&self,
+		render_target_id: RenderTargetId,
+		now: Instant,
+	) -> bool {
+		let mut inner = self.inner.borrow_mut();
+		let Some(state) = inner.get_mut(&render_target_id) else {
+			return false;
+		};
+
+		state.finish_expired_synchronized_update(now)
+	}
+
 	pub fn cursor_position_1_based(
 		&self,
 		render_target_id: RenderTargetId,
@@ -355,6 +401,26 @@ impl AlacrittyTermState {
 		}
 
 		writes
+	}
+
+	fn synchronized_update_pending(&self) -> bool {
+		self.processor.sync_timeout().sync_timeout().is_some()
+	}
+
+	fn synchronized_update_deadline(&self) -> Option<Instant> {
+		self.processor.sync_timeout().sync_timeout()
+	}
+
+	fn finish_expired_synchronized_update(&mut self, now: Instant) -> bool {
+		let Some(deadline) = self.synchronized_update_deadline() else {
+			return false;
+		};
+		if now < deadline {
+			return false;
+		}
+
+		self.processor.stop_sync(&mut self.term);
+		true
 	}
 }
 
@@ -806,6 +872,74 @@ mod tests {
 			store.take_pending_pty_writes(target_id),
 			vec![b"\x1b_Gi=31;OK\x1b\\".to_vec()]
 		);
+	}
+
+	#[test]
+	fn exports_terminal_input_modes_from_private_mode_sequences() {
+		let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 10));
+		let target_id = RenderTargetId::new(44);
+		store.apply_bytes(
+			target_id,
+			Seq::new(1),
+			b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h",
+		);
+
+		let modes = store.input_modes(target_id);
+		assert!(modes.app_cursor());
+		assert!(modes.bracketed_paste());
+		assert!(modes.focus_in_out());
+		assert!(modes.sgr_mouse());
+		assert!(modes.mouse_drag());
+		assert!(modes.mouse_tracking());
+
+		store.apply_bytes(
+			target_id,
+			Seq::new(2),
+			b"\x1b[?1l\x1b[?2004l\x1b[?1004l\x1b[?1002l\x1b[?1006l",
+		);
+		assert_eq!(store.input_modes(target_id), TerminalInputModes::default());
+	}
+
+	#[test]
+	fn buffers_synchronized_update_until_end_or_timeout() {
+		let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 4));
+		let target_id = RenderTargetId::new(45);
+		store.apply_bytes(target_id, Seq::new(1), b"old");
+		store.apply_bytes(
+			target_id,
+			Seq::new(2),
+			b"\x1b[?2026h\x1b[2J\x1b[Hreplacement",
+		);
+
+		assert!(store.synchronized_update_pending(target_id));
+		let pending_text: String = store
+			.render_surface_snapshot_of(target_id)
+			.unwrap()
+			.rows
+			.iter()
+			.flat_map(|row| &row.runs)
+			.map(|run| run.text.as_str())
+			.collect();
+		assert!(pending_text.contains("old"));
+		assert!(!pending_text.contains("replacement"));
+
+		let deadline = store.synchronized_update_deadline(target_id).unwrap();
+		assert!(!store.finish_expired_synchronized_update(
+			target_id,
+			deadline - std::time::Duration::from_nanos(1),
+		));
+		assert!(store.finish_expired_synchronized_update(target_id, deadline));
+		assert!(!store.synchronized_update_pending(target_id));
+
+		let completed_text: String = store
+			.render_surface_snapshot_of(target_id)
+			.unwrap()
+			.rows
+			.iter()
+			.flat_map(|row| &row.runs)
+			.map(|run| run.text.as_str())
+			.collect();
+		assert!(completed_text.contains("replacement"));
 	}
 
 	#[test]

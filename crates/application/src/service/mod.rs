@@ -1,6 +1,7 @@
 pub mod gnative_service;
 pub mod gshell_service;
 pub mod layout_service;
+mod pty_input_encoder;
 pub mod pty_service;
 pub mod render_service;
 pub mod worker_service;

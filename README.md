@@ -29,3 +29,7 @@ cargo run -p germinal --example kitty_image
 ```
 
 File, temporary-file, shared-memory, and animation actions are not supported yet. Unsupported requests receive a protocol error when an image ID is provided.
+
+## PTY input modes
+
+Germinal tracks terminal modes emitted by PTY applications. Application cursor keys, bracketed paste, focus reporting, and SGR mouse click, drag, motion, and wheel events are encoded according to the active mode.
