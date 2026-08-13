@@ -321,6 +321,7 @@ mod tests {
 			latest_seq: Seq::new(seq),
 			rows: Vec::new(),
 			video_surfaces: Vec::new(),
+			image_surfaces: Vec::new(),
 			dirty_rows: Vec::new(),
 			cursor: None,
 		}

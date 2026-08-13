@@ -210,6 +210,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
 			latest_seq: surface.latest_seq,
 			rows,
 			video_surfaces: surface.video_surfaces.clone(),
+			image_surfaces: Vec::new(),
 			dirty_rows: surface.latest_dirty_rows.clone(),
 			cursor: None,
 		})

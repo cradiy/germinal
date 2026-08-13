@@ -187,6 +187,7 @@ mod tests {
 					height_px: 80,
 				},
 			],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: None,
 		});
@@ -208,6 +209,7 @@ mod tests {
 				width_px:  7,
 				height_px: 8,
 			}],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: None,
 		});
@@ -235,6 +237,7 @@ mod tests {
 				width_px:  10,
 				height_px: 10,
 			}],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: None,
 		});

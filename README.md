@@ -17,3 +17,15 @@ cargo run -r -p germinal-gnative-demo
 ```
 
 The germinal first start up with `PTY` mode (using alacritty-terminal for parsing), when the `germinal-gnative-demo` starts, the germinal enters into `gnative` mode, which is a actually GUI.
+
+## Terminal images
+
+Germinal supports direct Kitty Graphics Protocol images using raw RGB, raw RGBA, or PNG payloads. Chunked base64 payloads, zlib compression, image/placement IDs, Unicode placeholders used by Yazi, source rectangles, cell sizing, z-index layering, deletion, and query responses are supported.
+
+To render the standalone checkerboard example, run this command inside Germinal:
+
+```
+cargo run -p germinal --example kitty_image
+```
+
+File, temporary-file, shared-memory, and animation actions are not supported yet. Unsupported requests receive a protocol error when an image ID is provided.

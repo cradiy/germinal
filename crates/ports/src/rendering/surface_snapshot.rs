@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
 	rendering::{frame_plan_builder::TextStyleDto, render_target_id::RenderTargetId},
 	seq::Seq,
@@ -9,6 +11,7 @@ pub struct RenderSurfaceSnapshot {
 	pub latest_seq:     Seq,
 	pub rows:           Vec<RenderSurfaceRowSnapshot>,
 	pub video_surfaces: Vec<RenderSurfaceVideoSurfaceSnapshot>,
+	pub image_surfaces: Vec<RenderSurfaceImageSnapshot>,
 	pub dirty_rows:     Vec<u32>,
 	pub cursor:         Option<RenderSurfaceCursorSnapshot>,
 }
@@ -33,6 +36,26 @@ pub struct RenderSurfaceVideoSurfaceSnapshot {
 	pub y_px:      u32,
 	pub width_px:  u32,
 	pub height_px: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSurfaceImageSnapshot {
+	pub id:               String,
+	pub image_generation: u64,
+	pub x_cell:           u32,
+	pub y_cell:           u32,
+	pub x_offset_px:      u32,
+	pub y_offset_px:      u32,
+	pub columns:          u32,
+	pub rows:             u32,
+	pub source_x_px:      u32,
+	pub source_y_px:      u32,
+	pub source_width_px:  u32,
+	pub source_height_px: u32,
+	pub image_width_px:   u32,
+	pub image_height_px:  u32,
+	pub z_index:          i32,
+	pub rgba:             Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

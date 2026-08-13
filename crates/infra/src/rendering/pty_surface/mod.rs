@@ -13,6 +13,7 @@ pub mod glyph_atlas_frame;
 pub mod glyph_atlas_gpu_cache;
 pub mod glyph_atlas_texture;
 pub mod glyph_uv_mapper;
+pub mod image_surface_renderer;
 pub mod pipeline_factory;
 pub mod pipeline_spec;
 pub mod quad_vertex_buffer_builder;

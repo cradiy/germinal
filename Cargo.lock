@@ -1160,8 +1160,10 @@ version = "0.0.1"
 dependencies = [
  "alacritty_terminal",
  "ash",
+ "base64",
  "compio",
  "crossfont",
+ "flate2",
  "flume 0.11.1",
  "germinal-domain",
  "germinal-gnative-protocol",
@@ -1172,6 +1174,7 @@ dependencies = [
  "gstreamer-audio",
  "gstreamer-video",
  "nix 0.31.3",
+ "png",
  "pollster",
  "portable-pty",
  "rayon",

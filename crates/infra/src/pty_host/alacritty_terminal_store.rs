@@ -26,6 +26,12 @@ use germinal_ports::{
 	seq::Seq,
 };
 
+use super::kitty_graphics::{
+	KittyGraphicsState, KittyGraphicsStreamDecoder, KittyPlaceholderCell, KittyStreamEvent,
+};
+
+const KITTY_IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlacrittyTermSize {
 	columns:      usize,
@@ -96,7 +102,34 @@ impl AlacrittyTerminalStore {
 
 		let state = inner.entry(render_target_id).or_insert_with(|| AlacrittyTermState::new(self.size));
 
-		state.processor.advance(&mut state.term, bytes);
+		for event in state.graphics_decoder.feed(bytes) {
+			match event {
+				KittyStreamEvent::Bytes(visible) => {
+					state.processor.advance(&mut state.term, &visible);
+				},
+				KittyStreamEvent::Command(command) => {
+					let point = state.term.grid().cursor.point;
+					let cursor = (
+						u32::try_from(point.column.0).unwrap_or(0),
+						u32::try_from(point.line.0).unwrap_or(0),
+					);
+					let result = state.graphics.handle(command, cursor);
+					if let Some(response) = result.response {
+						let _ = state.pending_write_tx.send(response);
+					}
+					if let Some(cursor_move) = result.cursor_move {
+						if cursor_move.columns > 0 {
+							let bytes = format!("\x1b[{}C", cursor_move.columns);
+							state.processor.advance(&mut state.term, bytes.as_bytes());
+						}
+						if cursor_move.rows > 0 {
+							let bytes = format!("\x1b[{}B", cursor_move.rows);
+							state.processor.advance(&mut state.term, bytes.as_bytes());
+						}
+					}
+				},
+			}
+		}
 
 		state.latest_seq = seq;
 		state.total_bytes += bytes.len() as u64;
@@ -152,11 +185,14 @@ impl AlacrittyTerminalStore {
 		let rows = visible_surface_rows(&state.term);
 		let dirty_rows = dirty_rows_of(state.term.damage(), state.size.screen_lines());
 
+		let placeholder_cells = kitty_placeholder_cells(&state.term);
+
 		RenderSurfaceSnapshot {
 			target_id: render_target_id,
 			latest_seq: state.latest_seq,
 			rows,
 			video_surfaces: Vec::new(),
+			image_surfaces: state.graphics.snapshots(&placeholder_cells),
 			dirty_rows,
 			cursor: None,
 		}
@@ -269,8 +305,11 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
 
 pub struct AlacrittyTermState {
 	term:             Term<PtyWriteEventListener>,
+	pending_write_tx: Sender<Vec<u8>>,
 	pending_write_rx: Receiver<Vec<u8>>,
 	processor:        Processor<StdSyncHandler>,
+	graphics_decoder: KittyGraphicsStreamDecoder,
+	graphics:         KittyGraphicsState,
 	size:             AlacrittyTermSize,
 	latest_seq:       Seq,
 	total_bytes:      u64,
@@ -280,15 +319,18 @@ pub struct AlacrittyTermState {
 impl AlacrittyTermState {
 	fn new(size: AlacrittyTermSize) -> Self {
 		let (pending_write_tx, pending_write_rx) = mpsc::channel();
-		let event_listener = PtyWriteEventListener::new(pending_write_tx);
+		let event_listener = PtyWriteEventListener::new(pending_write_tx.clone());
 		let mut term = Term::new(Config::default(), &size, event_listener.clone());
 
 		term.reset_damage();
 
 		Self {
 			term,
+			pending_write_tx,
 			pending_write_rx,
 			processor: Processor::<StdSyncHandler>::new(),
+			graphics_decoder: KittyGraphicsStreamDecoder::default(),
+			graphics: KittyGraphicsState::default(),
 			size,
 			latest_seq: Seq::ZERO,
 			total_bytes: 0,
@@ -347,7 +389,7 @@ fn visible_lines_and_runs(
 
 		let col = raw_col as u32;
 
-		if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+		if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == KITTY_IMAGE_PLACEHOLDER {
 			continue;
 		}
 
@@ -416,6 +458,9 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
 		if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
 			continue;
 		}
+		if cell.c == KITTY_IMAGE_PLACEHOLDER {
+			continue;
+		}
 
 		let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors);
 		if cell.c == ' ' && !style_has_visible_content(style) {
@@ -459,6 +504,26 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
 	}
 
 	rows
+}
+
+fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlaceholderCell> {
+	term.renderable_content()
+		.display_iter
+		.filter_map(|indexed| {
+			let cell = indexed.cell;
+			if cell.c != KITTY_IMAGE_PLACEHOLDER {
+				return None;
+			}
+			let Color::Spec(rgb) = cell.fg else {
+				return None;
+			};
+			Some(KittyPlaceholderCell {
+				image_id: u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b),
+				x_cell: u32::try_from(indexed.point.column.0).ok()?,
+				y_cell: u32::try_from(indexed.point.line.0).ok()?,
+			})
+		})
+		.collect()
 }
 
 fn line_text_from_cells(cells: &[StyledCell]) -> String {
@@ -697,7 +762,79 @@ fn dirty_rows_of(damage: TermDamage<'_>, screen_lines: usize) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+	use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 	use super::*;
+
+	#[test]
+	fn extracts_kitty_rgba_image_without_leaking_apc_into_text() {
+		let store = AlacrittyTerminalStore::new();
+		let target_id = RenderTargetId::new(1);
+		let payload = STANDARD.encode([255, 0, 0, 255]);
+		let bytes = format!("before\x1b_Ga=T,f=32,s=1,v=1,i=7,p=2,c=2,r=1,C=1;{payload}\x1b\\after");
+
+		store.apply_bytes(target_id, Seq::new(1), bytes.as_bytes());
+
+		let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+		let text: String = snapshot
+			.rows
+			.iter()
+			.flat_map(|row| row.runs.iter())
+			.map(|run| run.text.as_str())
+			.collect();
+		assert!(text.contains("beforeafter"));
+		assert_eq!(snapshot.image_surfaces.len(), 1);
+		assert_eq!(&*snapshot.image_surfaces[0].rgba, &[255, 0, 0, 255]);
+		assert_eq!(snapshot.image_surfaces[0].columns, 2);
+		assert_eq!(
+			store.take_pending_pty_writes(target_id),
+			vec![b"\x1b_Gi=7,p=2;OK\x1b\\".to_vec()]
+		);
+	}
+
+	#[test]
+	fn kitty_query_responds_without_adding_an_image() {
+		let store = AlacrittyTerminalStore::new();
+		let target_id = RenderTargetId::new(1);
+		let payload = STANDARD.encode([0, 0, 0]);
+		let bytes = format!("\x1b_Ga=q,f=24,s=1,v=1,i=31;{payload}\x1b\\");
+
+		store.apply_bytes(target_id, Seq::new(1), bytes.as_bytes());
+
+		assert!(store.render_surface_snapshot_of(target_id).unwrap().image_surfaces.is_empty());
+		assert_eq!(
+			store.take_pending_pty_writes(target_id),
+			vec![b"\x1b_Gi=31;OK\x1b\\".to_vec()]
+		);
+	}
+
+	#[test]
+	fn resolves_yazi_style_unicode_placeholders_into_an_image_surface() {
+		let store = AlacrittyTerminalStore::new();
+		let target_id = RenderTargetId::new(1);
+		let payload = STANDARD.encode([255, 0, 0, 255]);
+		let transfer =
+			format!("\x1b_Gq=2,a=T,C=1,U=1,f=32,s=1,v=1,i=7;{payload}\x1b\\");
+		let placeholders = concat!(
+			"\x1b[38;2;0;0;7m",
+			"\x1b[2;3H\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}",
+			"\x1b[3;3H\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}\u{030D}\u{030D}",
+			"\x1b[0m",
+		);
+
+		store.apply_bytes(target_id, Seq::new(1), transfer.as_bytes());
+		store.apply_bytes(target_id, Seq::new(2), placeholders.as_bytes());
+
+		let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+		assert_eq!(snapshot.image_surfaces.len(), 1);
+		assert_eq!((snapshot.image_surfaces[0].x_cell, snapshot.image_surfaces[0].y_cell), (2, 1));
+		assert_eq!((snapshot.image_surfaces[0].columns, snapshot.image_surfaces[0].rows), (2, 2));
+		assert!(snapshot
+			.rows
+			.iter()
+			.flat_map(|row| &row.runs)
+			.all(|run| !run.text.contains(KITTY_IMAGE_PLACEHOLDER)));
+	}
 
 	#[test]
 	fn applies_bytes_and_exports_snapshot() {

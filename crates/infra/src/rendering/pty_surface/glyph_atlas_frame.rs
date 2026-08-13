@@ -262,6 +262,7 @@ mod tests {
 				],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -308,6 +309,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -338,6 +340,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -354,6 +357,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -381,6 +385,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -408,6 +413,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -439,6 +445,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -455,6 +462,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		};
@@ -479,6 +487,7 @@ mod tests {
 			latest_seq: Seq::new(1),
 			rows: Vec::new(),
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: Vec::new(),
 			cursor: None,
 		};

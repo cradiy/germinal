@@ -17,6 +17,9 @@ use crate::rendering::pty_surface::{
 		WgpuTerminalFrameUploadPlan, WgpuTerminalUploadContext, WgpuTerminalUploadedFrame,
 	},
 	glyph_atlas_gpu_cache::WgpuTerminalGlyphAtlasGpuCache,
+	image_surface_renderer::{
+		WgpuImageEncodeContext, WgpuImageLayer, WgpuImageSurfaceRenderer,
+	},
 	pipeline_factory::WgpuTerminalPipeline,
 	render_target_plan::WgpuTerminalRenderTargetPlan,
 	renderer_backend::WgpuRendererConfig,
@@ -33,6 +36,7 @@ pub struct WgpuTerminalFrameRenderer {
 	command_encoder_adapter: WgpuTerminalCommandEncoderAdapter,
 	glyph_atlas_gpu_cache:   WgpuTerminalGlyphAtlasGpuCache,
 	video_surface_renderer:  WgpuVideoSurfaceRenderer,
+	image_surface_renderer:  WgpuImageSurfaceRenderer,
 }
 
 impl WgpuTerminalFrameRenderer {
@@ -43,6 +47,7 @@ impl WgpuTerminalFrameRenderer {
 			command_encoder_adapter: WgpuTerminalCommandEncoderAdapter::new(),
 			glyph_atlas_gpu_cache: WgpuTerminalGlyphAtlasGpuCache::new(),
 			video_surface_renderer: WgpuVideoSurfaceRenderer::new(),
+			image_surface_renderer: WgpuImageSurfaceRenderer::new(),
 		}
 	}
 
@@ -56,6 +61,7 @@ impl WgpuTerminalFrameRenderer {
 		self.frame_builder.remove_render_target(target_id);
 		self.buffer_uploader.remove_render_target(target_id);
 		self.glyph_atlas_gpu_cache.remove_render_target(target_id);
+		self.image_surface_renderer.remove_render_target(target_id);
 	}
 
 	pub fn prepare(
@@ -154,6 +160,8 @@ impl WgpuTerminalFrameRenderer {
 				glyph_atlas_gpu_cache_hit: false,
 				video_surface_count:       0,
 				video_draw_count:          0,
+				image_surface_count:       0,
+				image_draw_count:          0,
 				timings:                   WgpuTerminalFrameRenderTimings {
 					total: total_started_at.elapsed(),
 					..Default::default()
@@ -177,12 +185,20 @@ impl WgpuTerminalFrameRenderer {
 			self.video_surface_registry(),
 		);
 		let has_video_draw_work = !prepared_video_frame.is_empty();
+		let prepared_image_frame = self.image_surface_renderer.prepare(
+			gpu.device,
+			gpu.queue,
+			view.surface_snapshot,
+			view.render_target_plan,
+			view.renderer_config,
+		);
+		let has_image_draw_work = !prepared_image_frame.is_empty();
 
 		let upload_plan_started_at = Instant::now();
 		let upload_plan = self.build_upload_plan(&prepared);
 		let upload_plan_time = upload_plan_started_at.elapsed();
 
-		if !upload_plan.has_draw_work() && !has_video_draw_work {
+		if !upload_plan.has_draw_work() && !has_video_draw_work && !has_image_draw_work {
 			return WgpuTerminalFrameRenderResult {
 				target_id:                 prepared.target_id,
 				seq:                       prepared.seq,
@@ -200,6 +216,8 @@ impl WgpuTerminalFrameRenderer {
 				glyph_atlas_gpu_cache_hit: false,
 				video_surface_count:       0,
 				video_draw_count:          0,
+				image_surface_count:       0,
+				image_draw_count:          0,
 				timings:                   WgpuTerminalFrameRenderTimings {
 					prepare: prepare_time,
 					upload_plan: upload_plan_time,
@@ -223,11 +241,29 @@ impl WgpuTerminalFrameRenderer {
 			};
 
 		let encode_started_at = Instant::now();
+		let below_image_result = self.image_surface_renderer.encode_layer(
+			WgpuImageEncodeContext {
+				device: gpu.device,
+				encoder: view.command_encoder,
+				target_view: view.target_view,
+				color_format: view.pipeline.spec.color_format,
+				plan: view.render_target_plan,
+				load_op: view.render_target_plan.wgpu_load_op(),
+			},
+			&prepared_image_frame,
+			WgpuImageLayer::BelowText,
+		);
+		let text_render_target_plan = if below_image_result.encoded {
+			view.render_target_plan
+				.with_load_op(crate::rendering::pty_surface::render_target_plan::WgpuTerminalLoadOp::Load)
+		} else {
+			view.render_target_plan
+		};
 		let encode_result = if let Some(uploaded_frame) = uploaded_frame.as_ref() {
 			self.encode_uploaded_frame(
 				view.command_encoder,
 				view.target_view,
-				view.render_target_plan,
+				text_render_target_plan,
 				view.pipeline,
 				uploaded_frame,
 			)
@@ -242,6 +278,23 @@ impl WgpuTerminalFrameRenderer {
 				index_count:       0,
 			}
 		};
+		let above_load_op = if below_image_result.encoded || encode_result.encoded_frame {
+			wgpu::LoadOp::Load
+		} else {
+			view.render_target_plan.wgpu_load_op()
+		};
+		let above_image_result = self.image_surface_renderer.encode_layer(
+			WgpuImageEncodeContext {
+				device: gpu.device,
+				encoder: view.command_encoder,
+				target_view: view.target_view,
+				color_format: view.pipeline.spec.color_format,
+				plan: view.render_target_plan,
+				load_op: above_load_op,
+			},
+			&prepared_image_frame,
+			WgpuImageLayer::AboveText,
+		);
 		let video_result = self.video_surface_renderer.encode_prepared_frame(
 			gpu.device,
 			view.command_encoder,
@@ -257,9 +310,18 @@ impl WgpuTerminalFrameRenderer {
 			seq: prepared.seq,
 			prepared: true,
 			uploaded: upload_plan.has_draw_work(),
-			encoded: encode_result.encoded_frame || video_result.encoded(),
-			command_count: encode_result.command_count + usize::from(video_result.encoded()),
-			draw_count: encode_result.draw_count + video_result.draw_count,
+			encoded: encode_result.encoded_frame
+				|| below_image_result.encoded
+				|| above_image_result.encoded
+				|| video_result.encoded(),
+			command_count: encode_result.command_count
+				+ usize::from(below_image_result.encoded)
+				+ usize::from(above_image_result.encoded)
+				+ usize::from(video_result.encoded()),
+			draw_count: encode_result.draw_count
+				+ below_image_result.draw_count
+				+ above_image_result.draw_count
+				+ video_result.draw_count,
 			index_count: encode_result.index_count,
 			vertex_count: prepared.vertex_count(),
 			quad_count: prepared.quad_count(),
@@ -269,6 +331,8 @@ impl WgpuTerminalFrameRenderer {
 			glyph_atlas_gpu_cache_hit,
 			video_surface_count: video_result.surface_count,
 			video_draw_count: video_result.draw_count,
+			image_surface_count: below_image_result.surface_count + above_image_result.surface_count,
+			image_draw_count: below_image_result.draw_count + above_image_result.draw_count,
 			timings: WgpuTerminalFrameRenderTimings {
 				prepare:        prepare_time,
 				upload_plan:    upload_plan_time,
@@ -356,6 +420,8 @@ pub struct WgpuTerminalFrameRenderResult {
 	pub glyph_atlas_gpu_cache_hit: bool,
 	pub video_surface_count:       usize,
 	pub video_draw_count:          usize,
+	pub image_surface_count:       usize,
+	pub image_draw_count:          usize,
 	pub timings:                   WgpuTerminalFrameRenderTimings,
 }
 

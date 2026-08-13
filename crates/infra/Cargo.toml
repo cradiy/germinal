@@ -31,6 +31,9 @@ gstreamer-video.workspace      = true
 gstreamer-allocators.workspace = true
 compio                         = { workspace = true, features = ["runtime", "time", "io", "fs", "net"] }
 flume                          = "0.11"
+base64.workspace              = true
+flate2.workspace              = true
+png.workspace                 = true
 
 
 [target.'cfg(unix)'.dependencies]

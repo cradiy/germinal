@@ -182,6 +182,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![0],
 			cursor: None,
 		});
@@ -224,6 +225,7 @@ mod tests {
 			latest_seq: seq,
 			rows: vec![],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: None,
 		});

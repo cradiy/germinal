@@ -604,6 +604,7 @@ mod tests {
 			latest_seq: Seq::new(1),
 			rows: vec![],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: true }),
 		});
@@ -625,6 +626,7 @@ mod tests {
 			latest_seq: Seq::new(1),
 			rows: vec![],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows: vec![],
 			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: false }),
 		});
@@ -657,6 +659,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows:     Vec::new(),
 			cursor:         None,
 		});
@@ -697,6 +700,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows:     Vec::new(),
 			cursor:         None,
 		});
@@ -736,6 +740,7 @@ mod tests {
 				}],
 			}],
 			video_surfaces: vec![],
+			image_surfaces: vec![],
 			dirty_rows:     Vec::new(),
 			cursor:         None,
 		});
