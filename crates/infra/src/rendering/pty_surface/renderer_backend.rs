@@ -23,7 +23,6 @@ use germinal_ports::{
 	seq::Seq,
 };
 
-const CURSOR_OUTLINE_THICKNESS_PX: u32 = 2;
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
 const PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX: u32 = 8;
 const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
@@ -206,6 +205,10 @@ fn append_cursor_quads(
 	cursor: RenderSurfaceCursorSnapshot,
 	config: WgpuRendererConfig,
 ) {
+	if !cursor.focused {
+		return;
+	}
+
 	let x = config.content_origin_x + cursor.x * config.cell_width_px;
 	let y = config.content_origin_y + cursor.y * config.cell_height_px;
 	let w = config.cell_width_px.max(1);
@@ -217,15 +220,7 @@ fn append_cursor_quads(
 		italic:     false,
 		underline:  false,
 	};
-	if cursor.focused {
-		quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
-		return;
-	}
-	let thickness = CURSOR_OUTLINE_THICKNESS_PX.min(w).min(h).max(1);
-	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, thickness, style));
-	quads.push(WgpuQuadDrawItem::solid_rect(x, y + h.saturating_sub(thickness), w, thickness, style));
-	quads.push(WgpuQuadDrawItem::solid_rect(x, y, thickness, h, style));
-	quads.push(WgpuQuadDrawItem::solid_rect(x + w.saturating_sub(thickness), y, thickness, h, style));
+	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,7 +524,8 @@ mod tests {
 			render_target_id::RenderTargetId,
 			renderer_backend::RendererBackend,
 			surface_snapshot::{
-				RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+				RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
+				RenderSurfaceSnapshot,
 			},
 		},
 		seq::Seq,
@@ -597,6 +593,43 @@ mod tests {
 		assert_eq!(quads[0].y_px, 6);
 		assert_eq!(quads[0].width_px, 980);
 		assert_eq!(quads[0].height_px, 598);
+	}
+
+	#[test]
+	fn focused_cursor_renders_as_a_solid_cell() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id: RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows: vec![],
+			video_surfaces: vec![],
+			dirty_rows: vec![],
+			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: true }),
+		});
+
+		let cursors = backend.state().geometric_quads();
+		assert_eq!(cursors.len(), 1);
+		assert_eq!(cursors[0].x_px, 16);
+		assert_eq!(cursors[0].y_px, 48);
+		assert_eq!(cursors[0].width_px, 8);
+		assert_eq!(cursors[0].height_px, 16);
+	}
+
+	#[test]
+	fn unfocused_cursor_is_hidden() {
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id: RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			rows: vec![],
+			video_surfaces: vec![],
+			dirty_rows: vec![],
+			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: false }),
+		});
+
+		assert!(backend.state().geometric_quads().is_empty());
 	}
 
 	#[test]

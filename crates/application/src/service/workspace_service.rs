@@ -51,6 +51,19 @@ impl WorkspaceServiceState {
 			.expect("focused workspace pane must have a gshell binding")
 	}
 
+	pub fn focus_gshell(&self, gshell_id: GShellId) -> bool {
+		let pane_id = self
+			.pane_bindings
+			.borrow()
+			.iter()
+			.find_map(|(pane_id, bound_gshell_id)| (*bound_gshell_id == gshell_id).then_some(*pane_id));
+		let Some(pane_id) = pane_id else {
+			return false;
+		};
+
+		self.workspace.borrow_mut().set_focused_pane(pane_id)
+	}
+
 	pub fn focus_next_gshell(&self) -> GShellId {
 		let focused_pane = self.workspace.borrow_mut().focus_next_pane();
 		*self
@@ -189,6 +202,10 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focused_gshell()
 	}
 
+	fn focus_gshell(&self, gshell_id: GShellId) -> bool {
+		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_gshell(gshell_id)
+	}
+
 	fn focus_next_gshell(&self) -> GShellId {
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_next_gshell()
 	}
@@ -240,7 +257,9 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 
 #[cfg(test)]
 mod tests {
-	use germinal_domain::workspace::entity::workspace::Workspace;
+	use germinal_domain::{
+		gshell::vo::gshell_id::GShellId, workspace::entity::workspace::Workspace,
+	};
 	use germinal_ports::pty_host::window_size::TerminalWindowSize;
 
 	use super::WorkspaceServiceState;
@@ -262,6 +281,17 @@ mod tests {
 		assert_eq!(state.focused_gshell(), gshells[1]);
 		assert_eq!(state.focus_next_gshell(), gshells[0]);
 		assert_eq!(state.focus_next_gshell(), gshells[1]);
+	}
+
+	#[test]
+	fn state_focuses_a_visible_gshell_and_rejects_an_unknown_one() {
+		let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+		let gshells = state.visible_gshells();
+
+		assert!(state.focus_gshell(gshells[0]));
+		assert_eq!(state.focused_gshell(), gshells[0]);
+		assert!(!state.focus_gshell(GShellId::new(99)));
+		assert_eq!(state.focused_gshell(), gshells[0]);
 	}
 
 	#[test]

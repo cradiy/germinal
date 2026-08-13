@@ -47,7 +47,8 @@ use paste::{HostPasteAction, HostPasteController, HostPasteModifiers};
 use tracing::{debug, error, warn};
 use winit::{
 	application::ApplicationHandler,
-	event::{ElementState, Ime, WindowEvent},
+	dpi::PhysicalPosition,
+	event::{ElementState, Ime, MouseButton, WindowEvent},
 	event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
 	keyboard::{Key, NamedKey},
 	window::WindowId,
@@ -75,6 +76,7 @@ pub struct App {
 	render_window_id:         Option<WindowId>,
 	paste_controller:         HostPasteController,
 	window_input_modifiers:   WindowInputModifiers,
+	cursor_position:          Option<PhysicalPosition<f64>>,
 	pane_navigation_enabled:  bool,
 	config:                   GerminalConfig,
 }
@@ -122,6 +124,7 @@ impl App {
 			render_window_id: None,
 			paste_controller: HostPasteController::default(),
 			window_input_modifiers: WindowInputModifiers::new(false, false),
+			cursor_position: None,
 			pane_navigation_enabled,
 			config,
 		};
@@ -266,6 +269,28 @@ impl App {
 		true
 	}
 
+	fn try_focus_pane_at_cursor(&mut self) -> bool {
+		let Some(cursor_position) = self.cursor_position else {
+			return false;
+		};
+		let window_size = self.current_terminal_size_info().window_size();
+		let placements = self.workspace_render_layout(window_size);
+		let Some(target_id) = render_target_at_position(&placements, cursor_position) else {
+			debug!(x = cursor_position.x, y = cursor_position.y, "pane focus click missed workspace");
+			return false;
+		};
+		let gshell_id = GShellId::new(target_id.value());
+
+		if !self.focus_gshell(gshell_id) {
+			debug!(target_id = target_id.value(), "pane focus click resolved to an unknown target");
+			return false;
+		}
+
+		debug!(x = cursor_position.x, y = cursor_position.y, target_id = target_id.value(), "focused pane from pointer");
+		self.set_focused_render_target(target_id);
+		true
+	}
+
 	fn drain_media_bridge_frames(&self) {
 		let Some(render_runtime) = self.render_runtime.as_ref() else {
 			return;
@@ -399,6 +424,19 @@ impl ApplicationHandler<RuntimeEvent> for App {
 					)),
 				});
 			}
+			WindowEvent::CursorMoved { position, .. } => {
+				self.cursor_position = Some(position);
+			}
+			WindowEvent::CursorLeft { .. } => {
+				self.cursor_position = None;
+			}
+			WindowEvent::MouseInput {
+				state: ElementState::Pressed,
+				button: MouseButton::Left,
+				..
+			} => {
+				self.try_focus_pane_at_cursor();
+			}
 			WindowEvent::KeyboardInput { event, .. } => {
 				let winit::event::KeyEvent { state, logical_key, physical_key, text, .. } = event;
 				let logical_key = winit_key_to_port(logical_key);
@@ -442,6 +480,25 @@ fn matches_pane_cycle_shortcut(
 		&& modifiers.control_key()
 		&& matches!(state, WindowInputElementState::Pressed | WindowInputElementState::Released)
 		&& matches!(logical_key, WindowInputKey::Named(WindowInputNamedKey::Tab))
+}
+
+fn render_target_at_position(
+	placements: &[germinal_ports::rendering::workspace_layout::RenderSurfacePlacement],
+	position: PhysicalPosition<f64>,
+) -> Option<RenderTargetId> {
+	if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
+		return None;
+	}
+
+	placements
+		.iter()
+		.find(|placement| {
+			position.x >= f64::from(placement.x_px)
+				&& position.x < f64::from(placement.x_px.saturating_add(placement.width_px))
+				&& position.y >= f64::from(placement.y_px)
+				&& position.y < f64::from(placement.y_px.saturating_add(placement.height_px))
+		})
+		.map(|placement| placement.target_id)
 }
 
 fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
@@ -494,5 +551,25 @@ mod tests {
 			WindowInputElementState::Pressed,
 			&tab,
 		));
+	}
+
+	#[test]
+	fn pointer_position_selects_the_containing_pane() {
+		use germinal_ports::rendering::workspace_layout::RenderSurfacePlacement;
+
+		let placements = [
+			RenderSurfacePlacement::new(RenderTargetId::new(1), 0, 0, 50, 40),
+			RenderSurfacePlacement::new(RenderTargetId::new(2), 50, 0, 50, 40),
+		];
+
+		assert_eq!(
+			render_target_at_position(&placements, PhysicalPosition::new(49.9, 20.0)),
+			Some(RenderTargetId::new(1)),
+		);
+		assert_eq!(
+			render_target_at_position(&placements, PhysicalPosition::new(50.0, 20.0)),
+			Some(RenderTargetId::new(2)),
+		);
+		assert_eq!(render_target_at_position(&placements, PhysicalPosition::new(-1.0, 20.0)), None);
 	}
 }

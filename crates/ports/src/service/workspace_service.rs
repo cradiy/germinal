@@ -20,6 +20,7 @@ pub enum WorkspaceServiceError {
 
 pub trait IWorkspaceService {
 	fn focused_gshell(&self) -> GShellId;
+	fn focus_gshell(&self, gshell_id: GShellId) -> bool;
 	fn focus_next_gshell(&self) -> GShellId;
 	fn visible_gshells(&self) -> Vec<GShellId>;
 	fn workspace_render_layout(
