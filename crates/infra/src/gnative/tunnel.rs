@@ -23,7 +23,10 @@ use germinal_gnative_protocol::gnative::{
 	frame::{GNativeFrame, GNativeFrameCursor},
 	input::GNativeInputEvent,
 	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
-	tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame, GNativeHostToApp},
+	tunnel::{
+		GNATIVE_MAX_MESSAGE_BYTES, GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame,
+		GNativeHostToApp,
+	},
 };
 use germinal_ports::{
 	event::{
@@ -523,14 +526,8 @@ where
 	R: AsyncRead + Unpin + ?Sized,
 {
 	loop {
-		if let Some(newline_index) = read_buffer.iter().position(|byte| *byte == b'\n') {
-			let mut line = read_buffer.drain(..=newline_index).collect::<Vec<_>>();
-			while matches!(line.last(), Some(b'\n' | b'\r')) {
-				line.pop();
-			}
-			return serde_json::from_slice(&line)
-				.map(Some)
-				.map_err(|source| GNativeTunnelError::DecodeMessage(source).into());
+		if let Some(message) = take_buffered_app_message(read_buffer, GNATIVE_MAX_MESSAGE_BYTES)? {
+			return Ok(Some(message));
 		}
 
 		let BufResult(result, mut chunk) = reader.read(Vec::with_capacity(4096)).await;
@@ -547,6 +544,27 @@ where
 			}
 		}
 	}
+}
+
+fn take_buffered_app_message(
+	read_buffer: &mut Vec<u8>,
+	max_bytes: usize,
+) -> Result<Option<GNativeAppToHost>, GNativeTunnelError> {
+	let Some(newline_index) = read_buffer.iter().position(|byte| *byte == b'\n') else {
+		if read_buffer.len() > max_bytes {
+			return Err(GNativeTunnelError::MessageTooLarge { max_bytes });
+		}
+		return Ok(None);
+	};
+	if newline_index > max_bytes {
+		return Err(GNativeTunnelError::MessageTooLarge { max_bytes });
+	}
+
+	let mut line = read_buffer.drain(..=newline_index).collect::<Vec<_>>();
+	while matches!(line.last(), Some(b'\n' | b'\r')) {
+		line.pop();
+	}
+	serde_json::from_slice(&line).map(Some).map_err(GNativeTunnelError::DecodeMessage)
 }
 
 async fn read_frames_loop<Dispatch>(
@@ -757,10 +775,12 @@ mod tests {
 		},
 		rendering::render_target_id::RenderTargetId,
 		seq::Seq,
-		service::gnative_tunnel::IGNativeTunnel,
+		service::gnative_tunnel::{GNativeTunnelError, IGNativeTunnel},
 	};
 
-	use super::{GNativeTunnel, TextSurfaceFramePlanPresenter, present_frame};
+	use super::{
+		GNativeTunnel, TextSurfaceFramePlanPresenter, present_frame, take_buffered_app_message,
+	};
 
 	#[derive(Clone, Default)]
 	struct TestDispatcher {
@@ -937,5 +957,15 @@ mod tests {
 		assert!(dispatcher.events().is_empty());
 		assert!(presenter.surface_of(RenderTargetId::new(7)).is_none());
 		assert!(presenter.surface_of(RenderTargetId::new(8)).is_none());
+	}
+
+	#[test]
+	fn app_message_reader_rejects_a_buffer_over_the_limit() {
+		let mut buffer = b"123456789\n".to_vec();
+
+		let error =
+			take_buffered_app_message(&mut buffer, 8).expect_err("line should exceed limit");
+
+		assert!(matches!(error, GNativeTunnelError::MessageTooLarge { max_bytes: 8 }));
 	}
 }

@@ -1,7 +1,7 @@
 use std::{
 	cmp::Ordering,
 	collections::BinaryHeap,
-	io::{BufRead, BufReader, Write},
+	io::{BufRead, BufReader, Read, Write},
 	net::TcpStream,
 	sync::{
 		Arc,
@@ -16,8 +16,8 @@ use germinal_gnative_protocol::gnative::{
 	media::{GNativeAudioPacket, GNativeMediaControlCommand, GNativeVideoPacket},
 	session::{GNativeAppHello, GNativeSessionAccepted},
 	tunnel::{
-		GNativeAppMuxFrame, GNativeAppPayload, GNativeAppToHost, GNativeHostPayload, GNativeHostToApp,
-		GNativeStreamPriority,
+		GNATIVE_MAX_MESSAGE_BYTES, GNativeAppMuxFrame, GNativeAppPayload, GNativeAppToHost,
+		GNativeHostPayload, GNativeHostToApp, GNativeStreamPriority,
 	},
 };
 
@@ -230,15 +230,28 @@ fn write_app_message(stream: &mut TcpStream, message: &GNativeAppToHost) -> GNat
 	Ok(())
 }
 
-fn read_host_message(
-	reader: &mut BufReader<TcpStream>,
+fn read_host_message<R: BufRead>(reader: &mut R) -> GNativeSdkResult<Option<GNativeHostToApp>> {
+	read_host_message_with_limit(reader, GNATIVE_MAX_MESSAGE_BYTES)
+}
+
+fn read_host_message_with_limit<R: BufRead>(
+	reader: &mut R,
+	max_bytes: usize,
 ) -> GNativeSdkResult<Option<GNativeHostToApp>> {
-	let mut line = String::new();
-	let bytes_read = reader.read_line(&mut line)?;
+	let mut line = Vec::new();
+	let bytes_read = reader
+		.take(max_bytes.saturating_add(1) as u64)
+		.read_until(b'\n', &mut line)?;
 	if bytes_read == 0 {
 		return Ok(None);
 	}
-	serde_json::from_str(line.trim_end()).map(Some).map_err(GNativeSdkError::DecodeMessage)
+	if line.len() > max_bytes || !line.ends_with(b"\n") {
+		return Err(GNativeSdkError::MessageTooLarge { max_bytes });
+	}
+	while matches!(line.last(), Some(b'\n' | b'\r')) {
+		line.pop();
+	}
+	serde_json::from_slice(&line).map(Some).map_err(GNativeSdkError::DecodeMessage)
 }
 
 fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
@@ -249,6 +262,7 @@ fn strip_tcp_endpoint_prefix(endpoint: &str) -> &str {
 mod tests {
 	use std::{
 		collections::BinaryHeap,
+		io::BufReader,
 		sync::{Arc, atomic::AtomicBool, mpsc},
 		thread,
 		time::Duration,
@@ -279,6 +293,7 @@ mod tests {
 
 	use super::{
 		LocalGNativeTunnelBootstrap, MAX_OUTBOUND_BATCH, QueuedAppMessage, collect_outbound_batch,
+		read_host_message_with_limit,
 	};
 	use crate::control_sequence::GNativeTunnelEnv;
 
@@ -518,5 +533,14 @@ mod tests {
 
 		assert_eq!(batch.len(), MAX_OUTBOUND_BATCH);
 		assert_eq!(rx.len(), 32);
+	}
+
+	#[test]
+	fn host_message_reader_rejects_a_line_over_the_limit() {
+		let mut reader = BufReader::new(&b"123456789\n"[..]);
+
+		let error = read_host_message_with_limit(&mut reader, 8).expect_err("line should be rejected");
+
+		assert!(matches!(error, crate::GNativeSdkError::MessageTooLarge { max_bytes: 8 }));
 	}
 }

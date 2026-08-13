@@ -7,6 +7,8 @@ use crate::gnative::{
 	session::{GNativeAppHello, GNativeSessionAccepted},
 };
 
+pub const GNATIVE_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GNativeHostToApp {
 	Welcome(GNativeSessionAccepted),

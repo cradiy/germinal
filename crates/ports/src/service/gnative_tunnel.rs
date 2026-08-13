@@ -88,6 +88,8 @@ pub enum GNativeTunnelError {
 	DecodeMessage(#[source] serde_json::Error),
 	#[error("gnative app closed mid-message")]
 	AppClosedMidMessage,
+	#[error("gnative app message exceeds the {max_bytes}-byte limit")]
+	MessageTooLarge { max_bytes: usize },
 }
 
 pub trait IGNativeTunnel {

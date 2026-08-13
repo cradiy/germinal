@@ -30,4 +30,6 @@ pub enum GNativeSdkError {
 	FrameGshellMismatch,
 	#[error("gnative outbound queue is closed")]
 	OutboundQueueClosed,
+	#[error("gnative host message exceeds the {max_bytes}-byte limit")]
+	MessageTooLarge { max_bytes: usize },
 }
