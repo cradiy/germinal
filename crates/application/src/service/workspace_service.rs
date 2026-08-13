@@ -73,6 +73,21 @@ impl WorkspaceServiceState {
 			.expect("focused workspace pane must have a gshell binding")
 	}
 
+	pub fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
+		let pane_id = self
+			.pane_bindings
+			.borrow()
+			.iter()
+			.find_map(|(pane_id, bound_gshell_id)| (*bound_gshell_id == gshell_id).then_some(*pane_id))?;
+
+		if !self.workspace.borrow_mut().close_pane(pane_id) {
+			return None;
+		}
+
+		self.pane_bindings.borrow_mut().remove(&pane_id);
+		Some(self.focused_gshell())
+	}
+
 	pub fn visible_gshells(&self) -> Vec<GShellId> {
 		let workspace = self.workspace.borrow();
 		let bindings = self.pane_bindings.borrow();
@@ -210,6 +225,10 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_next_gshell()
 	}
 
+	fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
+		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).close_gshell(gshell_id)
+	}
+
 	fn visible_gshells(&self) -> Vec<GShellId> {
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).visible_gshells()
 	}
@@ -292,6 +311,35 @@ mod tests {
 		assert_eq!(state.focused_gshell(), gshells[0]);
 		assert!(!state.focus_gshell(GShellId::new(99)));
 		assert_eq!(state.focused_gshell(), gshells[0]);
+	}
+
+	#[test]
+	fn state_closes_a_visible_gshell_and_focuses_the_remaining_one() {
+		let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+		let gshells = state.visible_gshells();
+
+		assert_eq!(state.close_gshell(gshells[1]), Some(gshells[0]));
+		assert_eq!(state.visible_gshells(), vec![gshells[0]]);
+		assert_eq!(state.focused_gshell(), gshells[0]);
+	}
+
+	#[test]
+	fn state_preserves_focus_when_closing_an_unfocused_gshell() {
+		let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+		let gshells = state.visible_gshells();
+
+		assert_eq!(state.close_gshell(gshells[0]), Some(gshells[1]));
+		assert_eq!(state.visible_gshells(), vec![gshells[1]]);
+	}
+
+	#[test]
+	fn state_rejects_closing_the_last_or_an_unknown_gshell() {
+		let state = WorkspaceServiceState::new();
+		let only = state.focused_gshell();
+
+		assert_eq!(state.close_gshell(only), None);
+		assert_eq!(state.close_gshell(GShellId::new(99)), None);
+		assert_eq!(state.visible_gshells(), vec![only]);
 	}
 
 	#[test]

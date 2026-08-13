@@ -21,6 +21,7 @@ pub trait IPtyService {
 		snapshot_wake_pending: Arc<AtomicBool>,
 	);
 	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent);
+	fn remove_pty_host(&self, pty_host_id: PtyHostId);
 	fn resize_pty_host(
 		&self,
 		pty_host_id: PtyHostId,

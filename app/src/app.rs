@@ -365,8 +365,20 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.consume_latest_terminal_snapshot();
 				self.request_redraw();
 			}
-			RuntimeEvent::GShell(GShellRuntimeEvent::Closed { .. }) => {
-				self.exit_and_persist(event_loop);
+			RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }) => {
+				let visible_gshells = self.visible_gshells();
+				if !visible_gshells.contains(&gshell_id) {
+					debug!(gshell_id = gshell_id.value(), "ignored close event for a non-visible gshell");
+				} else if visible_gshells.len() == 1 {
+					self.exit_and_persist(event_loop);
+				} else if let Some(focused_gshell) = self.close_gshell(gshell_id) {
+					self.remove_gshell(gshell_id);
+					self.pane_navigation_enabled = self.visible_gshells().len() > 1;
+					let window_size = self.current_terminal_size_info().window_size();
+					self.resize_workspace_gshells(window_size);
+					self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
+					self.request_redraw();
+				}
 			}
 			RuntimeEvent::App(_) => {
 				self.exit_and_persist(event_loop);

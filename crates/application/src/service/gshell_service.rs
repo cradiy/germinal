@@ -94,6 +94,12 @@ impl GShellServiceState {
 		};
 		let _ = pty_host.resize(grid_size);
 	}
+
+	fn remove_gshell(&self, gshell_id: GShellId) -> Option<PtyHostId> {
+		let pty_host_id = self.shells.borrow_mut().remove(&gshell_id)?.pty_host_id();
+		self.pty_hosts.borrow_mut().remove(&pty_host_id);
+		Some(pty_host_id)
+	}
 }
 
 impl Default for GShellServiceState {
@@ -142,6 +148,16 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 	fn exit_gnative_mode(&self, gshell_id: GShellId) {
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 		state.exit_gnative_mode(gshell_id);
+	}
+
+	fn remove_gshell(&self, gshell_id: GShellId) {
+		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+		let Some(pty_host_id) = state.remove_gshell(gshell_id) else {
+			return;
+		};
+
+		self.prj_ref().remove_pty_host(pty_host_id);
+		self.prj_ref().exit_gnative_session(gshell_id);
 	}
 
 	fn route_input_to_gshell(&self, input: GShellInput) {
@@ -204,5 +220,16 @@ mod tests {
 
 		state.exit_gnative_mode(gshell_id);
 		assert_eq!(state.mode_of(gshell_id), GShellMode::Pty);
+	}
+
+	#[test]
+	fn state_removes_a_gshell_and_its_pty_host() {
+		let state = GShellServiceState::new();
+		let gshell_id = GShellId::new(7);
+		let pty_host_id = state.create_pty_host(gshell_id, TerminalGridSize::new(80, 24));
+
+		assert_eq!(state.remove_gshell(gshell_id), Some(pty_host_id));
+		assert_eq!(state.pty_host_id_of(gshell_id), None);
+		assert!(!state.pty_hosts.borrow().contains_key(&pty_host_id));
 	}
 }

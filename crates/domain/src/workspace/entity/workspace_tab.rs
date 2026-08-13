@@ -63,4 +63,22 @@ impl WorkspaceTab {
 		self.focused_pane = new_pane_id;
 		new_pane_id
 	}
+
+	pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
+		let pane_ids = self.pane_tree.pane_ids();
+		let Some(closed_index) = pane_ids.iter().position(|id| *id == pane_id) else {
+			return false;
+		};
+
+		if !self.pane_tree.remove_pane(pane_id) {
+			return false;
+		}
+
+		if self.focused_pane == pane_id {
+			let remaining = self.pane_tree.pane_ids();
+			self.focused_pane = remaining[closed_index.min(remaining.len() - 1)];
+		}
+
+		true
+	}
 }

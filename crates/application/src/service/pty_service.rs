@@ -153,6 +153,11 @@ where Deps: AsRef<PtyServiceState>
 		}
 	}
 
+	fn remove_pty_host(&self, pty_host_id: PtyHostId) {
+		let state: &PtyServiceState = self.prj_ref().as_ref();
+		state.pty_host_runtimes.borrow_mut().remove(&pty_host_id);
+	}
+
 	fn resize_pty_host(
 		&self,
 		pty_host_id: PtyHostId,

@@ -19,6 +19,7 @@ pub trait IGShellService {
 	fn begin_gnative_mode(&self, gshell_id: GShellId);
 	fn enter_gnative_mode(&self, gshell_id: GShellId);
 	fn exit_gnative_mode(&self, gshell_id: GShellId);
+	fn remove_gshell(&self, gshell_id: GShellId);
 	fn route_input_to_gshell(&self, input: GShellInput);
 	fn resize_gshell(
 		&self,

@@ -46,6 +46,10 @@ impl Workspace {
 		self.active_tab_mut().split_focused_pane(direction)
 	}
 
+	pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
+		self.active_tab_mut().close_pane(pane_id)
+	}
+
 	pub const fn active_tab_index(&self) -> usize { self.active_tab_index }
 
 	pub fn active_tab(&self) -> &WorkspaceTab { &self.tabs[self.active_tab_index] }
@@ -102,5 +106,31 @@ mod tests {
 		assert_eq!(workspace.focused_pane(), PaneId::new(1));
 		assert_eq!(workspace.focus_next_pane(), PaneId::new(0));
 		assert_eq!(workspace.focus_next_pane(), PaneId::new(1));
+	}
+
+	#[test]
+	fn closing_the_focused_pane_focuses_its_remaining_neighbor() {
+		let mut workspace = Workspace::two_pane();
+
+		assert!(workspace.close_pane(PaneId::new(1)));
+		assert_eq!(workspace.focused_pane(), PaneId::new(0));
+		assert_eq!(workspace.active_tab().pane_count(), 1);
+	}
+
+	#[test]
+	fn closing_an_unfocused_pane_preserves_focus() {
+		let mut workspace = Workspace::two_pane();
+
+		assert!(workspace.close_pane(PaneId::new(0)));
+		assert_eq!(workspace.focused_pane(), PaneId::new(1));
+		assert_eq!(workspace.active_tab().pane_count(), 1);
+	}
+
+	#[test]
+	fn closing_the_last_pane_is_rejected() {
+		let mut workspace = Workspace::main();
+
+		assert!(!workspace.close_pane(PaneId::new(0)));
+		assert_eq!(workspace.focused_pane(), PaneId::new(0));
 	}
 }

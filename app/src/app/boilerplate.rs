@@ -210,6 +210,10 @@ impl IGShellService for App {
 		GShellService::inj_ref(self).exit_gnative_mode(gshell_id)
 	}
 
+	fn remove_gshell(&self, gshell_id: GShellId) {
+		GShellService::inj_ref(self).remove_gshell(gshell_id)
+	}
+
 	fn route_input_to_gshell(&self, input: GShellInput) {
 		GShellService::inj_ref(self).route_input_to_gshell(input)
 	}
@@ -246,6 +250,10 @@ impl IPtyService for App {
 
 	fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent) {
 		PtyService::inj_ref(self).send_pty_host_input(pty_host_id, event)
+	}
+
+	fn remove_pty_host(&self, pty_host_id: PtyHostId) {
+		PtyService::inj_ref(self).remove_pty_host(pty_host_id)
 	}
 
 	fn resize_pty_host(
@@ -367,6 +375,10 @@ impl IWorkspaceService for App {
 
 	fn focus_next_gshell(&self) -> GShellId {
 		WorkspaceService::inj_ref(self).focus_next_gshell()
+	}
+
+	fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
+		WorkspaceService::inj_ref(self).close_gshell(gshell_id)
 	}
 
 	fn visible_gshells(&self) -> Vec<GShellId> {
