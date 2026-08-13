@@ -373,6 +373,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 					self.exit_and_persist(event_loop);
 				} else if let Some(focused_gshell) = self.close_gshell(gshell_id) {
 					self.remove_gshell(gshell_id);
+					self.remove_render_target(RenderTargetId::new(gshell_id.value()));
 					self.pane_navigation_enabled = self.visible_gshells().len() > 1;
 					let window_size = self.current_terminal_size_info().window_size();
 					self.resize_workspace_gshells(window_size);

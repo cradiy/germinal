@@ -24,6 +24,10 @@ impl WgpuBufferUploader {
 		}
 	}
 
+	pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
+		self.cached_buffers.borrow_mut().remove(&target_id).is_some()
+	}
+
 	pub fn upload_bytes(
 		&self,
 		device: &wgpu::Device,

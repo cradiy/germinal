@@ -18,6 +18,10 @@ pub struct WgpuTerminalGlyphAtlasGpuCache {
 impl WgpuTerminalGlyphAtlasGpuCache {
 	pub fn new() -> Self { Self { inner: RefCell::new(HashMap::new()) } }
 
+	pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
+		self.inner.borrow_mut().remove(&target_id).is_some()
+	}
+
 	pub fn get_or_upload(
 		&self,
 		device: &wgpu::Device,

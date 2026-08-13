@@ -1,5 +1,5 @@
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -24,6 +24,7 @@ pub struct RenderServiceState {
 	redraw_pending:        bool,
 	window_focused:        bool,
 	focused_render_target: Option<RenderTargetId>,
+	retired_render_targets: HashSet<RenderTargetId>,
 	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
 	surface_snapshot_rx:   Receiver<RenderSurfaceSnapshot>,
 	snapshot_wake_pending: Arc<AtomicBool>,
@@ -37,6 +38,7 @@ impl RenderServiceState {
 			redraw_pending: false,
 			window_focused: true,
 			focused_render_target: None,
+			retired_render_targets: HashSet::new(),
 			surface_snapshot_tx,
 			surface_snapshot_rx,
 			snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -51,6 +53,9 @@ impl RenderServiceState {
 		loop {
 			match self.surface_snapshot_rx.try_recv() {
 				Ok(snapshot) => {
+					if self.retired_render_targets.contains(&snapshot.target_id) {
+						continue;
+					}
 					let replace = latest_by_target
 						.get(&snapshot.target_id)
 						.is_none_or(|current| snapshot.latest_seq >= current.latest_seq);
@@ -82,6 +87,13 @@ impl RenderServiceState {
 
 		self.focused_render_target = Some(target_id);
 		true
+	}
+
+	fn retire_render_target(&mut self, target_id: RenderTargetId) {
+		self.retired_render_targets.insert(target_id);
+		if self.focused_render_target == Some(target_id) {
+			self.focused_render_target = None;
+		}
 	}
 
 	fn apply_cursor_focus(&self, snapshot: &mut RenderSurfaceSnapshot) {
@@ -209,6 +221,20 @@ where Deps: AsRef<RenderServiceState> + AsMut<RenderServiceState> + IRenderRunti
 		refresh_cursor_focus(self.prj_ref_mut());
 	}
 
+	fn remove_render_target(&mut self, target_id: RenderTargetId) {
+		{
+			let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+			state.retire_render_target(target_id);
+		}
+
+		self
+			.prj_ref_mut()
+			.window_runtime_mut()
+			.expect("window runtime must be initialized before use")
+			.remove_render_target(target_id);
+		self.prj_ref_mut().as_mut().redraw_pending = true;
+	}
+
 	fn request_redraw(&mut self) {
 		let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
 		state.request_redraw();
@@ -310,5 +336,18 @@ mod tests {
 
 		assert_eq!(snapshots.len(), 1);
 		assert_eq!(snapshots[0].latest_seq, Seq::new(5));
+	}
+
+	#[test]
+	fn draining_snapshots_discards_updates_for_retired_targets() {
+		let mut state = RenderServiceState::new();
+		state.surface_snapshot_tx.send(snapshot(1, 1)).expect("retired target snapshot");
+		state.surface_snapshot_tx.send(snapshot(2, 1)).expect("live target snapshot");
+		state.retire_render_target(RenderTargetId::new(1));
+
+		let snapshots = state.take_latest_surface_snapshots();
+
+		assert_eq!(snapshots.len(), 1);
+		assert_eq!(snapshots[0].target_id, RenderTargetId::new(2));
 	}
 }

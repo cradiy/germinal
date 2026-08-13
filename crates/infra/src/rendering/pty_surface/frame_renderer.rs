@@ -52,6 +52,12 @@ impl WgpuTerminalFrameRenderer {
 		self.frame_builder.video_surface_registry()
 	}
 
+	pub fn remove_render_target(&self, target_id: RenderTargetId) {
+		self.frame_builder.remove_render_target(target_id);
+		self.buffer_uploader.remove_render_target(target_id);
+		self.glyph_atlas_gpu_cache.remove_render_target(target_id);
+	}
+
 	pub fn prepare(
 		&self,
 		surface_snapshot: &RenderSurfaceSnapshot,

@@ -24,6 +24,13 @@ pub struct WgpuVideoSurfaceRegistry {
 }
 
 impl WgpuVideoSurfaceRegistry {
+	pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
+		let mut inner = self.inner.borrow_mut();
+		let old_len = inner.len();
+		inner.retain(|key, _| key.target_id != target_id);
+		inner.len() != old_len
+	}
+
 	pub fn sync_snapshot(&self, snapshot: &RenderSurfaceSnapshot) {
 		let mut inner = self.inner.borrow_mut();
 		let mut live_keys = HashSet::new();
@@ -211,5 +218,29 @@ mod tests {
 			Some(Seq::new(2))
 		);
 		assert_eq!(registry.registrations_for_target(target_id).len(), 1);
+	}
+
+	#[test]
+	fn removing_a_target_drops_all_of_its_video_surfaces() {
+		let registry = WgpuVideoSurfaceRegistry::default();
+		let target_id = RenderTargetId::new(7);
+		registry.sync_snapshot(&RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: vec![],
+			video_surfaces: vec![RenderSurfaceVideoSurfaceSnapshot {
+				id:        "video".to_string(),
+				x_px:      0,
+				y_px:      0,
+				width_px:  10,
+				height_px: 10,
+			}],
+			dirty_rows: vec![],
+			cursor: None,
+		});
+
+		assert!(registry.remove_render_target(target_id));
+		assert!(registry.registrations_for_target(target_id).is_empty());
+		assert!(!registry.remove_render_target(target_id));
 	}
 }

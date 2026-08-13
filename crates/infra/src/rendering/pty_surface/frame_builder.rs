@@ -88,6 +88,11 @@ impl WgpuTerminalFrameBuilder {
 
 	pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry { &self.video_surface_registry }
 
+	pub fn remove_render_target(&self, target_id: RenderTargetId) {
+		self.glyph_atlas_frame_builder.remove_render_target(target_id);
+		self.video_surface_registry.remove_render_target(target_id);
+	}
+
 	pub fn glyph_atlas_source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind {
 		self.glyph_atlas_frame_builder.source_kind()
 	}

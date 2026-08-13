@@ -359,6 +359,10 @@ impl IRenderService for App {
 		RenderService::inj_ref_mut(self).set_focused_render_target(target_id)
 	}
 
+	fn remove_render_target(&mut self, target_id: RenderTargetId) {
+		RenderService::inj_ref_mut(self).remove_render_target(target_id)
+	}
+
 	fn request_redraw(&mut self) { RenderService::inj_ref_mut(self).request_redraw() }
 
 	fn flush_redraw_request(&mut self) { RenderService::inj_ref_mut(self).flush_redraw_request() }

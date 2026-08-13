@@ -22,6 +22,7 @@ pub trait IRenderService {
 	fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;
 	fn set_window_focused(&mut self, focused: bool);
 	fn set_focused_render_target(&mut self, target_id: RenderTargetId);
+	fn remove_render_target(&mut self, target_id: RenderTargetId);
 	fn request_redraw(&mut self);
 	fn flush_redraw_request(&mut self);
 	fn present_workspace(&mut self);

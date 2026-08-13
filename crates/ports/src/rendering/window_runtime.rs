@@ -1,13 +1,15 @@
 use crate::{
 	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
 	rendering::{
-		surface_snapshot::RenderSurfaceSnapshot, workspace_layout::RenderSurfacePlacement,
+		render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+		workspace_layout::RenderSurfacePlacement,
 	},
 };
 
 pub trait ITerminalWindowRuntime {
 	fn request_window_redraw(&self);
 	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot);
+	fn remove_render_target(&mut self, target_id: RenderTargetId);
 	fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot>;
 	fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>);
 	fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;

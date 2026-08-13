@@ -231,6 +231,13 @@ impl WgpuTerminalWindowRuntime {
 		self.request_redraw();
 	}
 
+	pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
+		self.surface_snapshots.remove(&target_id);
+		self.workspace_layout.retain(|placement| placement.target_id != target_id);
+		self.presenter.frame_renderer().remove_render_target(target_id);
+		self.request_redraw();
+	}
+
 	pub fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot> {
 		self.surface_snapshots.values_mut().collect()
 	}
@@ -678,6 +685,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 
 	fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
 		WgpuTerminalWindowRuntime::set_surface_snapshot(self, snapshot);
+	}
+
+	fn remove_render_target(&mut self, target_id: RenderTargetId) {
+		WgpuTerminalWindowRuntime::remove_render_target(self, target_id);
 	}
 
 	fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot> {

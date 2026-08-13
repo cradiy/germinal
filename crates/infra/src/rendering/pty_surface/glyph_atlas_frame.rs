@@ -83,6 +83,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
 	pub fn source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind { self.source.kind() }
 
+	pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
+		self.cache.borrow_mut().remove(&target_id).is_some()
+	}
+
 	pub fn build(&self, surface_snapshot: &RenderSurfaceSnapshot) -> WgpuTerminalGlyphAtlasFrame {
 		let texts: Vec<&str> = surface_snapshot
 			.rows
@@ -387,6 +391,35 @@ mod tests {
 		assert!(!builder.build(&first_target).cache_hit);
 		assert!(!builder.build(&second_target).cache_hit);
 		assert!(builder.build(&first_target).cache_hit);
+		assert!(builder.build(&second_target).cache_hit);
+	}
+
+	#[test]
+	fn removing_a_target_invalidates_only_its_cache_entry() {
+		let snapshot = |target_id, text: &str| RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: vec![RenderSurfaceRowSnapshot {
+				y: 0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x: 0,
+					text: text.to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			video_surfaces: vec![],
+			dirty_rows: vec![0],
+			cursor: None,
+		};
+		let first_target = snapshot(RenderTargetId::new(1), "red");
+		let second_target = snapshot(RenderTargetId::new(2), "blue");
+		let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
+
+		assert!(!builder.build(&first_target).cache_hit);
+		assert!(!builder.build(&second_target).cache_hit);
+		assert!(builder.remove_render_target(first_target.target_id));
+		assert!(!builder.remove_render_target(first_target.target_id));
+		assert!(!builder.build(&first_target).cache_hit);
 		assert!(builder.build(&second_target).cache_hit);
 	}
 
