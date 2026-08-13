@@ -27,6 +27,8 @@ use crate::{
 };
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const MAX_OUTBOUND_BATCH: usize = 256;
 
 pub struct LocalGNativeTunnelBootstrap {
 	tunnel_env: GNativeTunnelEnv,
@@ -66,7 +68,7 @@ impl LocalGNativeTunnelBootstrap {
 		};
 
 		let writer_stream = stream.try_clone()?;
-		let (queue_tx, queue_rx) = flume::unbounded();
+		let (queue_tx, queue_rx) = flume::bounded(OUTBOUND_QUEUE_CAPACITY);
 		spawn_outbound_writer(writer_stream, queue_rx)?;
 
 		Ok(LocalGNativeSession {
@@ -192,13 +194,8 @@ fn spawn_outbound_writer(
 }
 
 fn run_outbound_writer(mut stream: TcpStream, queue_rx: flume::Receiver<QueuedAppMessage>) {
-	let mut pending = BinaryHeap::new();
-
 	while let Ok(message) = queue_rx.recv() {
-		pending.push(message);
-		while let Ok(message) = queue_rx.try_recv() {
-			pending.push(message);
-		}
+		let mut pending = collect_outbound_batch(message, &queue_rx);
 
 		while let Some(message) = pending.pop() {
 			if write_app_message(&mut stream, &message.message).is_err() {
@@ -206,6 +203,23 @@ fn run_outbound_writer(mut stream: TcpStream, queue_rx: flume::Receiver<QueuedAp
 			}
 		}
 	}
+}
+
+fn collect_outbound_batch(
+	first: QueuedAppMessage,
+	queue_rx: &flume::Receiver<QueuedAppMessage>,
+) -> BinaryHeap<QueuedAppMessage> {
+	let mut pending = BinaryHeap::with_capacity(MAX_OUTBOUND_BATCH);
+	pending.push(first);
+
+	for _ in 1..MAX_OUTBOUND_BATCH {
+		let Ok(message) = queue_rx.try_recv() else {
+			break;
+		};
+		pending.push(message);
+	}
+
+	pending
 }
 
 fn write_app_message(stream: &mut TcpStream, message: &GNativeAppToHost) -> GNativeSdkResult<()> {
@@ -263,7 +277,9 @@ mod tests {
 		service::gnative_tunnel::IGNativeTunnel,
 	};
 
-	use super::{LocalGNativeTunnelBootstrap, QueuedAppMessage};
+	use super::{
+		LocalGNativeTunnelBootstrap, MAX_OUTBOUND_BATCH, QueuedAppMessage, collect_outbound_batch,
+	};
 	use crate::control_sequence::GNativeTunnelEnv;
 
 	#[derive(Clone)]
@@ -473,5 +489,34 @@ mod tests {
 		assert_eq!(second.priority, GNativeStreamPriority::High);
 		assert_eq!(third.priority, GNativeStreamPriority::Normal);
 		assert_eq!(fourth.priority, GNativeStreamPriority::Low);
+	}
+
+	#[test]
+	fn outbound_batch_drain_is_bounded_under_continuous_production() {
+		let (tx, rx) = flume::unbounded();
+		for mux_seq in 1..=(MAX_OUTBOUND_BATCH as u64 + 32) {
+			tx.send(QueuedAppMessage {
+				mux_seq,
+				priority: GNativeStreamPriority::High,
+				message: GNativeAppToHost::Mux(
+					germinal_gnative_protocol::gnative::tunnel::GNativeAppMuxFrame::new(
+						mux_seq,
+						GNativeAppPayload::Render(GNativeFrame {
+							gshell_id: GShellId::new(99),
+							seq: Seq::new(mux_seq),
+							commands: Vec::new(),
+							cursor: None,
+						}),
+					),
+				),
+			})
+			.expect("test queue should stay open");
+		}
+
+		let first = rx.recv().expect("first message should exist");
+		let batch = collect_outbound_batch(first, &rx);
+
+		assert_eq!(batch.len(), MAX_OUTBOUND_BATCH);
+		assert_eq!(rx.len(), 32);
 	}
 }
