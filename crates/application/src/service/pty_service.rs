@@ -54,7 +54,7 @@ impl PtyServiceState {
 	pub fn new() -> Self {
 		Self {
 			pty_host_runtimes: RefCell::new(HashMap::new()),
-			modifiers:         RefCell::new(WindowInputModifiers::new(false, false)),
+			modifiers:         RefCell::new(WindowInputModifiers::new(false, false, false, false)),
 		}
 	}
 }
@@ -149,6 +149,10 @@ where Deps: AsRef<PtyServiceState>
 				WindowInputEvent::Paste(text) => {
 					send_pty_host_bytes(state, pty_host_id, text.into_bytes());
 				}
+				WindowInputEvent::PointerMoved { .. }
+				| WindowInputEvent::PointerLeft
+				| WindowInputEvent::PointerButton { .. }
+				| WindowInputEvent::Scroll { .. } => {}
 			},
 		}
 	}

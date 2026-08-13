@@ -244,7 +244,9 @@ mod tests {
 	use germinal_gnative_protocol::{
 		gnative::{
 			frame::GNativeFrame,
-			input::GNativeInputEvent,
+			input::{
+				GNativeInputEvent, GNativeInputModifiers, GNativePointerPosition, GNativeScrollDelta,
+			},
 			media::GNativeMediaControlCommand,
 			session::GNATIVE_PROTOCOL_VERSION,
 			tunnel::{GNativeAppPayload, GNativeAppToHost, GNativeStreamPriority},
@@ -294,7 +296,7 @@ mod tests {
 	}
 
 	#[test]
-	fn bootstrap_connects_to_host_tunnel_and_reads_viewport_resize() {
+	fn bootstrap_connects_to_host_tunnel_and_reads_viewport_and_pointer_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
 		let (event_tx, event_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
@@ -310,7 +312,10 @@ mod tests {
 
 		let app = thread::spawn(move || {
 			let mut session = bootstrap.connect().expect("session should connect host");
-			session.read_input().expect("input should read")
+			[
+				session.read_input().expect("resize should read"),
+				session.read_input().expect("pointer input should read"),
+			]
 		});
 
 		tunnel.begin_accept_session(GShellId::new(31)).expect("handshake should begin");
@@ -326,8 +331,24 @@ mod tests {
 		tunnel
 			.send_input(GShellId::new(31), resize.clone())
 			.expect("host should send input");
+		let pointer = GNativeInputEvent::Scroll {
+			delta: GNativeScrollDelta::Pixels { x: 0.25, y: -12.5 },
+			position: GNativePointerPosition { x_px: 41.75, y_px: 9.125 },
+			modifiers: GNativeInputModifiers {
+				control: false,
+				alt: false,
+				shift: true,
+				super_key: false,
+			},
+		};
+		tunnel
+			.send_input(GShellId::new(31), pointer.clone())
+			.expect("host should send pointer input");
 
-		assert_eq!(app.join().expect("app thread should join"), Some(resize));
+		assert_eq!(
+			app.join().expect("app thread should join"),
+			[Some(resize), Some(pointer)]
+		);
 	}
 
 	#[test]

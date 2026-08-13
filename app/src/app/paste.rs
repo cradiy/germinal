@@ -27,7 +27,7 @@ impl HostPressedModifiers {
 	fn shift_key(self) -> bool { self.left_shift || self.right_shift }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HostPasteAction {
 	NotHandled,
 	Handled,

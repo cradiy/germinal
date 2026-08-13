@@ -196,6 +196,11 @@ fn handle_input(app: &mut DemoHostApp, input: GNativeInputEvent) {
 		GNativeInputEvent::Bytes(bytes) => {
 			app.push_notice(format!("unsupported input: bytes {:?}", bytes));
 		}
+		GNativeInputEvent::ModifiersChanged(_)
+		| GNativeInputEvent::PointerMoved { .. }
+		| GNativeInputEvent::PointerLeft
+		| GNativeInputEvent::PointerButton { .. }
+		| GNativeInputEvent::Scroll { .. } => {}
 		GNativeInputEvent::Key { state, logical_key, text, modifiers } => {
 			handle_key_input(app, state, logical_key, text.as_deref(), modifiers);
 		}

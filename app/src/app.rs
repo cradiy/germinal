@@ -32,11 +32,11 @@ use germinal_ports::{
 		runtime_event_dispatcher::IRuntimeEventDispatcher,
 		window_input_event::{
 			WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-			WindowInputNamedKey,
+			WindowInputNamedKey, WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
 		},
 	},
 	pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
-	rendering::render_target_id::RenderTargetId,
+	rendering::{render_target_id::RenderTargetId, workspace_layout::RenderSurfacePlacement},
 	service::{
 		gnative_service::IGNativeService, gshell_service::IGShellService,
 		render_service::IRenderService, workspace_service::IWorkspaceService,
@@ -48,7 +48,7 @@ use tracing::{debug, error, warn};
 use winit::{
 	application::ApplicationHandler,
 	dpi::PhysicalPosition,
-	event::{ElementState, Ime, MouseButton, WindowEvent},
+	event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
 	event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
 	keyboard::{Key, NamedKey},
 	window::WindowId,
@@ -77,6 +77,7 @@ pub struct App {
 	paste_controller:         HostPasteController,
 	window_input_modifiers:   WindowInputModifiers,
 	cursor_position:          Option<PhysicalPosition<f64>>,
+	pointer_gshell:           Option<GShellId>,
 	pane_navigation_enabled:  bool,
 	config:                   GerminalConfig,
 }
@@ -123,8 +124,9 @@ impl App {
 			render_runtime: None,
 			render_window_id: None,
 			paste_controller: HostPasteController::default(),
-			window_input_modifiers: WindowInputModifiers::new(false, false),
+			window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
 			cursor_position: None,
+			pointer_gshell: None,
 			pane_navigation_enabled,
 			config,
 		};
@@ -287,6 +289,55 @@ impl App {
 		true
 	}
 
+	fn pointer_input_at(
+		&self,
+		position: PhysicalPosition<f64>,
+	) -> Option<(GShellId, WindowPointerPosition)> {
+		let window_size = self.current_terminal_size_info().window_size();
+		let placements = self.workspace_render_layout(window_size);
+		let placement = *render_surface_at_position(&placements, position)?;
+		let size_info = self.terminal_size_info_for_surface(placement);
+		let viewport = size_info.render_viewport();
+		Some((
+			GShellId::new(placement.target_id.value()),
+			surface_local_pointer_position(
+				placement,
+				viewport.origin_x_px(),
+				viewport.origin_y_px(),
+				position,
+			),
+		))
+	}
+
+	fn route_pointer_moved(&mut self, position: PhysicalPosition<f64>) {
+		let Some((gshell_id, local_position)) = self.pointer_input_at(position) else {
+			self.route_pointer_left();
+			return;
+		};
+
+		if self.pointer_gshell != Some(gshell_id) {
+			self.route_pointer_left();
+			self.pointer_gshell = Some(gshell_id);
+		}
+		self.route_input_to_gshell(GShellInput {
+			gshell_id,
+			event: GShellInputEvent::Window(WindowInputEvent::PointerMoved {
+				position: local_position,
+				modifiers: self.window_input_modifiers,
+			}),
+		});
+	}
+
+	fn route_pointer_left(&mut self) {
+		let Some(gshell_id) = self.pointer_gshell.take() else {
+			return;
+		};
+		self.route_input_to_gshell(GShellInput {
+			gshell_id,
+			event: GShellInputEvent::Window(WindowInputEvent::PointerLeft),
+		});
+	}
+
 	fn drain_media_bridge_frames(&self) {
 		let Some(render_runtime) = self.render_runtime.as_ref() else {
 			return;
@@ -421,6 +472,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.window_input_modifiers = WindowInputModifiers::new(
 					modifiers.state().control_key(),
 					modifiers.state().alt_key(),
+					modifiers.state().shift_key(),
+					modifiers.state().super_key(),
 				);
 				self.paste_controller.set_modifiers(HostPasteModifiers {
 					control: modifiers.state().control_key(),
@@ -429,22 +482,49 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.route_input_to_gshell(GShellInput {
 					gshell_id: self.focused_gshell(),
 					event:     GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(
-						WindowInputModifiers::new(modifiers.state().control_key(), modifiers.state().alt_key()),
+						self.window_input_modifiers,
 					)),
 				});
 			}
 			WindowEvent::CursorMoved { position, .. } => {
 				self.cursor_position = Some(position);
+				self.route_pointer_moved(position);
 			}
 			WindowEvent::CursorLeft { .. } => {
 				self.cursor_position = None;
+				self.route_pointer_left();
 			}
-			WindowEvent::MouseInput {
-				state: ElementState::Pressed,
-				button: MouseButton::Left,
-				..
-			} => {
-				self.try_focus_pane_at_cursor();
+			WindowEvent::MouseInput { state, button, .. } => {
+				if state == ElementState::Pressed && button == MouseButton::Left {
+					self.try_focus_pane_at_cursor();
+				}
+				if let Some(position) = self.cursor_position
+					&& let Some((gshell_id, local_position)) = self.pointer_input_at(position)
+				{
+					self.route_input_to_gshell(GShellInput {
+						gshell_id,
+						event: GShellInputEvent::Window(WindowInputEvent::PointerButton {
+							state: winit_element_state_to_port(state),
+							button: winit_mouse_button_to_port(button),
+							position: local_position,
+							modifiers: self.window_input_modifiers,
+						}),
+					});
+				}
+			}
+			WindowEvent::MouseWheel { delta, .. } => {
+				if let Some(position) = self.cursor_position
+					&& let Some((gshell_id, local_position)) = self.pointer_input_at(position)
+				{
+					self.route_input_to_gshell(GShellInput {
+						gshell_id,
+						event: GShellInputEvent::Window(WindowInputEvent::Scroll {
+							delta: winit_scroll_delta_to_port(delta),
+							position: local_position,
+							modifiers: self.window_input_modifiers,
+						}),
+					});
+				}
 			}
 			WindowEvent::KeyboardInput { event, .. } => {
 				let winit::event::KeyEvent { state, logical_key, physical_key, text, .. } = event;
@@ -492,9 +572,16 @@ fn matches_pane_cycle_shortcut(
 }
 
 fn render_target_at_position(
-	placements: &[germinal_ports::rendering::workspace_layout::RenderSurfacePlacement],
+	placements: &[RenderSurfacePlacement],
 	position: PhysicalPosition<f64>,
 ) -> Option<RenderTargetId> {
+	render_surface_at_position(placements, position).map(|placement| placement.target_id)
+}
+
+fn render_surface_at_position(
+	placements: &[RenderSurfacePlacement],
+	position: PhysicalPosition<f64>,
+) -> Option<&RenderSurfacePlacement> {
 	if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
 		return None;
 	}
@@ -507,7 +594,38 @@ fn render_target_at_position(
 				&& position.y >= f64::from(placement.y_px)
 				&& position.y < f64::from(placement.y_px.saturating_add(placement.height_px))
 		})
-		.map(|placement| placement.target_id)
+}
+
+fn surface_local_pointer_position(
+	placement: RenderSurfacePlacement,
+	content_origin_x_px: u32,
+	content_origin_y_px: u32,
+	position: PhysicalPosition<f64>,
+) -> WindowPointerPosition {
+	WindowPointerPosition::new(
+		position.x - f64::from(placement.x_px) - f64::from(content_origin_x_px),
+		position.y - f64::from(placement.y_px) - f64::from(content_origin_y_px),
+	)
+}
+
+fn winit_mouse_button_to_port(button: MouseButton) -> WindowPointerButton {
+	match button {
+		MouseButton::Left => WindowPointerButton::Primary,
+		MouseButton::Right => WindowPointerButton::Secondary,
+		MouseButton::Middle => WindowPointerButton::Middle,
+		MouseButton::Back => WindowPointerButton::Back,
+		MouseButton::Forward => WindowPointerButton::Forward,
+		MouseButton::Other(value) => WindowPointerButton::Other(value),
+	}
+}
+
+fn winit_scroll_delta_to_port(delta: MouseScrollDelta) -> WindowScrollDelta {
+	match delta {
+		MouseScrollDelta::LineDelta(x, y) => WindowScrollDelta::Lines { x, y },
+		MouseScrollDelta::PixelDelta(position) => {
+			WindowScrollDelta::Pixels { x: position.x, y: position.y }
+		}
+	}
 }
 
 fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
@@ -545,7 +663,7 @@ mod tests {
 
 	#[test]
 	fn ctrl_tab_cycles_panes_only_when_navigation_is_enabled() {
-		let modifiers = WindowInputModifiers::new(true, false);
+		let modifiers = WindowInputModifiers::new(true, false, false, false);
 		let tab = WindowInputKey::Named(WindowInputNamedKey::Tab);
 
 		assert!(matches_pane_cycle_shortcut(
@@ -580,5 +698,15 @@ mod tests {
 			Some(RenderTargetId::new(2)),
 		);
 		assert_eq!(render_target_at_position(&placements, PhysicalPosition::new(-1.0, 20.0)), None);
+	}
+
+	#[test]
+	fn pointer_position_is_relative_to_pane_content_origin() {
+		let placement = RenderSurfacePlacement::new(RenderTargetId::new(2), 500, 20, 300, 200);
+
+		assert_eq!(
+			surface_local_pointer_position(placement, 8, 12, PhysicalPosition::new(540.5, 70.25)),
+			WindowPointerPosition::new(32.5, 38.25)
+		);
 	}
 }

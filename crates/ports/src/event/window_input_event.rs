@@ -6,16 +6,50 @@ pub enum WindowInputElementState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowInputModifiers {
-	control: bool,
-	alt:     bool,
+	control:   bool,
+	alt:       bool,
+	shift:     bool,
+	super_key: bool,
 }
 
 impl WindowInputModifiers {
-	pub fn new(control: bool, alt: bool) -> Self { Self { control, alt } }
+	pub fn new(control: bool, alt: bool, shift: bool, super_key: bool) -> Self {
+		Self { control, alt, shift, super_key }
+	}
 
 	pub fn control_key(&self) -> bool { self.control }
 
 	pub fn alt_key(&self) -> bool { self.alt }
+
+	pub fn shift_key(&self) -> bool { self.shift }
+
+	pub fn super_key(&self) -> bool { self.super_key }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowPointerPosition {
+	pub x_px: f64,
+	pub y_px: f64,
+}
+
+impl WindowPointerPosition {
+	pub const fn new(x_px: f64, y_px: f64) -> Self { Self { x_px, y_px } }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowPointerButton {
+	Primary,
+	Secondary,
+	Middle,
+	Back,
+	Forward,
+	Other(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowScrollDelta {
+	Lines { x: f32, y: f32 },
+	Pixels { x: f64, y: f64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +75,7 @@ pub enum WindowInputKey {
 	Unidentified,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WindowInputEvent {
 	ModifiersChanged(WindowInputModifiers),
 	Key {
@@ -51,4 +85,20 @@ pub enum WindowInputEvent {
 	},
 	Ime(String),
 	Paste(String),
+	PointerMoved {
+		position:  WindowPointerPosition,
+		modifiers: WindowInputModifiers,
+	},
+	PointerLeft,
+	PointerButton {
+		state:     WindowInputElementState,
+		button:    WindowPointerButton,
+		position:  WindowPointerPosition,
+		modifiers: WindowInputModifiers,
+	},
+	Scroll {
+		delta:     WindowScrollDelta,
+		position:  WindowPointerPosition,
+		modifiers: WindowInputModifiers,
+	},
 }

@@ -7,7 +7,7 @@ use crate::gnative::{
 	session::{GNativeAppHello, GNativeSessionAccepted},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GNativeHostToApp {
 	Welcome(GNativeSessionAccepted),
 	Mux(GNativeHostMuxFrame),
@@ -36,7 +36,7 @@ pub enum GNativeStreamKind {
 	Video,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GNativeHostMuxFrame {
 	pub mux_seq:  u64,
 	pub priority: GNativeStreamPriority,
@@ -55,7 +55,7 @@ impl GNativeHostMuxFrame {
 	pub const fn kind(&self) -> GNativeStreamKind { self.payload.kind() }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GNativeHostPayload {
 	Input(GNativeInputEvent),
 }

@@ -4,7 +4,7 @@ use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::{
 	input::{
 		GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
-		GNativeInputNamedKey,
+		GNativeInputNamedKey, GNativePointerButton, GNativePointerPosition, GNativeScrollDelta,
 	},
 	session::GNativeSessionAccepted,
 };
@@ -62,7 +62,7 @@ impl GNativeServiceState {
 			.borrow()
 			.get(&gshell_id)
 			.copied()
-			.unwrap_or(WindowInputModifiers::new(false, false))
+			.unwrap_or(WindowInputModifiers::new(false, false, false, false))
 	}
 }
 
@@ -106,7 +106,6 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 
 		if let GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(modifiers)) = &input.event {
 			state.set_modifiers(gshell_id, *modifiers);
-			return;
 		}
 
 		let Some(event) = gnative_input_event_from(input, state.modifiers_of(gshell_id)) else {
@@ -149,7 +148,9 @@ fn gnative_input_event_from(
 		GShellInputEvent::Bytes(bytes) => Some(GNativeInputEvent::Bytes(bytes)),
 		GShellInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
 		GShellInputEvent::Window(window_event) => match window_event {
-			WindowInputEvent::ModifiersChanged(_) => None,
+			WindowInputEvent::ModifiersChanged(modifiers) => Some(
+				GNativeInputEvent::ModifiersChanged(gnative_input_modifiers_from(modifiers)),
+			),
 			WindowInputEvent::Key { state, logical_key, text } => Some(GNativeInputEvent::Key {
 				state:       gnative_input_state_from(state),
 				logical_key: gnative_input_key_from(&logical_key),
@@ -158,7 +159,65 @@ fn gnative_input_event_from(
 			}),
 			WindowInputEvent::Ime(text) => Some(GNativeInputEvent::Ime(text)),
 			WindowInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
+			WindowInputEvent::PointerMoved { position, modifiers } => {
+				Some(GNativeInputEvent::PointerMoved {
+					position: gnative_pointer_position_from(position),
+					modifiers: gnative_input_modifiers_from(modifiers),
+				})
+			}
+			WindowInputEvent::PointerLeft => Some(GNativeInputEvent::PointerLeft),
+			WindowInputEvent::PointerButton { state, button, position, modifiers } => {
+				Some(GNativeInputEvent::PointerButton {
+					state: gnative_input_state_from(state),
+					button: gnative_pointer_button_from(button),
+					position: gnative_pointer_position_from(position),
+					modifiers: gnative_input_modifiers_from(modifiers),
+				})
+			}
+			WindowInputEvent::Scroll { delta, position, modifiers } => Some(GNativeInputEvent::Scroll {
+				delta: match delta {
+					germinal_ports::event::window_input_event::WindowScrollDelta::Lines { x, y } => {
+						GNativeScrollDelta::Lines { x, y }
+					}
+					germinal_ports::event::window_input_event::WindowScrollDelta::Pixels { x, y } => {
+						GNativeScrollDelta::Pixels { x, y }
+					}
+				},
+				position: gnative_pointer_position_from(position),
+				modifiers: gnative_input_modifiers_from(modifiers),
+			}),
 		},
+	}
+}
+
+fn gnative_pointer_position_from(
+	position: germinal_ports::event::window_input_event::WindowPointerPosition,
+) -> GNativePointerPosition {
+	GNativePointerPosition { x_px: position.x_px, y_px: position.y_px }
+}
+
+fn gnative_pointer_button_from(
+	button: germinal_ports::event::window_input_event::WindowPointerButton,
+) -> GNativePointerButton {
+	match button {
+		germinal_ports::event::window_input_event::WindowPointerButton::Primary => {
+			GNativePointerButton::Primary
+		}
+		germinal_ports::event::window_input_event::WindowPointerButton::Secondary => {
+			GNativePointerButton::Secondary
+		}
+		germinal_ports::event::window_input_event::WindowPointerButton::Middle => {
+			GNativePointerButton::Middle
+		}
+		germinal_ports::event::window_input_event::WindowPointerButton::Back => {
+			GNativePointerButton::Back
+		}
+		germinal_ports::event::window_input_event::WindowPointerButton::Forward => {
+			GNativePointerButton::Forward
+		}
+		germinal_ports::event::window_input_event::WindowPointerButton::Other(value) => {
+			GNativePointerButton::Other(value)
+		}
 	}
 }
 
@@ -176,7 +235,12 @@ fn gnative_input_state_from(
 }
 
 fn gnative_input_modifiers_from(modifiers: WindowInputModifiers) -> GNativeInputModifiers {
-	GNativeInputModifiers { control: modifiers.control_key(), alt: modifiers.alt_key() }
+	GNativeInputModifiers {
+		control: modifiers.control_key(),
+		alt: modifiers.alt_key(),
+		shift: modifiers.shift_key(),
+		super_key: modifiers.super_key(),
+	}
 }
 
 fn gnative_input_key_from(
@@ -238,7 +302,7 @@ mod tests {
 	use germinal_gnative_protocol::gnative::{
 		input::{
 			GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
-			GNativeInputNamedKey,
+			GNativeInputNamedKey, GNativePointerPosition, GNativeScrollDelta,
 		},
 		session::GNativeSessionAccepted,
 	};
@@ -247,7 +311,7 @@ mod tests {
 			gshell_input::{GShellInput, GShellInputEvent},
 			window_input_event::{
 				WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-				WindowInputNamedKey,
+				WindowInputNamedKey, WindowPointerPosition, WindowScrollDelta,
 			},
 		},
 		pty_host::{
@@ -280,13 +344,16 @@ mod tests {
 		state.upsert_session(GNativeSessionRuntime {
 			accepted: GNativeSessionAccepted { gshell_id, protocol_version: 1 },
 		});
-		state.set_modifiers(gshell_id, WindowInputModifiers::new(true, true));
+		state.set_modifiers(gshell_id, WindowInputModifiers::new(true, true, true, true));
 
 		let removed = state.remove_session(gshell_id);
 
 		assert!(removed.is_some());
 		assert_eq!(state.session_of(gshell_id), None);
-		assert_eq!(state.modifiers_of(gshell_id), WindowInputModifiers::new(false, false));
+		assert_eq!(
+			state.modifiers_of(gshell_id),
+			WindowInputModifiers::new(false, false, false, false)
+		);
 	}
 
 	#[test]
@@ -300,14 +367,20 @@ mod tests {
 			}),
 		};
 
-		let mapped = gnative_input_event_from(input, WindowInputModifiers::new(true, false));
+		let mapped =
+			gnative_input_event_from(input, WindowInputModifiers::new(true, false, false, false));
 		assert_eq!(
 			mapped,
 			Some(GNativeInputEvent::Key {
 				state:       GNativeInputElementState::Pressed,
 				logical_key: GNativeInputKey::Character("a".to_string()),
 				text:        Some("a".to_string()),
-				modifiers:   GNativeInputModifiers { control: true, alt: false },
+				modifiers:   GNativeInputModifiers {
+					control: true,
+					alt: false,
+					shift: false,
+					super_key: false,
+				},
 			})
 		);
 	}
@@ -323,14 +396,47 @@ mod tests {
 			}),
 		};
 
-		let mapped = gnative_input_event_from(input, WindowInputModifiers::new(false, false));
+		let mapped =
+			gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false));
 		assert_eq!(
 			mapped,
 			Some(GNativeInputEvent::Key {
 				state:       GNativeInputElementState::Pressed,
 				logical_key: GNativeInputKey::Named(GNativeInputNamedKey::F1),
 				text:        None,
-				modifiers:   GNativeInputModifiers { control: false, alt: false },
+				modifiers:   GNativeInputModifiers {
+					control: false,
+					alt: false,
+					shift: false,
+					super_key: false,
+				},
+			})
+		);
+	}
+
+	#[test]
+	fn maps_pixel_scroll_with_local_position_and_all_modifiers() {
+		let modifiers = WindowInputModifiers::new(true, false, true, true);
+		let input = GShellInput {
+			gshell_id: GShellId::new(2),
+			event: GShellInputEvent::Window(WindowInputEvent::Scroll {
+				delta: WindowScrollDelta::Pixels { x: 0.25, y: -12.5 },
+				position: WindowPointerPosition::new(41.75, 9.125),
+				modifiers,
+			}),
+		};
+
+		assert_eq!(
+			gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false)),
+			Some(GNativeInputEvent::Scroll {
+				delta: GNativeScrollDelta::Pixels { x: 0.25, y: -12.5 },
+				position: GNativePointerPosition { x_px: 41.75, y_px: 9.125 },
+				modifiers: GNativeInputModifiers {
+					control: true,
+					alt: false,
+					shift: true,
+					super_key: true,
+				},
 			})
 		);
 	}
