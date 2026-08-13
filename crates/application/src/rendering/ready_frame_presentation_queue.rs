@@ -74,7 +74,11 @@ impl ReadyFramePresentationQueue {
 
 			let result = presentation_pipeline.present_frame(&frame);
 
-			summary.presented += 1;
+			if result.presented() {
+				summary.presented += 1;
+			} else {
+				summary.skipped += 1;
+			}
 
 			if result.rendered() {
 				summary.rendered += 1;
@@ -134,7 +138,10 @@ mod tests {
 	}
 
 	impl FramePlanPresenter for TestPresenter {
-		fn present(&self, frame: &BuiltFramePlan) { self.presented.borrow_mut().push(frame.clone()); }
+		fn present(&self, frame: &BuiltFramePlan) -> bool {
+			self.presented.borrow_mut().push(frame.clone());
+			true
+		}
 	}
 
 	#[derive(Debug, Default)]

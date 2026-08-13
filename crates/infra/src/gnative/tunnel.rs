@@ -573,6 +573,7 @@ async fn read_frames_loop<Dispatch>(
 
 		match message {
 			GNativeAppToHost::Mux(frame) => handle_app_mux_payload(
+				gshell_id,
 				frame.payload,
 				&dispatcher,
 				media_bridge.as_ref(),
@@ -595,6 +596,7 @@ async fn read_frames_loop<Dispatch>(
 }
 
 fn handle_app_mux_payload<Dispatch>(
+	gshell_id: GShellId,
 	payload: GNativeAppPayload,
 	dispatcher: &Dispatch,
 	media_bridge: &dyn IGNativeMediaBridge,
@@ -606,7 +608,14 @@ fn handle_app_mux_payload<Dispatch>(
 {
 	match payload {
 		GNativeAppPayload::Render(frame) => {
-			present_frame(frame, dispatcher, snapshot_wake_pending, surface_snapshot_tx, presenter)
+			present_frame(
+				gshell_id,
+				frame,
+				dispatcher,
+				snapshot_wake_pending,
+				surface_snapshot_tx,
+				presenter,
+			)
 		}
 		GNativeAppPayload::Control(command) => {
 			media_bridge.handle_media_control_command(command);
@@ -621,6 +630,7 @@ fn handle_app_mux_payload<Dispatch>(
 }
 
 fn present_frame<Dispatch>(
+	session_gshell_id: GShellId,
 	frame: GNativeFrame,
 	dispatcher: &Dispatch,
 	snapshot_wake_pending: &AtomicBool,
@@ -629,9 +639,20 @@ fn present_frame<Dispatch>(
 ) where
 	Dispatch: IRuntimeEventDispatcher,
 {
+	if frame.gshell_id != session_gshell_id {
+		warn!(
+			session_gshell_id = session_gshell_id.value(),
+			frame_gshell_id = frame.gshell_id.value(),
+			"dropped gnative frame targeting a different session"
+		);
+		return;
+	}
+
 	let target_id = RenderTargetId::new(frame.gshell_id.value());
 	let plan = BuiltFramePlan { target_id, seq: frame.seq, commands: frame.commands };
-	presenter.present(&plan);
+	if !presenter.present(&plan) {
+		return;
+	}
 	let Some(mut snapshot) = presenter.surface_snapshot_of(target_id) else {
 		return;
 	};
@@ -713,13 +734,20 @@ fn unique_token() -> String {
 #[cfg(test)]
 mod tests {
 	use std::{
-		sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
+		sync::{
+			Arc, Mutex,
+			atomic::{AtomicBool, Ordering},
+			mpsc,
+		},
 		time::{Duration, Instant},
 	};
 
 	use germinal_domain::gshell::vo::gshell_id::GShellId;
 	use germinal_gnative_protocol::{
-		gnative::{frame::GNativeFrame, input::GNativeInputEvent},
+		gnative::{
+			frame::{GNativeFrame, GNativeFrameCursor},
+			input::GNativeInputEvent,
+		},
 		rendering::frame_plan_builder::RenderCommandDto,
 	};
 	use germinal_ports::{
@@ -727,6 +755,7 @@ mod tests {
 			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
 			runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
 		},
+		rendering::render_target_id::RenderTargetId,
 		seq::Seq,
 		service::gnative_tunnel::IGNativeTunnel,
 	};
@@ -801,6 +830,7 @@ mod tests {
 		let gshell_id = GShellId::new(7);
 
 		present_frame(
+			gshell_id,
 			GNativeFrame {
 				gshell_id,
 				seq: Seq::new(1),
@@ -813,6 +843,7 @@ mod tests {
 			&presenter,
 		);
 		present_frame(
+			gshell_id,
 			GNativeFrame {
 				gshell_id,
 				seq: Seq::new(2),
@@ -833,5 +864,78 @@ mod tests {
 		);
 		assert_eq!(snapshot_rx.recv().expect("first snapshot").latest_seq, Seq::new(1));
 		assert_eq!(snapshot_rx.recv().expect("second snapshot").latest_seq, Seq::new(2));
+	}
+
+	#[test]
+	fn present_frame_drops_stale_frame_before_snapshot_and_wakeup() {
+		let dispatcher = TestDispatcher::default();
+		let wake_pending = AtomicBool::new(false);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel();
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let gshell_id = GShellId::new(7);
+
+		present_frame(
+			gshell_id,
+			GNativeFrame {
+				gshell_id,
+				seq: Seq::new(2),
+				commands: vec![RenderCommandDto::Clear],
+				cursor: None,
+			},
+			&dispatcher,
+			&wake_pending,
+			&snapshot_tx,
+			&presenter,
+		);
+		wake_pending.store(false, Ordering::Release);
+		let _ = snapshot_rx.recv().expect("new snapshot");
+		present_frame(
+			gshell_id,
+			GNativeFrame {
+				gshell_id,
+				seq: Seq::new(1),
+				commands: vec![RenderCommandDto::Clear],
+				cursor: Some(GNativeFrameCursor { x: 99, y: 99 }),
+			},
+			&dispatcher,
+			&wake_pending,
+			&snapshot_tx,
+			&presenter,
+		);
+
+		assert!(snapshot_rx.try_recv().is_err());
+		assert!(!wake_pending.load(Ordering::Acquire));
+		assert_eq!(dispatcher.events().len(), 1);
+		assert_eq!(presenter.surface_of(RenderTargetId::new(7)).unwrap().latest_seq, Seq::new(2));
+	}
+
+	#[test]
+	fn present_frame_rejects_a_frame_for_another_gshell() {
+		let dispatcher = TestDispatcher::default();
+		let wake_pending = AtomicBool::new(false);
+		let (snapshot_tx, snapshot_rx) = mpsc::channel();
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let session_gshell_id = GShellId::new(7);
+		let forged_gshell_id = GShellId::new(8);
+
+		present_frame(
+			session_gshell_id,
+			GNativeFrame {
+				gshell_id: forged_gshell_id,
+				seq: Seq::new(1),
+				commands: vec![RenderCommandDto::Clear],
+				cursor: None,
+			},
+			&dispatcher,
+			&wake_pending,
+			&snapshot_tx,
+			&presenter,
+		);
+
+		assert!(snapshot_rx.try_recv().is_err());
+		assert!(!wake_pending.load(Ordering::Acquire));
+		assert!(dispatcher.events().is_empty());
+		assert!(presenter.surface_of(RenderTargetId::new(7)).is_none());
+		assert!(presenter.surface_of(RenderTargetId::new(8)).is_none());
 	}
 }

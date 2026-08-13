@@ -1,4 +1,5 @@
 use std::{
+	cell::RefCell,
 	collections::{HashMap, HashSet},
 	sync::{
 		Arc,
@@ -15,6 +16,7 @@ use germinal_ports::{
 		workspace_layout::RenderSurfacePlacement,
 		window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
 	},
+	seq::Seq,
 	service::render_service::IRenderService,
 };
 
@@ -25,6 +27,7 @@ pub struct RenderServiceState {
 	window_focused:        bool,
 	focused_render_target: Option<RenderTargetId>,
 	retired_render_targets: HashSet<RenderTargetId>,
+	latest_surface_seqs:    RefCell<HashMap<RenderTargetId, Seq>>,
 	surface_snapshot_tx:   Sender<RenderSurfaceSnapshot>,
 	surface_snapshot_rx:   Receiver<RenderSurfaceSnapshot>,
 	snapshot_wake_pending: Arc<AtomicBool>,
@@ -39,6 +42,7 @@ impl RenderServiceState {
 			window_focused: true,
 			focused_render_target: None,
 			retired_render_targets: HashSet::new(),
+			latest_surface_seqs: RefCell::new(HashMap::new()),
 			surface_snapshot_tx,
 			surface_snapshot_rx,
 			snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -67,6 +71,19 @@ impl RenderServiceState {
 				Err(TryRecvError::Disconnected) => break,
 			}
 		}
+
+		let mut latest_surface_seqs = self.latest_surface_seqs.borrow_mut();
+		latest_by_target.retain(|target_id, snapshot| {
+			if latest_surface_seqs
+				.get(target_id)
+				.is_some_and(|latest_seq| *latest_seq >= snapshot.latest_seq)
+			{
+				return false;
+			}
+
+			latest_surface_seqs.insert(*target_id, snapshot.latest_seq);
+			true
+		});
 
 		latest_by_target.into_values().collect()
 	}
@@ -336,6 +353,17 @@ mod tests {
 
 		assert_eq!(snapshots.len(), 1);
 		assert_eq!(snapshots[0].latest_seq, Seq::new(5));
+	}
+
+	#[test]
+	fn draining_snapshots_rejects_a_stale_update_from_a_later_drain() {
+		let state = RenderServiceState::new();
+		state.surface_snapshot_tx.send(snapshot(7, 5)).expect("new snapshot");
+		assert_eq!(state.take_latest_surface_snapshots().len(), 1);
+
+		state.surface_snapshot_tx.send(snapshot(7, 2)).expect("late stale snapshot");
+
+		assert!(state.take_latest_surface_snapshots().is_empty());
 	}
 
 	#[test]

@@ -35,7 +35,15 @@ where
 	}
 
 	pub fn present_frame(&self, frame: &BuiltFramePlan) -> SurfacePresentationResult {
-		self.presenter.present(frame);
+		if !self.presenter.present(frame) {
+			return SurfacePresentationResult {
+				target_id: frame.target_id,
+				seq: frame.seq,
+				presented: false,
+				rendered: false,
+				surface_snapshot: None,
+			};
+		}
 
 		self.terminal_snapshot_provider.clear_damage_up_to(frame.target_id, frame.seq);
 
@@ -48,6 +56,7 @@ where
 		SurfacePresentationResult {
 			target_id: frame.target_id,
 			seq: frame.seq,
+			presented: true,
 			rendered: surface_snapshot.is_some(),
 			surface_snapshot,
 		}
@@ -66,11 +75,14 @@ where
 pub struct SurfacePresentationResult {
 	pub target_id:        RenderTargetId,
 	pub seq:              Seq,
+	pub presented:        bool,
 	pub rendered:         bool,
 	pub surface_snapshot: Option<RenderSurfaceSnapshot>,
 }
 
 impl SurfacePresentationResult {
+	pub fn presented(&self) -> bool { self.presented }
+
 	pub fn rendered(&self) -> bool { self.rendered }
 }
 
@@ -94,7 +106,17 @@ mod tests {
 	}
 
 	impl FramePlanPresenter for TestPresenter {
-		fn present(&self, frame: &BuiltFramePlan) { self.presented.borrow_mut().push(frame.clone()); }
+		fn present(&self, frame: &BuiltFramePlan) -> bool {
+			self.presented.borrow_mut().push(frame.clone());
+			true
+		}
+	}
+
+	#[derive(Debug, Default)]
+	struct RejectingPresenter;
+
+	impl FramePlanPresenter for RejectingPresenter {
+		fn present(&self, _frame: &BuiltFramePlan) -> bool { false }
 	}
 
 	#[derive(Debug, Default)]
@@ -190,5 +212,35 @@ mod tests {
 		assert_eq!(rendered[0].target_id, target_id);
 		assert_eq!(rendered[0].latest_seq, seq);
 		assert_eq!(rendered[0].rows[0].runs[0].text, "hello");
+	}
+
+	#[test]
+	fn rejected_frame_does_not_clear_damage_or_render_a_snapshot() {
+		let target_id = RenderTargetId::new(1);
+		let seq = Seq::new(9);
+		let surface_provider = TestSurfaceSnapshotProvider::default();
+		surface_provider.insert(RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: seq,
+			rows: vec![],
+			video_surfaces: vec![],
+			dirty_rows: vec![],
+			cursor: None,
+		});
+		let pipeline = SurfacePresentationPipeline::new(
+			RejectingPresenter,
+			surface_provider,
+			TestRendererBackend::default(),
+			TestTerminalSnapshotProvider::default(),
+		);
+		let frame = BuiltFramePlan { target_id, seq, commands: vec![] };
+
+		let result = pipeline.present_frame(&frame);
+
+		assert!(!result.presented());
+		assert!(!result.rendered());
+		assert!(result.surface_snapshot.is_none());
+		assert!(pipeline.terminal_snapshot_provider.cleared.borrow().is_empty());
+		assert!(pipeline.renderer_backend.rendered.borrow().is_empty());
 	}
 }

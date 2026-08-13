@@ -38,18 +38,22 @@ impl TextSurfaceFramePlanPresenter {
 }
 
 impl FramePlanPresenter for TextSurfaceFramePlanPresenter {
-	fn present(&self, frame: &BuiltFramePlan) {
+	fn present(&self, frame: &BuiltFramePlan) -> bool {
 		let mut inner = self.inner.borrow_mut();
+		if inner.get(&frame.target_id).is_some_and(|surface| surface.latest_seq >= frame.seq) {
+			return false;
+		}
 		let surface = inner.entry(frame.target_id).or_default();
 
 		if let Some((full_damage, dirty_rows)) = try_present_fast(surface, frame) {
 			surface.latest_seq = frame.seq;
 			surface.latest_dirty_rows = if full_damage { Vec::new() } else { dirty_rows };
-			return;
+			return true;
 		}
 
 		present_incremental(surface, frame);
 		surface.latest_seq = frame.seq;
+		true
 	}
 }
 
@@ -334,3 +338,48 @@ fn replace_text_at(target: &mut String, x: usize, text: &str) {
 }
 
 fn terminal_text_cell_width_of_chars(chars: &[char]) -> u32 { terminal_chars_cell_width(chars) }
+
+#[cfg(test)]
+mod tests {
+	use germinal_ports::rendering::frame_plan_builder::BuiltFramePlan;
+
+	use super::*;
+
+	fn text_frame(target_id: RenderTargetId, seq: u64, text: &str) -> BuiltFramePlan {
+		BuiltFramePlan {
+			target_id,
+			seq: Seq::new(seq),
+			commands: vec![
+				RenderCommandDto::Clear,
+				RenderCommandDto::TextRun { x: 0, y: 0, text: text.to_string() },
+			],
+		}
+	}
+
+	#[test]
+	fn rejects_duplicate_and_stale_frames_without_rolling_back_surface() {
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let target_id = RenderTargetId::new(7);
+
+		assert!(presenter.present(&text_frame(target_id, 2, "new")));
+		assert!(!presenter.present(&text_frame(target_id, 2, "duplicate")));
+		assert!(!presenter.present(&text_frame(target_id, 1, "stale")));
+
+		let surface = presenter.surface_of(target_id).expect("surface should remain available");
+		assert_eq!(surface.latest_seq, Seq::new(2));
+		assert_eq!(surface.text_at(0).as_deref(), Some("new"));
+	}
+
+	#[test]
+	fn sequence_order_is_tracked_independently_per_target() {
+		let presenter = TextSurfaceFramePlanPresenter::new();
+		let first_target = RenderTargetId::new(1);
+		let second_target = RenderTargetId::new(2);
+
+		assert!(presenter.present(&text_frame(first_target, 3, "first")));
+		assert!(presenter.present(&text_frame(second_target, 1, "second")));
+
+		assert_eq!(presenter.surface_of(first_target).unwrap().latest_seq, Seq::new(3));
+		assert_eq!(presenter.surface_of(second_target).unwrap().latest_seq, Seq::new(1));
+	}
+}
