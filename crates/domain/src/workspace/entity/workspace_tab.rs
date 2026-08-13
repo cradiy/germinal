@@ -42,6 +42,17 @@ impl WorkspaceTab {
 		true
 	}
 
+	pub fn focus_next_pane(&mut self) -> PaneId {
+		let pane_ids = self.pane_tree.pane_ids();
+		let current_index = pane_ids
+			.iter()
+			.position(|pane_id| *pane_id == self.focused_pane)
+			.expect("focused pane must exist in pane tree");
+		let next_pane = pane_ids[(current_index + 1) % pane_ids.len()];
+		self.focused_pane = next_pane;
+		next_pane
+	}
+
 	pub fn split_focused_pane(&mut self, direction: PaneSplitDirection) -> PaneId {
 		let new_pane_id = PaneId::new(self.next_pane_id);
 		self.next_pane_id += 1;

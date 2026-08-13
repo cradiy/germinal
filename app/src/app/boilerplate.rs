@@ -361,6 +361,10 @@ impl IRenderService for App {
 impl IWorkspaceService for App {
 	fn focused_gshell(&self) -> GShellId { WorkspaceService::inj_ref(self).focused_gshell() }
 
+	fn focus_next_gshell(&self) -> GShellId {
+		WorkspaceService::inj_ref(self).focus_next_gshell()
+	}
+
 	fn visible_gshells(&self) -> Vec<GShellId> {
 		WorkspaceService::inj_ref(self).visible_gshells()
 	}

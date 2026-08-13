@@ -74,6 +74,8 @@ pub struct App {
 	render_runtime:           Option<WgpuTerminalWindowRuntime>,
 	render_window_id:         Option<WindowId>,
 	paste_controller:         HostPasteController,
+	window_input_modifiers:   WindowInputModifiers,
+	pane_navigation_enabled:  bool,
 	config:                   GerminalConfig,
 }
 
@@ -90,6 +92,7 @@ impl App {
 		config: GerminalConfig,
 		workspace: Workspace,
 	) -> AppResult<Self> {
+		let pane_navigation_enabled = workspace.active_tab().pane_count() > 1;
 		let runtime_event_dispatcher = AppRuntimeEventDispatcher { proxy: runtime_event_proxy };
 		let media_dispatcher = {
 			let runtime_event_dispatcher = runtime_event_dispatcher.clone();
@@ -118,6 +121,8 @@ impl App {
 			render_runtime: None,
 			render_window_id: None,
 			paste_controller: HostPasteController::default(),
+			window_input_modifiers: WindowInputModifiers::new(false, false),
+			pane_navigation_enabled,
 			config,
 		};
 
@@ -239,6 +244,28 @@ impl App {
 		}
 	}
 
+	fn try_handle_pane_navigation(
+		&mut self,
+		state: WindowInputElementState,
+		logical_key: &WindowInputKey,
+	) -> bool {
+		if !matches_pane_cycle_shortcut(
+			self.pane_navigation_enabled,
+			self.window_input_modifiers,
+			state,
+			logical_key,
+		) {
+			return false;
+		}
+
+		if state == WindowInputElementState::Pressed {
+			let focused_gshell = self.focus_next_gshell();
+			self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
+		}
+
+		true
+	}
+
 	fn drain_media_bridge_frames(&self) {
 		let Some(render_runtime) = self.render_runtime.as_ref() else {
 			return;
@@ -357,6 +384,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.present_workspace();
 			}
 			WindowEvent::ModifiersChanged(modifiers) => {
+				self.window_input_modifiers = WindowInputModifiers::new(
+					modifiers.state().control_key(),
+					modifiers.state().alt_key(),
+				);
 				self.paste_controller.set_modifiers(HostPasteModifiers {
 					control: modifiers.state().control_key(),
 					shift:   modifiers.state().shift_key(),
@@ -374,6 +405,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				let state = winit_element_state_to_port(state);
 				let text = text.map(|text| text.to_string());
 				self.paste_controller.observe_key_event(state, physical_key);
+
+				if self.try_handle_pane_navigation(state, &logical_key) {
+					return;
+				}
 
 				if self.try_handle_paste_shortcut(state, &logical_key, physical_key) {
 					return;
@@ -395,6 +430,18 @@ impl ApplicationHandler<RuntimeEvent> for App {
 	}
 
 	fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) { self.flush_redraw_request(); }
+}
+
+fn matches_pane_cycle_shortcut(
+	enabled: bool,
+	modifiers: WindowInputModifiers,
+	state: WindowInputElementState,
+	logical_key: &WindowInputKey,
+) -> bool {
+	enabled
+		&& modifiers.control_key()
+		&& matches!(state, WindowInputElementState::Pressed | WindowInputElementState::Released)
+		&& matches!(logical_key, WindowInputKey::Named(WindowInputNamedKey::Tab))
 }
 
 fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
@@ -423,5 +470,29 @@ fn winit_key_to_port(key: Key) -> WindowInputKey {
 		},
 		Key::Character(text) => WindowInputKey::Character(text.to_string()),
 		_ => WindowInputKey::Unidentified,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn ctrl_tab_cycles_panes_only_when_navigation_is_enabled() {
+		let modifiers = WindowInputModifiers::new(true, false);
+		let tab = WindowInputKey::Named(WindowInputNamedKey::Tab);
+
+		assert!(matches_pane_cycle_shortcut(
+			true,
+			modifiers,
+			WindowInputElementState::Pressed,
+			&tab,
+		));
+		assert!(!matches_pane_cycle_shortcut(
+			false,
+			modifiers,
+			WindowInputElementState::Pressed,
+			&tab,
+		));
 	}
 }

@@ -51,6 +51,15 @@ impl WorkspaceServiceState {
 			.expect("focused workspace pane must have a gshell binding")
 	}
 
+	pub fn focus_next_gshell(&self) -> GShellId {
+		let focused_pane = self.workspace.borrow_mut().focus_next_pane();
+		*self
+			.pane_bindings
+			.borrow()
+			.get(&focused_pane)
+			.expect("focused workspace pane must have a gshell binding")
+	}
+
 	pub fn visible_gshells(&self) -> Vec<GShellId> {
 		let workspace = self.workspace.borrow();
 		let bindings = self.pane_bindings.borrow();
@@ -180,6 +189,10 @@ where Deps: AsRef<WorkspaceServiceState> + IRepository<Id = u64, Aggregate = Wor
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focused_gshell()
 	}
 
+	fn focus_next_gshell(&self) -> GShellId {
+		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_next_gshell()
+	}
+
 	fn visible_gshells(&self) -> Vec<GShellId> {
 		<Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).visible_gshells()
 	}
@@ -247,6 +260,8 @@ mod tests {
 		assert_eq!(gshells.len(), 2);
 		assert_ne!(gshells[0], gshells[1]);
 		assert_eq!(state.focused_gshell(), gshells[1]);
+		assert_eq!(state.focus_next_gshell(), gshells[0]);
+		assert_eq!(state.focus_next_gshell(), gshells[1]);
 	}
 
 	#[test]

@@ -1,4 +1,6 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
+
+use germinal_ports::rendering::render_target_id::RenderTargetId;
 
 use crate::rendering::pty_surface::{
 	glyph_atlas_bind_group::{
@@ -10,11 +12,11 @@ use crate::rendering::pty_surface::{
 
 #[derive(Clone)]
 pub struct WgpuTerminalGlyphAtlasGpuCache {
-	inner: RefCell<Option<WgpuTerminalGlyphAtlasGpuCacheEntry>>,
+	inner: RefCell<HashMap<RenderTargetId, WgpuTerminalGlyphAtlasGpuCacheEntry>>,
 }
 
 impl WgpuTerminalGlyphAtlasGpuCache {
-	pub fn new() -> Self { Self { inner: RefCell::new(None) } }
+	pub fn new() -> Self { Self { inner: RefCell::new(HashMap::new()) } }
 
 	pub fn get_or_upload(
 		&self,
@@ -36,7 +38,7 @@ impl WgpuTerminalGlyphAtlasGpuCache {
 		{
 			let cache = self.inner.borrow();
 
-			if let Some(entry) = cache.as_ref()
+			if let Some(entry) = cache.get(&glyph_atlas_frame.target_id)
 				&& entry.key == key
 			{
 				return WgpuTerminalGlyphAtlasGpuCacheResult {
@@ -70,11 +72,14 @@ impl WgpuTerminalGlyphAtlasGpuCache {
 		{
 			let mut cache = self.inner.borrow_mut();
 
-			*cache = Some(WgpuTerminalGlyphAtlasGpuCacheEntry {
-				key,
-				texture: Arc::clone(&texture),
-				bind_group: Arc::clone(&bind_group),
-			});
+			cache.insert(
+				glyph_atlas_frame.target_id,
+				WgpuTerminalGlyphAtlasGpuCacheEntry {
+					key,
+					texture: Arc::clone(&texture),
+					bind_group: Arc::clone(&bind_group),
+				},
+			);
 		}
 
 		WgpuTerminalGlyphAtlasGpuCacheResult {
@@ -91,9 +96,11 @@ impl Default for WgpuTerminalGlyphAtlasGpuCache {
 
 impl std::fmt::Debug for WgpuTerminalGlyphAtlasGpuCache {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		let has_entry = self.inner.borrow().is_some();
+		let entry_count = self.inner.borrow().len();
 
-		f.debug_struct("WgpuTerminalGlyphAtlasGpuCache").field("has_entry", &has_entry).finish()
+		f.debug_struct("WgpuTerminalGlyphAtlasGpuCache")
+			.field("entry_count", &entry_count)
+			.finish()
 	}
 }
 

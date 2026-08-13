@@ -10,15 +10,22 @@ use crate::rendering::pty_surface::{
 	pipeline_factory::WgpuTerminalPipeline,
 	render_target_plan::WgpuTerminalRenderTargetPlan,
 	renderer_backend::WgpuRendererConfig,
+	workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
 
 #[derive(Debug, Clone)]
 pub struct WgpuTerminalSurfaceFramePresenter {
-	frame_renderer: WgpuTerminalFrameRenderer,
+	frame_renderer:     WgpuTerminalFrameRenderer,
+	divider_renderer:   WgpuWorkspaceDividerRenderer,
 }
 
 impl WgpuTerminalSurfaceFramePresenter {
-	pub fn new(frame_renderer: WgpuTerminalFrameRenderer) -> Self { Self { frame_renderer } }
+	pub fn new(
+		frame_renderer: WgpuTerminalFrameRenderer,
+		divider_renderer: WgpuWorkspaceDividerRenderer,
+	) -> Self {
+		Self { frame_renderer, divider_renderer }
+	}
 
 	pub fn frame_renderer(&self) -> &WgpuTerminalFrameRenderer { &self.frame_renderer }
 
@@ -80,6 +87,10 @@ impl WgpuTerminalSurfaceFramePresenter {
 				)
 			})
 			.collect();
+		let render_target_plans =
+			input.surfaces.iter().map(|surface| surface.render_target_plan).collect::<Vec<_>>();
+		let divider_draw_count =
+			self.divider_renderer.encode(&mut command_encoder, &target_view, &render_target_plans);
 		let render_to_view = render_to_view_started_at.elapsed();
 
 		let submit_started_at = Instant::now();
@@ -92,6 +103,7 @@ impl WgpuTerminalSurfaceFramePresenter {
 
 		Ok(WgpuTerminalWorkspaceFramePresentResult {
 			render_results,
+			divider_draw_count,
 			acquired_surface_frame: true,
 			submitted: true,
 			presented: true,
@@ -144,10 +156,6 @@ pub struct WgpuTerminalWorkspaceSurface<'a> {
 	pub renderer_config:    WgpuRendererConfig,
 }
 
-impl Default for WgpuTerminalSurfaceFramePresenter {
-	fn default() -> Self { Self::new(WgpuTerminalFrameRenderer::default()) }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WgpuTerminalSurfaceFrameTimings {
 	pub acquire_surface_texture: Duration,
@@ -162,6 +170,7 @@ pub struct WgpuTerminalSurfaceFrameTimings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WgpuTerminalWorkspaceFramePresentResult {
 	pub render_results:         Vec<WgpuTerminalFrameRenderResult>,
+	pub divider_draw_count:     usize,
 	pub acquired_surface_frame: bool,
 	pub submitted:              bool,
 	pub presented:              bool,

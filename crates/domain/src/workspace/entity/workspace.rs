@@ -40,6 +40,8 @@ impl Workspace {
 		self.active_tab_mut().focus_pane(pane_id)
 	}
 
+	pub fn focus_next_pane(&mut self) -> PaneId { self.active_tab_mut().focus_next_pane() }
+
 	pub fn split_focused_pane(&mut self, direction: PaneSplitDirection) -> PaneId {
 		self.active_tab_mut().split_focused_pane(direction)
 	}
@@ -91,5 +93,14 @@ mod tests {
 
 		assert!(!workspace.set_focused_pane(PaneId::new(7)));
 		assert_eq!(workspace.focused_pane(), PaneId::new(0));
+	}
+
+	#[test]
+	fn focus_next_pane_cycles_in_tree_order() {
+		let mut workspace = Workspace::two_pane();
+
+		assert_eq!(workspace.focused_pane(), PaneId::new(1));
+		assert_eq!(workspace.focus_next_pane(), PaneId::new(0));
+		assert_eq!(workspace.focus_next_pane(), PaneId::new(1));
 	}
 }

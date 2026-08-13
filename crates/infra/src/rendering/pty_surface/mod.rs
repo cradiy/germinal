@@ -29,3 +29,4 @@ pub mod video_surface_frame;
 pub mod video_surface_dmabuf_importer;
 pub mod viewport_bind_group;
 pub mod window_runtime;
+pub mod workspace_divider_renderer;

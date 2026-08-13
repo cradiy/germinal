@@ -1,4 +1,7 @@
-use std::{cell::RefCell, collections::BTreeSet};
+use std::{
+	cell::RefCell,
+	collections::{BTreeSet, HashMap},
+};
 
 use germinal_ports::{
 	rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
@@ -43,7 +46,7 @@ impl WgpuTerminalGlyphAtlasFrame {
 pub struct WgpuTerminalGlyphAtlasFrameBuilder {
 	source:          WgpuTerminalGlyphAtlasSource,
 	texture_factory: WgpuTerminalGlyphAtlasTextureFactory,
-	cache:           RefCell<Option<WgpuTerminalGlyphAtlasCacheEntry>>,
+	cache:           RefCell<HashMap<RenderTargetId, WgpuTerminalGlyphAtlasCacheEntry>>,
 }
 
 impl WgpuTerminalGlyphAtlasFrameBuilder {
@@ -53,7 +56,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 		Self {
 			source:          WgpuTerminalGlyphAtlasSource::Debug5x7(WgpuDebugGlyphAtlasBuilder::new()),
 			texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
-			cache:           RefCell::new(None),
+			cache:           RefCell::new(HashMap::new()),
 		}
 	}
 
@@ -66,7 +69,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 				WgpuCrossfontGlyphAtlasBuilder::new(font_family, font_size_px)?,
 			),
 			texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
-			cache:           RefCell::new(None),
+			cache:           RefCell::new(HashMap::new()),
 		})
 	}
 
@@ -74,7 +77,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 		Self {
 			source:          WgpuTerminalGlyphAtlasSource::Crossfont(crossfont_builder),
 			texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
-			cache:           RefCell::new(None),
+			cache:           RefCell::new(HashMap::new()),
 		}
 	}
 
@@ -97,7 +100,8 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 			glyphs: glyphs.iter().copied().collect(),
 		};
 
-		let (atlas, cache_hit) = self.cached_or_build_atlas(&cache_key);
+		let (atlas, cache_hit) =
+			self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key);
 
 		let upload_bytes = self.texture_factory.build_upload_bytes(&atlas);
 
@@ -115,12 +119,13 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
 	fn cached_or_build_atlas(
 		&self,
+		target_id: RenderTargetId,
 		cache_key: &WgpuTerminalGlyphAtlasCacheKey,
 	) -> (WgpuTerminalGlyphAtlas, bool) {
 		{
 			let cache = self.cache.borrow();
 
-			if let Some(entry) = cache.as_ref()
+			if let Some(entry) = cache.get(&target_id)
 				&& entry.key.source == cache_key.source
 				&& entry.key == *cache_key
 			{
@@ -133,8 +138,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 		{
 			let mut cache = self.cache.borrow_mut();
 
-			*cache =
-				Some(WgpuTerminalGlyphAtlasCacheEntry { key: cache_key.clone(), atlas: atlas.clone() });
+			cache.insert(
+				target_id,
+				WgpuTerminalGlyphAtlasCacheEntry { key: cache_key.clone(), atlas: atlas.clone() },
+			);
 		}
 
 		(atlas, false)
@@ -354,6 +361,33 @@ mod tests {
 
 		assert!(!first.cache_hit);
 		assert!(!second.cache_hit);
+	}
+
+	#[test]
+	fn different_targets_keep_independent_cache_entries() {
+		let snapshot = |target_id, text: &str| RenderSurfaceSnapshot {
+			target_id,
+			latest_seq: Seq::new(1),
+			rows: vec![RenderSurfaceRowSnapshot {
+				y: 0,
+				runs: vec![RenderSurfaceRunSnapshot {
+					x: 0,
+					text: text.to_string(),
+					style: TextStyleDto::plain(),
+				}],
+			}],
+			video_surfaces: vec![],
+			dirty_rows: vec![0],
+			cursor: None,
+		};
+		let first_target = snapshot(RenderTargetId::new(1), "red");
+		let second_target = snapshot(RenderTargetId::new(2), "blue");
+		let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
+
+		assert!(!builder.build(&first_target).cache_hit);
+		assert!(!builder.build(&second_target).cache_hit);
+		assert!(builder.build(&first_target).cache_hit);
+		assert!(builder.build(&second_target).cache_hit);
 	}
 
 	#[test]

@@ -737,6 +737,24 @@ mod tests {
 	}
 
 	#[test]
+	fn exports_eza_bold_blue_as_blue() {
+		let store = AlacrittyTerminalStore::new();
+		let target_id = RenderTargetId::new(1);
+
+		store.apply_bytes(target_id, Seq::new(1), b"\x1b[1;34mAndroid\x1b[0m");
+
+		let snapshot = store.snapshot_of(target_id).unwrap();
+		let run = snapshot
+			.text_runs
+			.iter()
+			.find(|run| run.text == "Android")
+			.expect("eza-style directory run should exist");
+
+		assert_eq!(run.style.foreground, Some(RgbColorDto::new(36, 114, 200)));
+		assert!(run.style.bold);
+	}
+
+	#[test]
 	fn clear_damage_up_to_resets_full_damage() {
 		let store = AlacrittyTerminalStore::new();
 		let target_id = RenderTargetId::new(1);

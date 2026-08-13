@@ -40,6 +40,7 @@ use crate::rendering::pty_surface::{
 	},
 	video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
 	video_surface_registry::WgpuVideoSurfaceRegistry,
+	workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
 
 #[derive(Debug, Error)]
@@ -168,7 +169,8 @@ impl WgpuTerminalWindowRuntime {
 			device.limits().max_texture_dimension_2d,
 		)?;
 		let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);
-		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer);
+		let divider_renderer = WgpuWorkspaceDividerRenderer::new(&device, surface_config.format);
+		let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer, divider_renderer);
 
 		Ok(Self {
 			window,
