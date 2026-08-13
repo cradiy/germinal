@@ -55,6 +55,17 @@ pub enum WindowScrollDelta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowInputNamedKey {
 	F1,
+	F2,
+	F3,
+	F4,
+	F5,
+	F6,
+	F7,
+	F8,
+	F9,
+	F10,
+	F11,
+	F12,
 	Enter,
 	Tab,
 	Backspace,
@@ -65,7 +76,10 @@ pub enum WindowInputNamedKey {
 	ArrowLeft,
 	Home,
 	End,
+	Insert,
 	Delete,
+	PageUp,
+	PageDown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

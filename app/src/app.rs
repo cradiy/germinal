@@ -669,6 +669,17 @@ fn winit_key_to_port(key: Key) -> WindowInputKey {
 	match key {
 		Key::Named(named) => match named {
 			NamedKey::F1 => WindowInputKey::Named(WindowInputNamedKey::F1),
+			NamedKey::F2 => WindowInputKey::Named(WindowInputNamedKey::F2),
+			NamedKey::F3 => WindowInputKey::Named(WindowInputNamedKey::F3),
+			NamedKey::F4 => WindowInputKey::Named(WindowInputNamedKey::F4),
+			NamedKey::F5 => WindowInputKey::Named(WindowInputNamedKey::F5),
+			NamedKey::F6 => WindowInputKey::Named(WindowInputNamedKey::F6),
+			NamedKey::F7 => WindowInputKey::Named(WindowInputNamedKey::F7),
+			NamedKey::F8 => WindowInputKey::Named(WindowInputNamedKey::F8),
+			NamedKey::F9 => WindowInputKey::Named(WindowInputNamedKey::F9),
+			NamedKey::F10 => WindowInputKey::Named(WindowInputNamedKey::F10),
+			NamedKey::F11 => WindowInputKey::Named(WindowInputNamedKey::F11),
+			NamedKey::F12 => WindowInputKey::Named(WindowInputNamedKey::F12),
 			NamedKey::Enter => WindowInputKey::Named(WindowInputNamedKey::Enter),
 			NamedKey::Tab => WindowInputKey::Named(WindowInputNamedKey::Tab),
 			NamedKey::Backspace => WindowInputKey::Named(WindowInputNamedKey::Backspace),
@@ -679,7 +690,10 @@ fn winit_key_to_port(key: Key) -> WindowInputKey {
 			NamedKey::ArrowLeft => WindowInputKey::Named(WindowInputNamedKey::ArrowLeft),
 			NamedKey::Home => WindowInputKey::Named(WindowInputNamedKey::Home),
 			NamedKey::End => WindowInputKey::Named(WindowInputNamedKey::End),
+			NamedKey::Insert => WindowInputKey::Named(WindowInputNamedKey::Insert),
 			NamedKey::Delete => WindowInputKey::Named(WindowInputNamedKey::Delete),
+			NamedKey::PageUp => WindowInputKey::Named(WindowInputNamedKey::PageUp),
+			NamedKey::PageDown => WindowInputKey::Named(WindowInputNamedKey::PageDown),
 			_ => WindowInputKey::Unidentified,
 		},
 		Key::Character(text) => WindowInputKey::Character(text.to_string()),
@@ -708,6 +722,21 @@ mod tests {
 			WindowInputElementState::Pressed,
 			&tab,
 		));
+	}
+
+	#[test]
+	fn maps_extended_terminal_named_keys() {
+		let cases = [
+			(NamedKey::F2, WindowInputNamedKey::F2),
+			(NamedKey::F12, WindowInputNamedKey::F12),
+			(NamedKey::Insert, WindowInputNamedKey::Insert),
+			(NamedKey::PageUp, WindowInputNamedKey::PageUp),
+			(NamedKey::PageDown, WindowInputNamedKey::PageDown),
+		];
+
+		for (winit_key, port_key) in cases {
+			assert_eq!(winit_key_to_port(Key::Named(winit_key)), WindowInputKey::Named(port_key));
+		}
 	}
 
 	#[test]

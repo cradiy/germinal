@@ -249,7 +249,7 @@ fn gnative_input_key_from(
 ) -> GNativeInputKey {
 	match key {
 		germinal_ports::event::window_input_event::WindowInputKey::Named(named) => {
-			GNativeInputKey::Named(match named {
+			let named = match named {
 				germinal_ports::event::window_input_event::WindowInputNamedKey::F1 => {
 					GNativeInputNamedKey::F1
 				}
@@ -286,7 +286,9 @@ fn gnative_input_key_from(
 				germinal_ports::event::window_input_event::WindowInputNamedKey::Delete => {
 					GNativeInputNamedKey::Delete
 				}
-			})
+				_ => return GNativeInputKey::Unidentified,
+			};
+			GNativeInputKey::Named(named)
 		}
 		germinal_ports::event::window_input_event::WindowInputKey::Character(text) => {
 			GNativeInputKey::Character(text.to_string())
@@ -323,7 +325,8 @@ mod tests {
 	};
 
 	use super::{
-		GNativeServiceState, GNativeSessionRuntime, gnative_input_event_from, gnative_resize_event,
+		GNativeServiceState, GNativeSessionRuntime, gnative_input_event_from, gnative_input_key_from,
+		gnative_resize_event,
 	};
 
 	#[test]
@@ -336,6 +339,18 @@ mod tests {
 		state.upsert_session(runtime.clone());
 
 		assert_eq!(state.session_of(GShellId::new(9)), Some(runtime));
+	}
+
+	#[test]
+	fn extended_pty_keys_do_not_change_the_gnative_protocol() {
+		assert_eq!(
+			gnative_input_key_from(&WindowInputKey::Named(WindowInputNamedKey::F2)),
+			GNativeInputKey::Unidentified,
+		);
+		assert_eq!(
+			gnative_input_key_from(&WindowInputKey::Named(WindowInputNamedKey::PageDown)),
+			GNativeInputKey::Unidentified,
+		);
 	}
 
 	#[test]

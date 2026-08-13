@@ -24,12 +24,13 @@ pub(super) fn encode_key_event(
 		return None;
 	}
 
-	if let Some(bytes) = named_key_bytes(modes, logical_key) {
+	if let Some(bytes) = named_key_bytes(modes, modifiers, logical_key) {
 		return Some(bytes);
 	}
 
 	if modifiers.control_key() {
-		return ctrl_bytes_from_key(logical_key);
+		return ctrl_bytes_from_key(logical_key)
+			.map(|bytes| prefix_escape_if(bytes, modifiers.alt_key()));
 	}
 
 	if modifiers.alt_key() {
@@ -279,30 +280,106 @@ fn append_scroll_reports(
 	}
 }
 
-fn named_key_bytes(modes: TerminalInputModes, key: &WindowInputKey) -> Option<Vec<u8>> {
-	let app_cursor = modes.app_cursor();
-	match key {
-		WindowInputKey::Named(WindowInputNamedKey::Enter) => Some(b"\r".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Tab) => Some(b"\t".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Backspace) => Some(vec![0x7F]),
-		WindowInputKey::Named(WindowInputNamedKey::Escape) => Some(vec![0x1B]),
-		WindowInputKey::Named(WindowInputNamedKey::ArrowUp) => {
-			Some(if app_cursor { b"\x1bOA" } else { b"\x1b[A" }.to_vec())
+fn named_key_bytes(
+	modes: TerminalInputModes,
+	modifiers: WindowInputModifiers,
+	key: &WindowInputKey,
+) -> Option<Vec<u8>> {
+	let WindowInputKey::Named(key) = key else {
+		return None;
+	};
+
+	let bytes = match key {
+		WindowInputNamedKey::Enter => prefix_escape_if(b"\r".to_vec(), modifiers.alt_key()),
+		WindowInputNamedKey::Tab if modifiers.shift_key() => {
+			prefix_escape_if(b"\x1b[Z".to_vec(), modifiers.alt_key())
 		},
-		WindowInputKey::Named(WindowInputNamedKey::ArrowDown) => {
-			Some(if app_cursor { b"\x1bOB" } else { b"\x1b[B" }.to_vec())
+		WindowInputNamedKey::Tab => prefix_escape_if(b"\t".to_vec(), modifiers.alt_key()),
+		WindowInputNamedKey::Backspace => {
+			prefix_escape_if(vec![0x7F], modifiers.alt_key())
 		},
-		WindowInputKey::Named(WindowInputNamedKey::ArrowRight) => {
-			Some(if app_cursor { b"\x1bOC" } else { b"\x1b[C" }.to_vec())
+		WindowInputNamedKey::Escape => prefix_escape_if(vec![0x1B], modifiers.alt_key()),
+		WindowInputNamedKey::ArrowUp => {
+			cursor_key_sequence('A', modes.app_cursor(), modifiers)
 		},
-		WindowInputKey::Named(WindowInputNamedKey::ArrowLeft) => {
-			Some(if app_cursor { b"\x1bOD" } else { b"\x1b[D" }.to_vec())
+		WindowInputNamedKey::ArrowDown => {
+			cursor_key_sequence('B', modes.app_cursor(), modifiers)
 		},
-		WindowInputKey::Named(WindowInputNamedKey::Home) => Some(b"\x1b[H".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::End) => Some(b"\x1b[F".to_vec()),
-		WindowInputKey::Named(WindowInputNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-		_ => None,
+		WindowInputNamedKey::ArrowRight => {
+			cursor_key_sequence('C', modes.app_cursor(), modifiers)
+		},
+		WindowInputNamedKey::ArrowLeft => {
+			cursor_key_sequence('D', modes.app_cursor(), modifiers)
+		},
+		WindowInputNamedKey::Home => {
+			cursor_key_sequence('H', modes.app_cursor(), modifiers)
+		},
+		WindowInputNamedKey::End => {
+			cursor_key_sequence('F', modes.app_cursor(), modifiers)
+		},
+		WindowInputNamedKey::Insert => tilde_key_sequence(2, modifiers),
+		WindowInputNamedKey::Delete => tilde_key_sequence(3, modifiers),
+		WindowInputNamedKey::PageUp => tilde_key_sequence(5, modifiers),
+		WindowInputNamedKey::PageDown => tilde_key_sequence(6, modifiers),
+		WindowInputNamedKey::F1 => function_key_sequence('P', modifiers),
+		WindowInputNamedKey::F2 => function_key_sequence('Q', modifiers),
+		WindowInputNamedKey::F3 => function_key_sequence('R', modifiers),
+		WindowInputNamedKey::F4 => function_key_sequence('S', modifiers),
+		WindowInputNamedKey::F5 => tilde_key_sequence(15, modifiers),
+		WindowInputNamedKey::F6 => tilde_key_sequence(17, modifiers),
+		WindowInputNamedKey::F7 => tilde_key_sequence(18, modifiers),
+		WindowInputNamedKey::F8 => tilde_key_sequence(19, modifiers),
+		WindowInputNamedKey::F9 => tilde_key_sequence(20, modifiers),
+		WindowInputNamedKey::F10 => tilde_key_sequence(21, modifiers),
+		WindowInputNamedKey::F11 => tilde_key_sequence(23, modifiers),
+		WindowInputNamedKey::F12 => tilde_key_sequence(24, modifiers),
+	};
+
+	Some(bytes)
+}
+
+fn cursor_key_sequence(
+	terminator: char,
+	app_cursor: bool,
+	modifiers: WindowInputModifiers,
+) -> Vec<u8> {
+	match keyboard_modifier_parameter(modifiers) {
+		Some(modifier) => format!("\x1b[1;{modifier}{terminator}").into_bytes(),
+		None if app_cursor => format!("\x1bO{terminator}").into_bytes(),
+		None => format!("\x1b[{terminator}").into_bytes(),
 	}
+}
+
+fn function_key_sequence(
+	terminator: char,
+	modifiers: WindowInputModifiers,
+) -> Vec<u8> {
+	match keyboard_modifier_parameter(modifiers) {
+		Some(modifier) => format!("\x1b[1;{modifier}{terminator}").into_bytes(),
+		None => format!("\x1bO{terminator}").into_bytes(),
+	}
+}
+
+fn tilde_key_sequence(code: u8, modifiers: WindowInputModifiers) -> Vec<u8> {
+	match keyboard_modifier_parameter(modifiers) {
+		Some(modifier) => format!("\x1b[{code};{modifier}~").into_bytes(),
+		None => format!("\x1b[{code}~").into_bytes(),
+	}
+}
+
+fn keyboard_modifier_parameter(modifiers: WindowInputModifiers) -> Option<u8> {
+	let bits = u8::from(modifiers.shift_key())
+		+ u8::from(modifiers.alt_key()) * 2
+		+ u8::from(modifiers.control_key()) * 4
+		+ u8::from(modifiers.super_key()) * 8;
+	(bits != 0).then_some(bits + 1)
+}
+
+fn prefix_escape_if(mut bytes: Vec<u8>, prefix: bool) -> Vec<u8> {
+	if prefix {
+		bytes.insert(0, 0x1B);
+	}
+	bytes
 }
 
 fn text_bytes(key: &WindowInputKey, text: Option<&str>) -> Option<Vec<u8>> {
@@ -394,6 +471,21 @@ mod tests {
 		)
 	}
 
+	fn encoded_named_key(
+		terminal_modes: TerminalInputModes,
+		modifiers: WindowInputModifiers,
+		key: WindowInputNamedKey,
+	) -> Vec<u8> {
+		encode_key_event(
+			terminal_modes,
+			modifiers,
+			WindowInputElementState::Pressed,
+			&WindowInputKey::Named(key),
+			None,
+		)
+		.unwrap()
+	}
+
 	#[test]
 	fn application_cursor_mode_changes_arrow_sequences() {
 		let modifiers = WindowInputModifiers::new(false, false, false, false);
@@ -417,6 +509,105 @@ mod tests {
 				None,
 			),
 			Some(b"\x1bOA".to_vec())
+		);
+		assert_eq!(
+			encoded_named_key(
+				modes(true, false, false, false, false, false),
+				modifiers,
+				WindowInputNamedKey::Home,
+			),
+			b"\x1bOH",
+		);
+	}
+
+	#[test]
+	fn xterm_modifiers_are_encoded_for_navigation_keys() {
+		let terminal_modes = modes(true, false, false, false, false, false);
+		assert_eq!(
+			encoded_named_key(
+				terminal_modes,
+				WindowInputModifiers::new(true, false, false, false),
+				WindowInputNamedKey::ArrowLeft,
+			),
+			b"\x1b[1;5D",
+		);
+		assert_eq!(
+			encoded_named_key(
+				terminal_modes,
+				WindowInputModifiers::new(false, true, true, false),
+				WindowInputNamedKey::End,
+			),
+			b"\x1b[1;4F",
+		);
+		assert_eq!(
+			encoded_named_key(
+				terminal_modes,
+				WindowInputModifiers::new(false, false, false, true),
+				WindowInputNamedKey::PageDown,
+			),
+			b"\x1b[6;9~",
+		);
+	}
+
+	#[test]
+	fn function_and_editing_keys_use_xterm_sequences() {
+		let terminal_modes = modes(false, false, false, false, false, false);
+		let none = WindowInputModifiers::new(false, false, false, false);
+		let function_keys: &[(WindowInputNamedKey, &[u8])] = &[
+			(WindowInputNamedKey::F1, b"\x1bOP"),
+			(WindowInputNamedKey::F2, b"\x1bOQ"),
+			(WindowInputNamedKey::F3, b"\x1bOR"),
+			(WindowInputNamedKey::F4, b"\x1bOS"),
+			(WindowInputNamedKey::F5, b"\x1b[15~"),
+			(WindowInputNamedKey::F6, b"\x1b[17~"),
+			(WindowInputNamedKey::F7, b"\x1b[18~"),
+			(WindowInputNamedKey::F8, b"\x1b[19~"),
+			(WindowInputNamedKey::F9, b"\x1b[20~"),
+			(WindowInputNamedKey::F10, b"\x1b[21~"),
+			(WindowInputNamedKey::F11, b"\x1b[23~"),
+			(WindowInputNamedKey::F12, b"\x1b[24~"),
+		];
+		for (key, expected) in function_keys {
+			assert_eq!(encoded_named_key(terminal_modes, none, *key), *expected);
+		}
+		assert_eq!(
+			encoded_named_key(
+				terminal_modes,
+				WindowInputModifiers::new(true, false, false, false),
+				WindowInputNamedKey::F12,
+			),
+			b"\x1b[24;5~",
+		);
+		assert_eq!(
+			encoded_named_key(terminal_modes, none, WindowInputNamedKey::Insert),
+			b"\x1b[2~",
+		);
+		assert_eq!(
+			encoded_named_key(terminal_modes, none, WindowInputNamedKey::PageUp),
+			b"\x1b[5~",
+		);
+	}
+
+	#[test]
+	fn shift_tab_and_alt_control_character_use_legacy_sequences() {
+		let terminal_modes = modes(false, false, false, false, false, false);
+		assert_eq!(
+			encoded_named_key(
+				terminal_modes,
+				WindowInputModifiers::new(false, false, true, false),
+				WindowInputNamedKey::Tab,
+			),
+			b"\x1b[Z",
+		);
+		assert_eq!(
+			encode_key_event(
+				terminal_modes,
+				WindowInputModifiers::new(true, true, false, false),
+				WindowInputElementState::Pressed,
+				&WindowInputKey::Character("a".to_string()),
+				None,
+			),
+			Some(vec![0x1B, 0x01]),
 		);
 	}
 
