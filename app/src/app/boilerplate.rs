@@ -17,6 +17,7 @@ use germinal_domain::{
 	gshell::vo::gshell_id::GShellId,
 	pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
 };
+use germinal_gnative_protocol::gnative::session::GNativeSessionAccepted;
 use germinal_ports::{
 	event::{
 		gshell_input::{GShellInput, GShellInputEvent},
@@ -196,6 +197,10 @@ impl IGShellService for App {
 		)
 	}
 
+	fn begin_gnative_mode(&self, gshell_id: GShellId) {
+		GShellService::inj_ref(self).begin_gnative_mode(gshell_id)
+	}
+
 	fn enter_gnative_mode(&self, gshell_id: GShellId) {
 		GShellService::inj_ref(self).enter_gnative_mode(gshell_id)
 	}
@@ -257,8 +262,16 @@ impl IGNativeService for App {
 		GNativeService::inj_ref(self).ensure_gshell_gnative(gshell_id)
 	}
 
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
-		GNativeService::inj_ref(self).enter_gnative_session(gshell_id)
+	fn begin_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
+		GNativeService::inj_ref(self).begin_gnative_session(gshell_id)
+	}
+
+	fn activate_gnative_session(&self, accepted: GNativeSessionAccepted) {
+		GNativeService::inj_ref(self).activate_gnative_session(accepted)
+	}
+
+	fn fail_gnative_session(&self, gshell_id: GShellId) {
+		GNativeService::inj_ref(self).fail_gnative_session(gshell_id)
 	}
 
 	fn exit_gnative_session(&self, gshell_id: GShellId) {

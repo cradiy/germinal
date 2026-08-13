@@ -1,5 +1,5 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
-use germinal_gnative_protocol::seq::Seq;
+use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::Seq};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -21,6 +21,8 @@ pub enum WorkspaceRuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GShellRuntimeEvent {
 	EnterGNative { gshell_id: GShellId },
+	GNativeConnected { accepted: GNativeSessionAccepted },
+	GNativeConnectionFailed { gshell_id: GShellId, reason: String },
 	ExitGNative { gshell_id: GShellId },
 	FrameReady { gshell_id: GShellId, seq: Seq },
 	Closed { gshell_id: GShellId },

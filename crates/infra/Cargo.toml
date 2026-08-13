@@ -29,7 +29,7 @@ gstreamer-app.workspace        = true
 gstreamer-audio.workspace      = true
 gstreamer-video.workspace      = true
 gstreamer-allocators.workspace = true
-compio                         = { workspace = true, features = ["runtime", "io", "fs", "net"] }
+compio                         = { workspace = true, features = ["runtime", "time", "io", "fs", "net"] }
 flume                          = "0.11"
 
 

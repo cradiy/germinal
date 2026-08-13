@@ -1,4 +1,5 @@
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_gnative_protocol::gnative::session::GNativeSessionAccepted;
 use thiserror::Error;
 
 use crate::{event::gshell_input::GShellInput, service::gnative_tunnel::GNativeTunnelError};
@@ -15,7 +16,9 @@ pub enum GNativeServiceError {
 
 pub trait IGNativeService {
 	fn ensure_gshell_gnative(&self, gshell_id: GShellId);
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError>;
+	fn begin_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError>;
+	fn activate_gnative_session(&self, accepted: GNativeSessionAccepted);
+	fn fail_gnative_session(&self, gshell_id: GShellId);
 	fn exit_gnative_session(&self, gshell_id: GShellId);
 	fn route_gnative_input(&self, input: GShellInput);
 	fn resize_gnative_session(&self, gshell_id: GShellId, term_size: TerminalGridSize);

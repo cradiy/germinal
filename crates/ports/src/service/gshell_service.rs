@@ -16,6 +16,7 @@ pub trait IGShellService {
 		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
 		snapshot_wake_pending: Arc<AtomicBool>,
 	);
+	fn begin_gnative_mode(&self, gshell_id: GShellId);
 	fn enter_gnative_mode(&self, gshell_id: GShellId);
 	fn exit_gnative_mode(&self, gshell_id: GShellId);
 	fn route_input_to_gshell(&self, input: GShellInput);

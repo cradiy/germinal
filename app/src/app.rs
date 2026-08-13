@@ -239,13 +239,28 @@ impl ApplicationHandler<RuntimeEvent> for App {
 	fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
 		match event {
 			RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id }) => {
-				if let Err(error) = self.enter_gnative_session(gshell_id) {
+				self.begin_gnative_mode(gshell_id);
+				if let Err(error) = self.begin_gnative_session(gshell_id) {
+					self.exit_gnative_mode(gshell_id);
 					error!(gshell_id = gshell_id.value(), error = %error, "failed to enter gnative session");
-				} else {
-					self.enter_gnative_mode(gshell_id);
-					let size_info = self.current_terminal_size_info();
-					self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
 				}
+			}
+			RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnected { accepted }) => {
+				let gshell_id = accepted.gshell_id;
+				self.activate_gnative_session(accepted);
+				self.enter_gnative_mode(gshell_id);
+				let size_info = self.current_terminal_size_info();
+				self.resize_gshell(gshell_id, size_info.pty_size(), size_info.grid_size());
+			}
+			RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnectionFailed {
+				gshell_id,
+				reason,
+			}) => {
+				self.fail_gnative_session(gshell_id);
+				self.exit_gnative_mode(gshell_id);
+				self.consume_latest_terminal_snapshot();
+				self.request_redraw();
+				error!(gshell_id = gshell_id.value(), %reason, "failed to connect gnative session");
 			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }) => {
 				self.exit_gnative_session(gshell_id);

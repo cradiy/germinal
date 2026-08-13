@@ -74,14 +74,21 @@ where Deps: AsRef<GNativeServiceState> + IWorkerService + IGNativeTunnelProvider
 {
 	fn ensure_gshell_gnative(&self, _gshell_id: GShellId) { self.prj_ref().start_worker_pool(); }
 
-	fn enter_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
-		let accepted = self.prj_ref().gnative_tunnel().accept_session(gshell_id).map_err(|source| {
+	fn begin_gnative_session(&self, gshell_id: GShellId) -> Result<(), GNativeServiceError> {
+		self.prj_ref().gnative_tunnel().begin_accept_session(gshell_id).map_err(|source| {
 			GNativeServiceError::EnterSession { gshell_id: gshell_id.value(), source }
-		})?;
+		})
+	}
+
+	fn activate_gnative_session(&self, accepted: GNativeSessionAccepted) {
 		let runtime = GNativeSessionRuntime { accepted };
 		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
 		state.upsert_session(runtime);
-		Ok(())
+	}
+
+	fn fail_gnative_session(&self, gshell_id: GShellId) {
+		let state = <Deps as AsRef<GNativeServiceState>>::as_ref(self.prj_ref());
+		state.remove_session(gshell_id);
 	}
 
 	fn exit_gnative_session(&self, gshell_id: GShellId) {

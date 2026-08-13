@@ -253,7 +253,10 @@ mod tests {
 	};
 	use germinal_infra::gnative::tunnel::GNativeTunnel;
 	use germinal_ports::{
-		event::runtime_event_dispatcher::IRuntimeEventDispatcher,
+		event::{
+			runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+			runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
+		},
 		service::gnative_tunnel::IGNativeTunnel,
 	};
 
@@ -261,22 +264,40 @@ mod tests {
 	use crate::control_sequence::GNativeTunnelEnv;
 
 	#[derive(Clone)]
-	struct TestDispatcher;
+	struct TestDispatcher(mpsc::Sender<RuntimeEvent>);
 
 	impl IRuntimeEventDispatcher for TestDispatcher {
-		fn dispatch(
-			&self,
-			_event: germinal_ports::event::runtime_event::RuntimeEvent,
-		) -> Result<(), germinal_ports::event::runtime_event_dispatcher::RuntimeEventDispatchError> {
+		fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
+			self.0.send(event).map_err(|_| RuntimeEventDispatchError::Closed)?;
 			Ok(())
+		}
+	}
+
+	fn wait_for_connected(event_rx: &mpsc::Receiver<RuntimeEvent>, gshell_id: GShellId) {
+		loop {
+			let event = event_rx
+				.recv_timeout(Duration::from_secs(1))
+				.expect("gnative connected event should arrive");
+			match event {
+				RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnected { accepted }) => {
+					assert_eq!(accepted.gshell_id, gshell_id);
+					return;
+				}
+				RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnectionFailed {
+					reason,
+					..
+				}) => panic!("gnative connection failed: {reason}"),
+				_ => {}
+			}
 		}
 	}
 
 	#[test]
 	fn bootstrap_connects_to_host_tunnel_and_reads_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
+		let (event_tx, event_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
-		tunnel.configure(TestDispatcher, Arc::new(AtomicBool::new(false)), snapshot_tx);
+		tunnel.configure(TestDispatcher(event_tx), Arc::new(AtomicBool::new(false)), snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(31), 1).expect("descriptor should exist");
 		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
@@ -290,7 +311,8 @@ mod tests {
 			session.read_input().expect("input should read")
 		});
 
-		tunnel.accept_session(GShellId::new(31)).expect("handshake should complete");
+		tunnel.begin_accept_session(GShellId::new(31)).expect("handshake should begin");
+		wait_for_connected(&event_rx, GShellId::new(31));
 		tunnel
 			.send_input(GShellId::new(31), GNativeInputEvent::Paste("hello".to_string()))
 			.expect("host should send input");
@@ -304,8 +326,9 @@ mod tests {
 	#[test]
 	fn frame_writer_sends_frame_back_to_host() {
 		let (snapshot_tx, snapshot_rx) = mpsc::channel();
+		let (event_tx, event_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
-		tunnel.configure(TestDispatcher, Arc::new(AtomicBool::new(false)), snapshot_tx);
+		tunnel.configure(TestDispatcher(event_tx), Arc::new(AtomicBool::new(false)), snapshot_tx);
 		let descriptor =
 			tunnel.ensure_session_descriptor(GShellId::new(32), 1).expect("descriptor should exist");
 		let bootstrap = LocalGNativeTunnelBootstrap::from_tunnel_env(GNativeTunnelEnv {
@@ -332,7 +355,8 @@ mod tests {
 				.expect("frame should send");
 		});
 
-		tunnel.accept_session(GShellId::new(32)).expect("handshake should complete");
+		tunnel.begin_accept_session(GShellId::new(32)).expect("handshake should begin");
+		wait_for_connected(&event_rx, GShellId::new(32));
 		let snapshot =
 			snapshot_rx.recv_timeout(Duration::from_secs(1)).expect("frame snapshot should arrive");
 		assert_eq!(snapshot.target_id.value(), 32);

@@ -47,6 +47,14 @@ impl GShellServiceState {
 
 	pub fn gnative_service_state(&self) -> &GNativeServiceState { &self.gnative_service_state }
 
+	pub fn begin_gnative_mode(&self, gshell_id: GShellId) {
+		let mut shells = self.shells.borrow_mut();
+		let Some(gshell) = shells.get_mut(&gshell_id) else {
+			return;
+		};
+		gshell.begin_gnative();
+	}
+
 	pub fn enter_gnative_mode(&self, gshell_id: GShellId) {
 		let mut shells = self.shells.borrow_mut();
 		let Some(gshell) = shells.get_mut(&gshell_id) else {
@@ -121,6 +129,11 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		);
 	}
 
+	fn begin_gnative_mode(&self, gshell_id: GShellId) {
+		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+		state.begin_gnative_mode(gshell_id);
+	}
+
 	fn enter_gnative_mode(&self, gshell_id: GShellId) {
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 		state.enter_gnative_mode(gshell_id);
@@ -135,7 +148,7 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 
 		match state.mode_of(input.gshell_id) {
-			GShellMode::Pty => {
+			GShellMode::Pty | GShellMode::GNativeConnecting => {
 				let Some(pty_host_id) = state.pty_host_id_of(input.gshell_id) else {
 					return;
 				};
@@ -154,7 +167,7 @@ where Deps: AsRef<GShellServiceState> + IPtyService + IGNativeService
 		let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 
 		match state.mode_of(gshell_id) {
-			GShellMode::Pty => {
+			GShellMode::Pty | GShellMode::GNativeConnecting => {
 				let Some(pty_host_id) = state.pty_host_id_of(gshell_id) else {
 					return;
 				};
@@ -182,6 +195,9 @@ mod tests {
 		state.create_pty_host(gshell_id, TerminalGridSize::new(80, 24));
 
 		assert_eq!(state.mode_of(gshell_id), GShellMode::Pty);
+
+		state.begin_gnative_mode(gshell_id);
+		assert_eq!(state.mode_of(gshell_id), GShellMode::GNativeConnecting);
 
 		state.enter_gnative_mode(gshell_id);
 		assert_eq!(state.mode_of(gshell_id), GShellMode::GNative);

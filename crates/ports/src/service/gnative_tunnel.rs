@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_gnative_protocol::gnative::{
 	input::GNativeInputEvent,
-	session::{GNativeSessionAccepted, GNativeSessionDescriptor},
+	session::GNativeSessionDescriptor,
 };
 use thiserror::Error;
 
@@ -23,6 +23,8 @@ pub enum GNativeTunnelError {
 	RuntimeBootstrapChannelClosed(#[source] mpsc::RecvError),
 	#[error("gnative tunnel command channel is closed")]
 	CommandChannelClosed,
+	#[error("gnative tunnel command queue is full")]
+	CommandQueueFull,
 	#[error("gnative tunnel response channel is closed: {0}")]
 	ResponseChannelClosed(#[source] mpsc::RecvError),
 	#[error("gnative tunnel is not configured with a dispatcher")]
@@ -57,6 +59,8 @@ pub enum GNativeTunnelError {
 		#[source]
 		source:    std::io::Error,
 	},
+	#[error("timed out waiting for gnative app connection for gshell {gshell_id}")]
+	AcceptConnectionTimeout { gshell_id: u64 },
 	#[error("failed to write gnative host message: {source}")]
 	WriteMessage {
 		#[source]
@@ -92,10 +96,7 @@ pub trait IGNativeTunnel {
 		gshell_id: GShellId,
 		protocol_version: u32,
 	) -> Result<GNativeSessionDescriptor, GNativeTunnelError>;
-	fn accept_session(
-		&self,
-		gshell_id: GShellId,
-	) -> Result<GNativeSessionAccepted, GNativeTunnelError>;
+	fn begin_accept_session(&self, gshell_id: GShellId) -> Result<(), GNativeTunnelError>;
 	fn send_input(
 		&self,
 		gshell_id: GShellId,
