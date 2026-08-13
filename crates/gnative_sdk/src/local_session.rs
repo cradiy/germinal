@@ -296,7 +296,7 @@ mod tests {
 	}
 
 	#[test]
-	fn bootstrap_connects_to_host_tunnel_and_reads_viewport_and_pointer_input() {
+	fn bootstrap_reads_viewport_pointer_and_focus_input() {
 		let (snapshot_tx, _snapshot_rx) = mpsc::channel();
 		let (event_tx, event_rx) = mpsc::channel();
 		let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
@@ -315,6 +315,7 @@ mod tests {
 			[
 				session.read_input().expect("resize should read"),
 				session.read_input().expect("pointer input should read"),
+				session.read_input().expect("focus input should read"),
 			]
 		});
 
@@ -344,10 +345,14 @@ mod tests {
 		tunnel
 			.send_input(GShellId::new(31), pointer.clone())
 			.expect("host should send pointer input");
+		let focus = GNativeInputEvent::FocusChanged(true);
+		tunnel
+			.send_input(GShellId::new(31), focus.clone())
+			.expect("host should send focus input");
 
 		assert_eq!(
 			app.join().expect("app thread should join"),
-			[Some(resize), Some(pointer)]
+			[Some(resize), Some(pointer), Some(focus)]
 		);
 	}
 

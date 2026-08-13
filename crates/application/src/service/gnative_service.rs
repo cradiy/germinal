@@ -151,6 +151,7 @@ fn gnative_input_event_from(
 			WindowInputEvent::ModifiersChanged(modifiers) => Some(
 				GNativeInputEvent::ModifiersChanged(gnative_input_modifiers_from(modifiers)),
 			),
+			WindowInputEvent::FocusChanged(focused) => Some(GNativeInputEvent::FocusChanged(focused)),
 			WindowInputEvent::Key { state, logical_key, text } => Some(GNativeInputEvent::Key {
 				state:       gnative_input_state_from(state),
 				logical_key: gnative_input_key_from(&logical_key),
@@ -411,6 +412,19 @@ mod tests {
 					super_key: false,
 				},
 			})
+		);
+	}
+
+	#[test]
+	fn maps_window_focus_to_gnative_focus_event() {
+		let input = GShellInput {
+			gshell_id: GShellId::new(2),
+			event: GShellInputEvent::Window(WindowInputEvent::FocusChanged(true)),
+		};
+
+		assert_eq!(
+			gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false)),
+			Some(GNativeInputEvent::FocusChanged(true))
 		);
 	}
 

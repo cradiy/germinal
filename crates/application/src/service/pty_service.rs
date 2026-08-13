@@ -133,6 +133,7 @@ where Deps: AsRef<PtyServiceState>
 				WindowInputEvent::ModifiersChanged(modifiers) => {
 					*state.modifiers.borrow_mut() = modifiers;
 				}
+				WindowInputEvent::FocusChanged(_) => {}
 				WindowInputEvent::Key { state: key_state, logical_key, text } => {
 					let modifiers = *state.modifiers.borrow();
 					if let Some(bytes) =

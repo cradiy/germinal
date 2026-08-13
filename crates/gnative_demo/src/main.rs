@@ -197,6 +197,7 @@ fn handle_input(app: &mut DemoHostApp, input: GNativeInputEvent) {
 			app.push_notice(format!("unsupported input: bytes {:?}", bytes));
 		}
 		GNativeInputEvent::ModifiersChanged(_)
+		| GNativeInputEvent::FocusChanged(_)
 		| GNativeInputEvent::PointerMoved { .. }
 		| GNativeInputEvent::PointerLeft
 		| GNativeInputEvent::PointerButton { .. }

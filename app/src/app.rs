@@ -76,6 +76,7 @@ pub struct App {
 	render_window_id:         Option<WindowId>,
 	paste_controller:         HostPasteController,
 	window_input_modifiers:   WindowInputModifiers,
+	window_focused:           bool,
 	cursor_position:          Option<PhysicalPosition<f64>>,
 	pointer_gshell:           Option<GShellId>,
 	pane_navigation_enabled:  bool,
@@ -125,6 +126,7 @@ impl App {
 			render_window_id: None,
 			paste_controller: HostPasteController::default(),
 			window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
+			window_focused: true,
 			cursor_position: None,
 			pointer_gshell: None,
 			pane_navigation_enabled,
@@ -260,8 +262,9 @@ impl App {
 		}
 
 		if state == WindowInputElementState::Pressed {
+			let previous_gshell = self.focused_gshell();
 			let focused_gshell = self.focus_next_gshell();
-			self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
+			self.apply_gshell_focus_change(previous_gshell, focused_gshell);
 		}
 
 		true
@@ -278,6 +281,7 @@ impl App {
 			return false;
 		};
 		let gshell_id = GShellId::new(target_id.value());
+		let previous_gshell = self.focused_gshell();
 
 		if !self.focus_gshell(gshell_id) {
 			debug!(target_id = target_id.value(), "pane focus click resolved to an unknown target");
@@ -285,8 +289,23 @@ impl App {
 		}
 
 		debug!(x = cursor_position.x, y = cursor_position.y, target_id = target_id.value(), "focused pane from pointer");
-		self.set_focused_render_target(target_id);
+		self.apply_gshell_focus_change(previous_gshell, gshell_id);
 		true
+	}
+
+	fn apply_gshell_focus_change(&mut self, previous: GShellId, focused: GShellId) {
+		if previous != focused && self.window_focused {
+			self.route_focus_changed(previous, false);
+			self.route_focus_changed(focused, true);
+		}
+		self.set_focused_render_target(RenderTargetId::new(focused.value()));
+	}
+
+	fn route_focus_changed(&self, gshell_id: GShellId, focused: bool) {
+		self.route_input_to_gshell(GShellInput {
+			gshell_id,
+			event: GShellInputEvent::Window(WindowInputEvent::FocusChanged(focused)),
+		});
 	}
 
 	fn pointer_input_at(
@@ -391,6 +410,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				if let Some(size_info) = self.current_gshell_size_info(gshell_id) {
 					self.resize_gshell(gshell_id, size_info);
 				}
+				self.route_focus_changed(
+					gshell_id,
+					self.window_focused && self.focused_gshell() == gshell_id,
+				);
 			}
 			RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnectionFailed {
 				gshell_id,
@@ -418,14 +441,17 @@ impl ApplicationHandler<RuntimeEvent> for App {
 					debug!(gshell_id = gshell_id.value(), "ignored close event for a non-visible gshell");
 				} else if visible_gshells.len() == 1 {
 					self.exit_and_persist(event_loop);
-				} else if let Some(focused_gshell) = self.close_gshell(gshell_id) {
-					self.remove_gshell(gshell_id);
-					self.remove_render_target(RenderTargetId::new(gshell_id.value()));
-					self.pane_navigation_enabled = self.visible_gshells().len() > 1;
-					let window_size = self.current_terminal_size_info().window_size();
-					self.resize_workspace_gshells(window_size);
-					self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
-					self.request_redraw();
+				} else {
+					let previous_gshell = self.focused_gshell();
+					if let Some(focused_gshell) = self.close_gshell(gshell_id) {
+						self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+						self.remove_gshell(gshell_id);
+						self.remove_render_target(RenderTargetId::new(gshell_id.value()));
+						self.pane_navigation_enabled = self.visible_gshells().len() > 1;
+						let window_size = self.current_terminal_size_info().window_size();
+						self.resize_workspace_gshells(window_size);
+						self.request_redraw();
+					}
 				}
 			}
 			RuntimeEvent::App(_) => {
@@ -462,6 +488,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
 				self.resize_workspace_gshells(size_info.window_size());
 			}
 			WindowEvent::Focused(focused) => {
+				if self.window_focused != focused {
+					self.window_focused = focused;
+					self.route_focus_changed(self.focused_gshell(), focused);
+				}
 				self.set_window_focused(focused);
 			}
 			WindowEvent::RedrawRequested => {

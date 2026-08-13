@@ -71,6 +71,7 @@ pub enum GNativeInputEvent {
 	},
 	Ime(String),
 	ModifiersChanged(GNativeInputModifiers),
+	FocusChanged(bool),
 	PointerMoved {
 		position:  GNativePointerPosition,
 		modifiers: GNativeInputModifiers,

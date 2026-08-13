@@ -78,6 +78,7 @@ pub enum WindowInputKey {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowInputEvent {
 	ModifiersChanged(WindowInputModifiers),
+	FocusChanged(bool),
 	Key {
 		state:       WindowInputElementState,
 		logical_key: WindowInputKey,
