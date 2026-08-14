@@ -355,6 +355,39 @@ impl AlacrittyTerminalStore {
                 state.selection_damage = true;
                 return true;
             }
+            TerminalViMotion::High => alacritty_terminal::vi_mode::ViMotion::High,
+            TerminalViMotion::Middle => alacritty_terminal::vi_mode::ViMotion::Middle,
+            TerminalViMotion::Low => alacritty_terminal::vi_mode::ViMotion::Low,
+            TerminalViMotion::HalfPageUp => {
+                let lines = i32::try_from(state.term.screen_lines() / 2)
+                    .unwrap_or(i32::MAX)
+                    .max(1);
+                state.term.scroll_display(Scroll::Delta(lines));
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::HalfPageDown => {
+                let lines = i32::try_from(state.term.screen_lines() / 2)
+                    .unwrap_or(i32::MAX)
+                    .max(1);
+                state.term.scroll_display(Scroll::Delta(-lines));
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::PageUp => {
+                state.term.scroll_display(Scroll::PageUp);
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::PageDown => {
+                state.term.scroll_display(Scroll::PageDown);
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
             TerminalViMotion::Top => {
                 state.term.scroll_display(Scroll::Top);
                 alacritty_terminal::vi_mode::ViMotion::High
@@ -1640,6 +1673,74 @@ mod tests {
         assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 6);
         assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::Last));
         assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 9);
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_viewport_motions_scroll_history_and_position_the_cursor() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 4));
+        let target_id = RenderTargetId::new(61);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"00\r\n01\r\n02\r\n03\r\n04\r\n05\r\n06\r\n07",
+        );
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::PageUp));
+        let page_offset = store
+            .inner
+            .borrow()
+            .get(&target_id)
+            .unwrap()
+            .term
+            .grid()
+            .display_offset();
+        assert!(page_offset >= 4);
+
+        assert!(store.vi_motion(target_id, Seq::new(4), TerminalViMotion::High));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().y, 0);
+        assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::Middle));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().y, 1);
+        assert!(store.vi_motion(target_id, Seq::new(6), TerminalViMotion::Low));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().y, 3);
+
+        assert!(store.vi_motion(target_id, Seq::new(7), TerminalViMotion::HalfPageDown,));
+        let half_page_down_offset = store
+            .inner
+            .borrow()
+            .get(&target_id)
+            .unwrap()
+            .term
+            .grid()
+            .display_offset();
+        assert_eq!(half_page_down_offset, page_offset - 2);
+
+        assert!(store.vi_motion(target_id, Seq::new(8), TerminalViMotion::HalfPageUp,));
+        assert_eq!(
+            store
+                .inner
+                .borrow()
+                .get(&target_id)
+                .unwrap()
+                .term
+                .grid()
+                .display_offset(),
+            page_offset
+        );
+
+        assert!(store.vi_motion(target_id, Seq::new(9), TerminalViMotion::PageDown));
+        assert_eq!(
+            store
+                .inner
+                .borrow()
+                .get(&target_id)
+                .unwrap()
+                .term
+                .grid()
+                .display_offset(),
+            0
+        );
         assert!(store.take_pending_pty_writes(target_id).is_empty());
     }
 

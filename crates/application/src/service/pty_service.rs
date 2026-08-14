@@ -440,7 +440,25 @@ fn send_vi_mode_key(
         runtime.vi_pending_g = false;
         return;
     };
-    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+
+    if modifiers.control_key() && !modifiers.alt_key() && !modifiers.super_key() {
+        runtime.vi_pending_g = false;
+        runtime.vi_pending_text_object = None;
+        let motion = match key.to_ascii_lowercase().as_str() {
+            "u" => Some(TerminalViMotion::HalfPageUp),
+            "d" => Some(TerminalViMotion::HalfPageDown),
+            "b" => Some(TerminalViMotion::PageUp),
+            "f" => Some(TerminalViMotion::PageDown),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::ViMotion(motion));
+        }
+        return;
+    }
+    if modifiers.alt_key() || modifiers.super_key() {
         runtime.vi_pending_g = false;
         runtime.vi_pending_text_object = None;
         return;
@@ -525,6 +543,9 @@ fn send_vi_mode_key(
         "w" => Some(TerminalViMotion::WordRight),
         "b" => Some(TerminalViMotion::WordLeft),
         "e" => Some(TerminalViMotion::WordRightEnd),
+        "H" => Some(TerminalViMotion::High),
+        "M" => Some(TerminalViMotion::Middle),
+        "L" => Some(TerminalViMotion::Low),
         "G" => Some(TerminalViMotion::Bottom),
         "g" if runtime.vi_pending_g => Some(TerminalViMotion::Top),
         "g" => {
@@ -866,6 +887,58 @@ mod tests {
             terminal_worker_rx.try_recv(),
             Ok(TerminalWorkerInput::ViMotion(TerminalViMotion::Bottom))
         ));
+    }
+
+    #[test]
+    fn vi_mode_routes_viewport_motions_without_pty_input() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(7);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+        };
+
+        for (key, modifiers) in [
+            ("u", WindowInputModifiers::new(true, false, false, false)),
+            ("d", WindowInputModifiers::new(true, false, false, false)),
+            ("b", WindowInputModifiers::new(true, false, false, false)),
+            ("f", WindowInputModifiers::new(true, false, false, false)),
+            ("H", WindowInputModifiers::new(false, false, true, false)),
+            ("M", WindowInputModifiers::new(false, false, true, false)),
+            ("L", WindowInputModifiers::new(false, false, true, false)),
+        ] {
+            send_vi_mode_key(
+                &mut runtime,
+                modifiers,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Character(key.into()),
+            );
+        }
+
+        for expected in [
+            TerminalViMotion::HalfPageUp,
+            TerminalViMotion::HalfPageDown,
+            TerminalViMotion::PageUp,
+            TerminalViMotion::PageDown,
+            TerminalViMotion::High,
+            TerminalViMotion::Middle,
+            TerminalViMotion::Low,
+        ] {
+            assert!(matches!(
+                terminal_worker_rx.try_recv(),
+                Ok(TerminalWorkerInput::ViMotion(actual)) if actual == expected
+            ));
+        }
     }
 
     #[test]

@@ -36,6 +36,13 @@ pub enum TerminalViMotion {
     WordLeft,
     WordRight,
     WordRightEnd,
+    High,
+    Middle,
+    Low,
+    HalfPageUp,
+    HalfPageDown,
+    PageUp,
+    PageDown,
     Top,
     Bottom,
 }
