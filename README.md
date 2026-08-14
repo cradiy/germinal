@@ -40,6 +40,38 @@ Germinal tracks terminal modes emitted by PTY applications. Application cursor k
 
 PTY keyboard input includes xterm-compatible navigation and editing keys, `F1` through `F12`, `Shift+Tab`, and modifier parameters for cursor, editing, and function keys.
 
+## Fonts
+
+The normal face, styled faces, fallback order, and size are configured together:
+
+```toml
+[font]
+size = 16
+fallback = [
+  "Noto Sans Mono CJK SC",
+  "Symbols Nerd Font Mono",
+]
+
+[font.normal]
+family = "JetBrainsMono Nerd Font"
+
+[font.bold]
+family = "JetBrainsMono Nerd Font"
+style = "Bold"
+
+[font.italic]
+family = "JetBrainsMono Nerd Font"
+style = "Italic"
+
+[font.bold_italic]
+family = "JetBrainsMono Nerd Font"
+style = "Bold Italic"
+```
+
+Styled faces are optional. When omitted, Germinal asks the primary family for the matching
+weight and slant. Fallback families are checked in their configured order for glyphs missing from
+the selected primary face; the system font fallback remains the final fallback.
+
 ## Kitty color themes
 
 Germinal can load a Kitty color theme directly. Set one path in

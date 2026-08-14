@@ -4,14 +4,20 @@ use std::collections::{BTreeSet, HashMap};
 pub struct WgpuTerminalGlyphKey {
     c: char,
     bold: bool,
+    italic: bool,
 }
 
 impl WgpuTerminalGlyphKey {
     const BOLD_BIT: u32 = 1 << 21;
+    const ITALIC_BIT: u32 = 1 << 22;
     const CODEPOINT_MASK: u32 = Self::BOLD_BIT - 1;
 
     pub const fn new(c: char, bold: bool) -> Self {
-        Self { c, bold }
+        Self::styled(c, bold, false)
+    }
+
+    pub const fn styled(c: char, bold: bool, italic: bool) -> Self {
+        Self { c, bold, italic }
     }
 
     pub const fn plain(c: char) -> Self {
@@ -26,15 +32,22 @@ impl WgpuTerminalGlyphKey {
         self.bold
     }
 
+    pub const fn italic(self) -> bool {
+        self.italic
+    }
+
     pub const fn packed_id(self) -> u32 {
-        (self.c as u32 & Self::CODEPOINT_MASK) | if self.bold { Self::BOLD_BIT } else { 0 }
+        (self.c as u32 & Self::CODEPOINT_MASK)
+            | if self.bold { Self::BOLD_BIT } else { 0 }
+            | if self.italic { Self::ITALIC_BIT } else { 0 }
     }
 
     pub fn from_packed_id(packed_id: u32) -> Option<Self> {
         let c = char::from_u32(packed_id & Self::CODEPOINT_MASK)?;
         let bold = (packed_id & Self::BOLD_BIT) != 0;
+        let italic = (packed_id & Self::ITALIC_BIT) != 0;
 
-        Some(Self::new(c, bold))
+        Some(Self::styled(c, bold, italic))
     }
 }
 
@@ -393,6 +406,21 @@ fn debug_5x7_bitmap(c: char) -> [u8; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styled_glyph_key_round_trips_bold_and_italic_bits() {
+        for key in [
+            WgpuTerminalGlyphKey::styled('A', false, false),
+            WgpuTerminalGlyphKey::styled('A', true, false),
+            WgpuTerminalGlyphKey::styled('A', false, true),
+            WgpuTerminalGlyphKey::styled('界', true, true),
+        ] {
+            assert_eq!(
+                WgpuTerminalGlyphKey::from_packed_id(key.packed_id()),
+                Some(key)
+            );
+        }
+    }
 
     #[test]
     fn builds_debug_glyph_atlas_for_terminal_text() {

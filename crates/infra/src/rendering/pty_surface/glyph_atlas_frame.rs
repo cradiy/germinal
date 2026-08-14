@@ -249,7 +249,11 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
     for row in &surface_snapshot.rows {
         for run in &row.runs {
             for c in run.text.chars() {
-                glyphs.insert(WgpuTerminalGlyphKey::new(c, run.style.bold));
+                glyphs.insert(WgpuTerminalGlyphKey::styled(
+                    c,
+                    run.style.bold,
+                    run.style.italic,
+                ));
             }
         }
     }

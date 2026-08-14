@@ -8,6 +8,9 @@ use crossfont::{
     BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
 };
 use germinal_ports::pty_host::width::terminal_char_cell_width;
+use germinal_ports::pty_host::{
+    font_config::TerminalFontConfig, font_face::TerminalFontFace, font_weight::TerminalFontWeight,
+};
 use thiserror::Error;
 
 use crate::rendering::pty_surface::glyph_atlas::{
@@ -53,6 +56,7 @@ impl WgpuCrossfontCellMetrics {
 #[derive(Clone)]
 pub struct WgpuCrossfontGlyphAtlasBuilder {
     font_family: String,
+    font_faces: WgpuCrossfontFontFaces,
     font_size_px: f32,
     bold_weight: WgpuTerminalFontWeight,
     padding_px: u32,
@@ -84,16 +88,33 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         font_size_px: f32,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
         let font_family = font_family.into();
-        let backend = WgpuCrossfontGlyphBackend::new(
-            font_family.clone(),
+        let font_faces = WgpuCrossfontFontFaces::new(font_family.clone());
+        Self::from_font_faces(font_faces, font_size_px)
+    }
+
+    pub fn from_terminal_font_config(
+        font_config: &TerminalFontConfig,
+        font_size_px: f32,
+    ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
+        Self::from_font_faces(
+            WgpuCrossfontFontFaces::from_terminal(font_config),
             font_size_px,
-            WgpuTerminalFontWeight::default_bold(),
-        )?;
+        )
+    }
+
+    fn from_font_faces(
+        font_faces: WgpuCrossfontFontFaces,
+        font_size_px: f32,
+    ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
+        let font_family = font_faces.normal.family.clone();
+        let bold_weight = font_faces.bold_weight;
+        let backend = WgpuCrossfontGlyphBackend::new(font_faces.clone(), font_size_px)?;
 
         Ok(Self {
             font_family,
+            font_faces,
             font_size_px,
-            bold_weight: WgpuTerminalFontWeight::default_bold(),
+            bold_weight,
             padding_px: 1,
             columns: 16,
             max_texture_dimension_2d: u32::MAX,
@@ -110,9 +131,10 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 
     pub fn with_bold_font_weight(mut self, bold_weight: WgpuTerminalFontWeight) -> Self {
         self.bold_weight = bold_weight;
+        self.font_faces.bold_weight = bold_weight;
 
         if let Ok(backend) =
-            WgpuCrossfontGlyphBackend::new(self.font_family.clone(), self.font_size_px, bold_weight)
+            WgpuCrossfontGlyphBackend::new(self.font_faces.clone(), self.font_size_px)
         {
             *self.backend.borrow_mut() = Some(backend);
         }
@@ -141,9 +163,24 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         font_size_px: f32,
     ) -> Result<WgpuCrossfontCellMetrics, WgpuCrossfontGlyphAtlasError> {
         let backend = WgpuCrossfontGlyphBackend::new(
-            font_family.into(),
+            WgpuCrossfontFontFaces::new(font_family.into()),
             font_size_px,
-            WgpuTerminalFontWeight::default_bold(),
+        )?;
+
+        Ok(WgpuCrossfontCellMetrics::new(
+            backend.base_cell_width_px().max(1),
+            backend.base_cell_height_px().max(1),
+            backend.baseline_y_px(),
+        ))
+    }
+
+    pub fn load_cell_metrics_for_font_config(
+        font_config: &TerminalFontConfig,
+        font_size_px: f32,
+    ) -> Result<WgpuCrossfontCellMetrics, WgpuCrossfontGlyphAtlasError> {
+        let backend = WgpuCrossfontGlyphBackend::new(
+            WgpuCrossfontFontFaces::from_terminal(font_config),
+            font_size_px,
         )?;
 
         Ok(WgpuCrossfontCellMetrics::new(
@@ -245,6 +282,64 @@ impl WgpuCrossfontGlyphAtlasBuilder {
     }
 }
 
+#[derive(Debug, Clone)]
+struct WgpuCrossfontFontFace {
+    family: String,
+    style: Option<String>,
+}
+
+impl WgpuCrossfontFontFace {
+    fn from_terminal(face: &TerminalFontFace) -> Self {
+        Self {
+            family: face.family().name().to_owned(),
+            style: face.style().map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WgpuCrossfontFontFaces {
+    normal: WgpuCrossfontFontFace,
+    bold: Option<WgpuCrossfontFontFace>,
+    italic: Option<WgpuCrossfontFontFace>,
+    bold_italic: Option<WgpuCrossfontFontFace>,
+    fallbacks: Vec<String>,
+    bold_weight: WgpuTerminalFontWeight,
+}
+
+impl WgpuCrossfontFontFaces {
+    fn new(normal_family: String) -> Self {
+        Self {
+            normal: WgpuCrossfontFontFace {
+                family: normal_family,
+                style: None,
+            },
+            bold: None,
+            italic: None,
+            bold_italic: None,
+            fallbacks: Vec::new(),
+            bold_weight: WgpuTerminalFontWeight::default_bold(),
+        }
+    }
+
+    fn from_terminal(config: &TerminalFontConfig) -> Self {
+        Self {
+            normal: WgpuCrossfontFontFace::from_terminal(config.normal()),
+            bold: config.bold().map(WgpuCrossfontFontFace::from_terminal),
+            italic: config.italic().map(WgpuCrossfontFontFace::from_terminal),
+            bold_italic: config
+                .bold_italic()
+                .map(WgpuCrossfontFontFace::from_terminal),
+            fallbacks: config
+                .fallbacks()
+                .iter()
+                .map(|family| family.name().to_owned())
+                .collect(),
+            bold_weight: wgpu_font_weight_from_terminal(config.bold_weight()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuTerminalFontWeight {
     Normal,
@@ -261,8 +356,9 @@ impl WgpuTerminalFontWeight {
 
 struct WgpuCrossfontGlyphBackend {
     rasterizer: Rasterizer,
-    normal_font_key: FontKey,
-    bold_font_key: Option<FontKey>,
+    primary: LoadedFontFaces,
+    primary_coverage: HashMap<String, Option<FontCoverage>>,
+    fallbacks: Vec<LoadedFallbackFont>,
     emoji_font_key: Option<FontKey>,
     size: Size,
     average_advance_px: u32,
@@ -273,25 +369,49 @@ struct WgpuCrossfontGlyphBackend {
 
 impl WgpuCrossfontGlyphBackend {
     fn new(
-        font_family: String,
+        font_faces: WgpuCrossfontFontFaces,
         font_size_px: f32,
-        bold_weight: WgpuTerminalFontWeight,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
         let mut rasterizer = Rasterizer::new().map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
         let size = Size::new(font_size_px);
-        let bold_family = font_family.clone();
-        let font_desc = FontDesc::new(
-            font_family,
-            Style::Description {
-                slant: Slant::Normal,
-                weight: Weight::Normal,
-            },
-        );
-        let font_key = rasterizer
-            .load_font(&font_desc, size)
-            .map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
-        let bold_font_key =
-            load_font_for_terminal_weight(&mut rasterizer, &bold_family, size, bold_weight);
+        let normal = load_required_face(
+            &mut rasterizer,
+            &font_faces.normal,
+            size,
+            Slant::Normal,
+            Weight::Normal,
+        )
+        .map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
+        let bold = load_primary_bold_face(&mut rasterizer, &font_faces, size)
+            .unwrap_or_else(|| normal.clone());
+        let italic = load_primary_italic_face(&mut rasterizer, &font_faces, size)
+            .unwrap_or_else(|| normal.clone());
+        let bold_italic = load_primary_bold_italic_face(&mut rasterizer, &font_faces, size)
+            .unwrap_or_else(|| bold.clone());
+        let primary = LoadedFontFaces {
+            normal,
+            bold,
+            italic,
+            bold_italic,
+        };
+        let mut primary_coverage = HashMap::new();
+        for face in [
+            &primary.normal,
+            &primary.bold,
+            &primary.italic,
+            &primary.bold_italic,
+        ] {
+            primary_coverage
+                .entry(face.family.clone())
+                .or_insert_with(|| load_font_coverage(&face.family));
+        }
+        let fallbacks = font_faces
+            .fallbacks
+            .iter()
+            .filter_map(|family| {
+                load_fallback_faces(&mut rasterizer, family, size, font_faces.bold_weight)
+            })
+            .collect();
         let emoji_font_key = load_optional_font(&mut rasterizer, "Noto Color Emoji", size);
 
         // Match Alacritty's GlyphCache::load_font_metrics: load one glyph
@@ -301,13 +421,13 @@ impl WgpuCrossfontGlyphBackend {
         // terminal columns collapse and text overlap.
         rasterizer
             .get_glyph(GlyphKey {
-                font_key,
+                font_key: primary.normal.key,
                 character: 'm',
                 size,
             })
             .map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
 
-        let metrics = rasterizer.metrics(font_key, size).ok();
+        let metrics = rasterizer.metrics(primary.normal.key, size).ok();
         let average_advance_px = metrics
             .as_ref()
             .map(|metrics| alacritty_cell_axis_px(metrics.average_advance))
@@ -325,8 +445,9 @@ impl WgpuCrossfontGlyphBackend {
 
         Ok(Self {
             rasterizer,
-            normal_font_key: font_key,
-            bold_font_key,
+            primary,
+            primary_coverage,
+            fallbacks,
             emoji_font_key,
             size,
             average_advance_px,
@@ -356,18 +477,87 @@ impl WgpuCrossfontGlyphBackend {
             return glyph.clone();
         }
 
-        let c = glyph_key.c();
-        let font_key = if is_emoji_presentation_candidate(c) {
-            self.emoji_font_key.unwrap_or(self.normal_font_key)
-        } else if glyph_key.bold() {
-            self.bold_font_key.unwrap_or(self.normal_font_key)
-        } else {
-            self.normal_font_key
-        };
+        let font_key = self.font_key_for_glyph(glyph_key);
 
         let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
         self.glyph_cache.insert(glyph_key, glyph.clone());
         glyph
+    }
+
+    fn font_key_for_glyph(&self, glyph: WgpuTerminalGlyphKey) -> FontKey {
+        let primary = self.primary.for_glyph(glyph);
+        if is_emoji_presentation_candidate(glyph.c()) {
+            return self
+                .fallback_key_for_glyph(glyph)
+                .or(self.emoji_font_key)
+                .unwrap_or(primary.key);
+        }
+
+        let primary_has_glyph = self
+            .primary_coverage
+            .get(&primary.family)
+            .and_then(Option::as_ref)
+            .is_none_or(|coverage| coverage.contains(glyph.c()));
+        if primary_has_glyph {
+            return primary.key;
+        }
+
+        self.fallback_key_for_glyph(glyph).unwrap_or(primary.key)
+    }
+
+    fn fallback_key_for_glyph(&self, glyph: WgpuTerminalGlyphKey) -> Option<FontKey> {
+        self.fallbacks
+            .iter()
+            .find(|fallback| fallback.coverage.contains(glyph.c()))
+            .map(|fallback| fallback.faces.for_glyph(glyph).key)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LoadedFontFace {
+    family: String,
+    key: FontKey,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedFontFaces {
+    normal: LoadedFontFace,
+    bold: LoadedFontFace,
+    italic: LoadedFontFace,
+    bold_italic: LoadedFontFace,
+}
+
+impl LoadedFontFaces {
+    fn for_glyph(&self, glyph: WgpuTerminalGlyphKey) -> &LoadedFontFace {
+        match (glyph.bold(), glyph.italic()) {
+            (false, false) => &self.normal,
+            (true, false) => &self.bold,
+            (false, true) => &self.italic,
+            (true, true) => &self.bold_italic,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LoadedFallbackFont {
+    coverage: FontCoverage,
+    faces: LoadedFontFaces,
+}
+
+#[derive(Clone)]
+enum FontCoverage {
+    #[cfg(not(any(target_os = "macos", windows)))]
+    Fontconfig(crossfont::ft::fc::CharSet),
+    All,
+}
+
+impl FontCoverage {
+    fn contains(&self, character: char) -> bool {
+        match self {
+            #[cfg(not(any(target_os = "macos", windows)))]
+            Self::Fontconfig(charset) => charset.has_char(character),
+            Self::All => true,
+        }
     }
 }
 
@@ -698,6 +888,153 @@ fn is_color_glyph_buffer(buffer: &BitmapBuffer, c: char) -> bool {
         && matches!(buffer, BitmapBuffer::Rgb(_) | BitmapBuffer::Rgba(_))
 }
 
+fn load_required_face(
+    rasterizer: &mut Rasterizer,
+    face: &WgpuCrossfontFontFace,
+    size: Size,
+    slant: Slant,
+    weight: Weight,
+) -> Result<LoadedFontFace, crossfont::Error> {
+    let font_desc = FontDesc::new(
+        face.family.clone(),
+        face.style
+            .as_ref()
+            .map_or(Style::Description { slant, weight }, |style| {
+                Style::Specific(style.clone())
+            }),
+    );
+    rasterizer
+        .load_font(&font_desc, size)
+        .map(|key| LoadedFontFace {
+            family: face.family.clone(),
+            key,
+        })
+}
+
+fn load_primary_bold_face(
+    rasterizer: &mut Rasterizer,
+    faces: &WgpuCrossfontFontFaces,
+    size: Size,
+) -> Option<LoadedFontFace> {
+    if let Some(face) = faces.bold.as_ref() {
+        return load_required_face(rasterizer, face, size, Slant::Normal, Weight::Bold).ok();
+    }
+
+    load_font_for_terminal_weight(rasterizer, &faces.normal.family, size, faces.bold_weight).map(
+        |key| LoadedFontFace {
+            family: faces.normal.family.clone(),
+            key,
+        },
+    )
+}
+
+fn load_primary_italic_face(
+    rasterizer: &mut Rasterizer,
+    faces: &WgpuCrossfontFontFaces,
+    size: Size,
+) -> Option<LoadedFontFace> {
+    let face = faces.italic.as_ref().unwrap_or(&faces.normal);
+    load_required_face(rasterizer, face, size, Slant::Italic, Weight::Normal).ok()
+}
+
+fn load_primary_bold_italic_face(
+    rasterizer: &mut Rasterizer,
+    faces: &WgpuCrossfontFontFaces,
+    size: Size,
+) -> Option<LoadedFontFace> {
+    let face = faces.bold_italic.as_ref().unwrap_or(&faces.normal);
+    load_required_face(
+        rasterizer,
+        face,
+        size,
+        Slant::Italic,
+        crossfont_weight(faces.bold_weight),
+    )
+    .ok()
+}
+
+fn load_fallback_faces(
+    rasterizer: &mut Rasterizer,
+    family: &str,
+    size: Size,
+    bold_weight: WgpuTerminalFontWeight,
+) -> Option<LoadedFallbackFont> {
+    let face = WgpuCrossfontFontFace {
+        family: family.to_owned(),
+        style: None,
+    };
+    let normal = load_required_face(rasterizer, &face, size, Slant::Normal, Weight::Normal).ok()?;
+    let bold = load_font_for_terminal_weight(rasterizer, family, size, bold_weight)
+        .map(|key| LoadedFontFace {
+            family: family.to_owned(),
+            key,
+        })
+        .unwrap_or_else(|| normal.clone());
+    let italic = load_required_face(rasterizer, &face, size, Slant::Italic, Weight::Normal)
+        .unwrap_or_else(|_| normal.clone());
+    let bold_italic = load_required_face(
+        rasterizer,
+        &face,
+        size,
+        Slant::Italic,
+        crossfont_weight(bold_weight),
+    )
+    .unwrap_or_else(|_| bold.clone());
+
+    Some(LoadedFallbackFont {
+        coverage: load_font_coverage(family).unwrap_or_else(FontCoverage::all),
+        faces: LoadedFontFaces {
+            normal,
+            bold,
+            italic,
+            bold_italic,
+        },
+    })
+}
+
+impl FontCoverage {
+    fn all() -> Self {
+        Self::All
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn load_font_coverage(family: &str) -> Option<FontCoverage> {
+    use crossfont::ft::fc::{Config, MatchKind, Pattern, font_match};
+
+    let config = Config::get_current();
+    let mut pattern = Pattern::new();
+    pattern.add_family(family);
+    pattern.config_substitute(config, MatchKind::Pattern);
+    pattern.default_substitute();
+    let matched = font_match(config, &pattern)?;
+    matched
+        .get_charset()
+        .map(ToOwned::to_owned)
+        .map(FontCoverage::Fontconfig)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn load_font_coverage(_family: &str) -> Option<FontCoverage> {
+    None
+}
+
+fn crossfont_weight(weight: WgpuTerminalFontWeight) -> Weight {
+    match weight {
+        WgpuTerminalFontWeight::Normal | WgpuTerminalFontWeight::Medium => Weight::Normal,
+        WgpuTerminalFontWeight::Semibold | WgpuTerminalFontWeight::Bold => Weight::Bold,
+    }
+}
+
+fn wgpu_font_weight_from_terminal(weight: TerminalFontWeight) -> WgpuTerminalFontWeight {
+    match weight {
+        TerminalFontWeight::Normal => WgpuTerminalFontWeight::Normal,
+        TerminalFontWeight::Medium => WgpuTerminalFontWeight::Medium,
+        TerminalFontWeight::Semibold => WgpuTerminalFontWeight::Semibold,
+        TerminalFontWeight::Bold => WgpuTerminalFontWeight::Bold,
+    }
+}
+
 fn load_optional_font(rasterizer: &mut Rasterizer, family: &str, size: Size) -> Option<FontKey> {
     load_font_with_weight(rasterizer, family, size, Weight::Normal)
 }
@@ -791,7 +1128,32 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::GlyphAtlasGridLayout;
+    use super::{
+        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontGlyphAtlasBuilder, WgpuTerminalGlyphKey,
+    };
+
+    #[test]
+    fn rasterizes_normal_bold_italic_and_bold_italic_glyphs() {
+        let glyphs = [
+            WgpuTerminalGlyphKey::styled('A', false, false),
+            WgpuTerminalGlyphKey::styled('A', true, false),
+            WgpuTerminalGlyphKey::styled('A', false, true),
+            WgpuTerminalGlyphKey::styled('A', true, true),
+        ];
+        let atlas = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
+            .expect("the platform monospace font should load")
+            .build_for_glyphs(glyphs);
+
+        for glyph in glyphs {
+            assert!(atlas.has_glyph_key(glyph));
+        }
+    }
+
+    #[test]
+    fn all_font_coverage_accepts_every_unicode_character() {
+        assert!(FontCoverage::all().contains('🙂'));
+        assert!(FontCoverage::all().contains('界'));
+    }
 
     #[test]
     fn grows_columns_to_stay_within_texture_height_limit() {

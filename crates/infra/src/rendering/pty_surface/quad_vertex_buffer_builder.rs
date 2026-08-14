@@ -195,7 +195,7 @@ impl WgpuVertexColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuVertexKind {
     Background,
-    Glyph { c: char, bold: bool },
+    Glyph { c: char, bold: bool, italic: bool },
     Underline,
     Geometric,
 }
@@ -252,11 +252,11 @@ fn glyph_quad_geometry_and_uv(
     atlas: &WgpuTerminalGlyphAtlas,
     glyph_uv_map_result: &mut WgpuTerminalGlyphUvMapResult,
 ) -> Option<(f32, f32, f32, f32, [f32; 4])> {
-    let WgpuQuadKind::Glyph { c, bold } = quad.kind else {
+    let WgpuQuadKind::Glyph { c, bold, italic } = quad.kind else {
         return None;
     };
     glyph_uv_map_result.glyph_vertices += 4;
-    let Some(entry) = atlas.entry_for_key(WgpuTerminalGlyphKey::new(c, bold)) else {
+    let Some(entry) = atlas.entry_for_key(WgpuTerminalGlyphKey::styled(c, bold, italic)) else {
         glyph_uv_map_result.missing_vertices += 4;
         return None;
     };
@@ -290,7 +290,7 @@ fn default_uv() -> [f32; 4] {
 fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
     match kind {
         WgpuQuadKind::Background | WgpuQuadKind::PixelRect { .. } => WgpuVertexKind::Background,
-        WgpuQuadKind::Glyph { c, bold } => WgpuVertexKind::Glyph { c, bold },
+        WgpuQuadKind::Glyph { c, bold, italic } => WgpuVertexKind::Glyph { c, bold, italic },
         WgpuQuadKind::Underline => WgpuVertexKind::Underline,
         WgpuQuadKind::Geometric => WgpuVertexKind::Geometric,
     }
@@ -298,9 +298,9 @@ fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
     match kind {
         WgpuVertexKind::Background => (WGPU_VERTEX_KIND_BACKGROUND, 0),
-        WgpuVertexKind::Glyph { c, bold } => (
+        WgpuVertexKind::Glyph { c, bold, italic } => (
             WGPU_VERTEX_KIND_GLYPH,
-            WgpuTerminalGlyphKey::new(c, bold).packed_id(),
+            WgpuTerminalGlyphKey::styled(c, bold, italic).packed_id(),
         ),
         WgpuVertexKind::Underline => (WGPU_VERTEX_KIND_UNDERLINE, 0),
         WgpuVertexKind::Geometric => (WGPU_VERTEX_KIND_UNDERLINE, 0),

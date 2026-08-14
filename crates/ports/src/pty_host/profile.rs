@@ -63,6 +63,13 @@ impl TerminalProfile {
         }
     }
 
+    pub fn with_font_config(self, font_config: TerminalFontConfig) -> Self {
+        Self {
+            font_config,
+            ..self
+        }
+    }
+
     pub fn size_info(
         &self,
         window_size: TerminalWindowSize,

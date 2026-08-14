@@ -9,7 +9,6 @@ use germinal_ports::{
     pty_host::{
         cell_size::TerminalCellSize,
         color_theme::TerminalColorTheme,
-        font_weight::TerminalFontWeight,
         profile::TerminalProfile,
         scale_factor::TerminalScaleFactor,
         size_info::TerminalSizeInfo,
@@ -42,9 +41,7 @@ use crate::rendering::pty_surface::video_surface_dmabuf_importer::{
     VideoSurfaceImportError, import_nv12_dmabuf_frame,
 };
 use crate::rendering::pty_surface::{
-    crossfont_glyph_atlas::{
-        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError, WgpuTerminalFontWeight,
-    },
+    crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError},
     frame_builder::WgpuTerminalFrameBuilder,
     frame_renderer::WgpuTerminalFrameRenderer,
     pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
@@ -849,14 +846,11 @@ fn build_terminal_frame_builder(
     let glyph_config =
         profile.glyph_render_config(size_info, TerminalScaleFactor::new(scale_factor));
     let terminal_cell_size = glyph_config.cell_size();
-    let crossfont_builder = WgpuCrossfontGlyphAtlasBuilder::new(
-        glyph_config.font_family_name(),
+    let crossfont_builder = WgpuCrossfontGlyphAtlasBuilder::from_terminal_font_config(
+        glyph_config.font_config(),
         glyph_config.font_size_px(),
     )
     .map_err(WindowRuntimeError::BuildGlyphAtlas)?
-    .with_bold_font_weight(wgpu_font_weight_from_terminal(
-        glyph_config.bold_font_weight(),
-    ))
     .with_padding_px(2)
     .with_columns(16)
     .with_max_texture_dimension_2d(max_texture_dimension_2d)
@@ -868,24 +862,17 @@ fn build_terminal_frame_builder(
     Ok(base.with_crossfont_glyph_atlas_builder(crossfont_builder))
 }
 
-fn wgpu_font_weight_from_terminal(weight: TerminalFontWeight) -> WgpuTerminalFontWeight {
-    match weight {
-        TerminalFontWeight::Normal => WgpuTerminalFontWeight::Normal,
-        TerminalFontWeight::Medium => WgpuTerminalFontWeight::Medium,
-        TerminalFontWeight::Semibold => WgpuTerminalFontWeight::Semibold,
-        TerminalFontWeight::Bold => WgpuTerminalFontWeight::Bold,
-    }
-}
-
 fn terminal_profile_from_alacritty_crossfont_metrics(
     profile: TerminalProfile,
     scale_factor: f64,
 ) -> Result<TerminalProfile, WindowRuntimeError> {
     let scale_factor = TerminalScaleFactor::new(scale_factor);
     let font_px = profile.font_physical_px(scale_factor);
-    let font_family = profile.font_family().name();
-    let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics(font_family, font_px)
-        .map_err(WindowRuntimeError::LoadCrossfontMetrics)?;
+    let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics_for_font_config(
+        profile.font_config(),
+        font_px,
+    )
+    .map_err(WindowRuntimeError::LoadCrossfontMetrics)?;
 
     Ok(profile.with_cell_size(TerminalCellSize::new(
         metrics.cell_width_px(),

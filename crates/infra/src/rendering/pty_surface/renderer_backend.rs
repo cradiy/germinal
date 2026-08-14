@@ -802,6 +802,7 @@ impl WgpuQuadDrawItem {
             kind: WgpuQuadKind::Glyph {
                 c: glyph.c,
                 bold: glyph.style.bold,
+                italic: glyph.style.italic,
             },
             x_px: glyph.pixel_x(config),
             y_px: glyph.pixel_y(config),
@@ -885,7 +886,7 @@ impl WgpuQuadDrawItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuQuadKind {
     Background,
-    Glyph { c: char, bold: bool },
+    Glyph { c: char, bold: bool, italic: bool },
     Underline,
     Geometric,
     PixelRect { color: RgbaColorDto },
@@ -1275,7 +1276,8 @@ mod tests {
             glyphs[0].kind,
             WgpuQuadKind::Glyph {
                 c: '你',
-                bold: false
+                bold: false,
+                italic: false,
             }
         );
         assert_eq!(
@@ -1286,7 +1288,8 @@ mod tests {
             glyphs[1].kind,
             WgpuQuadKind::Glyph {
                 c: 'a',
-                bold: false
+                bold: false,
+                italic: false,
             }
         );
         assert_eq!(

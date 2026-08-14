@@ -7,6 +7,8 @@ use std::{
 use germinal_ports::pty_host::{
     color_theme::TerminalColorTheme,
     cursor_style::{TerminalCursorShape, TerminalCursorStyle},
+    font_config::TerminalFontConfig,
+    font_face::TerminalFontFace,
     font_family::TerminalFontFamily,
     font_size::TerminalFontSize,
     profile::TerminalProfile,
@@ -82,11 +84,29 @@ impl GerminalConfig {
             TerminalPadding::ZERO,
         );
 
-        TerminalProfile::new(
-            TerminalFontFamily::new(self.font.normal.family.clone()),
+        let normal = terminal_font_face(&self.font.normal);
+        let bold = self.font.bold.as_ref().map(terminal_font_face);
+        let italic = self.font.italic.as_ref().map(terminal_font_face);
+        let bold_italic = self.font.bold_italic.as_ref().map(terminal_font_face);
+        let fallbacks = self
+            .font
+            .fallback
+            .iter()
+            .cloned()
+            .map(TerminalFontFamily::new)
+            .collect();
+        let font_config = TerminalFontConfig::new(
+            normal.family().clone(),
             TerminalFontSize::new(self.font.size),
+        )
+        .with_faces(normal, bold, italic, bold_italic, fallbacks);
+
+        TerminalProfile::new(
+            font_config.family().clone(),
+            font_config.size(),
             size_config,
         )
+        .with_font_config(font_config)
     }
 
     pub fn terminal_cursor_style(&self) -> TerminalCursorStyle {
@@ -115,6 +135,34 @@ impl GerminalConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        for (name, face) in [
+            ("font.normal", Some(&self.font.normal)),
+            ("font.bold", self.font.bold.as_ref()),
+            ("font.italic", self.font.italic.as_ref()),
+            ("font.bold_italic", self.font.bold_italic.as_ref()),
+        ] {
+            if let Some(face) = face {
+                if face.family.trim().is_empty() {
+                    return Err(format!("{name}.family must not be empty"));
+                }
+                if face
+                    .style
+                    .as_deref()
+                    .is_some_and(|style| style.trim().is_empty())
+                {
+                    return Err(format!("{name}.style must not be empty"));
+                }
+            }
+        }
+        if self
+            .font
+            .fallback
+            .iter()
+            .any(|family| family.trim().is_empty())
+        {
+            return Err("font.fallback entries must not be empty".to_string());
+        }
+
         if let Some(working_directory) = self.configured_working_directory()
             && !working_directory.is_dir()
         {
@@ -137,6 +185,14 @@ impl GerminalConfig {
         }
 
         Ok(())
+    }
+}
+
+fn terminal_font_face(config: &FontFaceConfig) -> TerminalFontFace {
+    let face = TerminalFontFace::new(TerminalFontFamily::new(config.family.clone()));
+    match config.style.as_deref() {
+        Some(style) => face.with_style(style),
+        None => face,
     }
 }
 
@@ -343,6 +399,14 @@ impl Default for WindowConfig {
 #[serde(default)]
 pub struct FontConfig {
     pub normal: FontFaceConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<FontFaceConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<FontFaceConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_italic: Option<FontFaceConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<String>,
     pub size: f32,
 }
 
@@ -350,6 +414,10 @@ impl Default for FontConfig {
     fn default() -> Self {
         Self {
             normal: FontFaceConfig::default(),
+            bold: None,
+            italic: None,
+            bold_italic: None,
+            fallback: Vec::new(),
             size: 16.0,
         }
     }
@@ -359,12 +427,15 @@ impl Default for FontConfig {
 #[serde(default)]
 pub struct FontFaceConfig {
     pub family: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 impl Default for FontFaceConfig {
     fn default() -> Self {
         Self {
             family: TerminalFontFamily::default().name().to_owned(),
+            style: None,
         }
     }
 }
@@ -822,7 +893,11 @@ mod tests {
     fn terminal_profile_uses_configured_font() {
         let config: GerminalConfig = toml::from_str(
             r#"
-            font.normal = { family = "JetBrains Mono" }
+            font.normal = { family = "JetBrains Mono", style = "Regular" }
+            font.bold = { family = "JetBrains Mono", style = "Bold" }
+            font.italic = { family = "JetBrains Mono", style = "Italic" }
+            font.bold_italic = { family = "JetBrains Mono", style = "Bold Italic" }
+            font.fallback = ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono"]
             font.size = 18
             "#,
         )
@@ -831,6 +906,33 @@ mod tests {
 
         assert_eq!(profile.font_family().name(), "JetBrains Mono");
         assert_eq!(profile.font_size().logical_px(), 18.0);
+        let font = profile.font_config();
+        assert_eq!(font.normal().style(), Some("Regular"));
+        assert_eq!(font.bold().and_then(|face| face.style()), Some("Bold"));
+        assert_eq!(font.italic().and_then(|face| face.style()), Some("Italic"));
+        assert_eq!(
+            font.bold_italic().and_then(|face| face.style()),
+            Some("Bold Italic")
+        );
+        assert_eq!(
+            font.fallbacks()
+                .iter()
+                .map(|family| family.name())
+                .collect::<Vec<_>>(),
+            ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono"]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_font_family_style_and_fallback() {
+        for contents in [
+            r#"font.normal = { family = "" }"#,
+            r#"font.normal = { family = "monospace", style = "" }"#,
+            r#"font.fallback = [""]"#,
+        ] {
+            let config: GerminalConfig = toml::from_str(contents).unwrap();
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]

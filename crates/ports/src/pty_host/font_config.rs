@@ -1,11 +1,15 @@
 use crate::pty_host::{
-    font_family::TerminalFontFamily, font_size::TerminalFontSize, font_weight::TerminalFontWeight,
-    scale_factor::TerminalScaleFactor,
+    font_face::TerminalFontFace, font_family::TerminalFontFamily, font_size::TerminalFontSize,
+    font_weight::TerminalFontWeight, scale_factor::TerminalScaleFactor,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalFontConfig {
-    family: TerminalFontFamily,
+    normal: TerminalFontFace,
+    bold: Option<TerminalFontFace>,
+    italic: Option<TerminalFontFace>,
+    bold_italic: Option<TerminalFontFace>,
+    fallbacks: Vec<TerminalFontFamily>,
     size: TerminalFontSize,
     bold_weight: TerminalFontWeight,
 }
@@ -13,14 +17,38 @@ pub struct TerminalFontConfig {
 impl TerminalFontConfig {
     pub fn new(family: TerminalFontFamily, size: TerminalFontSize) -> Self {
         Self {
-            family,
+            normal: TerminalFontFace::new(family),
+            bold: None,
+            italic: None,
+            bold_italic: None,
+            fallbacks: Vec::new(),
             size,
             bold_weight: TerminalFontWeight::DEFAULT_BOLD,
         }
     }
 
     pub fn family(&self) -> &TerminalFontFamily {
-        &self.family
+        self.normal.family()
+    }
+
+    pub fn normal(&self) -> &TerminalFontFace {
+        &self.normal
+    }
+
+    pub fn bold(&self) -> Option<&TerminalFontFace> {
+        self.bold.as_ref()
+    }
+
+    pub fn italic(&self) -> Option<&TerminalFontFace> {
+        self.italic.as_ref()
+    }
+
+    pub fn bold_italic(&self) -> Option<&TerminalFontFace> {
+        self.bold_italic.as_ref()
+    }
+
+    pub fn fallbacks(&self) -> &[TerminalFontFamily] {
+        &self.fallbacks
     }
 
     pub const fn size(&self) -> TerminalFontSize {
@@ -34,6 +62,24 @@ impl TerminalFontConfig {
     pub fn with_bold_weight(self, bold_weight: TerminalFontWeight) -> Self {
         Self {
             bold_weight,
+            ..self
+        }
+    }
+
+    pub fn with_faces(
+        self,
+        normal: TerminalFontFace,
+        bold: Option<TerminalFontFace>,
+        italic: Option<TerminalFontFace>,
+        bold_italic: Option<TerminalFontFace>,
+        fallbacks: Vec<TerminalFontFamily>,
+    ) -> Self {
+        Self {
+            normal,
+            bold,
+            italic,
+            bold_italic,
+            fallbacks,
             ..self
         }
     }
