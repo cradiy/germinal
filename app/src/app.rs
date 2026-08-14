@@ -5,12 +5,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod audible_bell;
 mod boilerplate;
 mod config;
 mod error;
 mod logging;
 mod paste;
 
+use audible_bell::AudibleBell;
 pub use config::{GerminalConfig, load_or_create_config};
 use config::{KeyboardAction, KeyboardBinding};
 pub use error::{AppError, AppResult};
@@ -89,6 +91,7 @@ pub struct App {
     render_runtime_factory: WgpuTerminalWindowRuntimeFactory,
     render_runtime: Option<WgpuTerminalWindowRuntime>,
     render_window_id: Option<WindowId>,
+    audible_bell: AudibleBell,
     paste_controller: HostPasteController,
     window_input_modifiers: WindowInputModifiers,
     routed_input_modifiers: WindowInputModifiers,
@@ -140,6 +143,7 @@ impl App {
         let terminal_osc52_mode = config.terminal_osc52_mode();
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
+        let audible_bell = AudibleBell::new(config.bell.command.clone());
 
         let app = Self {
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
@@ -166,6 +170,7 @@ impl App {
             ),
             render_runtime: None,
             render_window_id: None,
+            audible_bell,
             paste_controller: HostPasteController::default(),
             window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
             routed_input_modifiers: WindowInputModifiers::new(false, false, false, false),
@@ -905,6 +910,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.request_redraw();
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::Bell { .. }) => {
+                self.audible_bell.ring();
                 self.ring_bell(
                     Duration::from_millis(self.config.bell.duration_ms),
                     self.config.bell.urgent_on_unfocused && !self.window_focused,

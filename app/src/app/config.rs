@@ -184,6 +184,8 @@ impl From<CursorShape> for TerminalCursorShape {
 pub struct BellConfig {
     pub duration_ms: u64,
     pub urgent_on_unfocused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<BellCommand>,
 }
 
 impl Default for BellConfig {
@@ -191,8 +193,16 @@ impl Default for BellConfig {
         Self {
             duration_ms: 150,
             urgent_on_unfocused: true,
+            command: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BellCommand {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -550,12 +560,19 @@ mod tests {
             [bell]
             duration_ms = 240
             urgent_on_unfocused = false
+
+            [bell.command]
+            program = "canberra-gtk-play"
+            args = ["--id", "bell"]
             "#,
         )
         .unwrap();
 
         assert_eq!(config.bell.duration_ms, 240);
         assert!(!config.bell.urgent_on_unfocused);
+        let command = config.bell.command.unwrap();
+        assert_eq!(command.program, "canberra-gtk-play");
+        assert_eq!(command.args, ["--id", "bell"]);
     }
 
     #[test]
