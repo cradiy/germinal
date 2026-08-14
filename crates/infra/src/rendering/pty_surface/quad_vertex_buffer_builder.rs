@@ -190,6 +190,10 @@ impl WgpuVertexColor {
     pub const fn transparent() -> Self {
         Self::new(0, 0, 0, 0)
     }
+
+    pub const fn with_alpha(self, alpha: u8) -> Self {
+        Self { alpha, ..self }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,7 +312,9 @@ fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
 }
 fn color_of_quad(quad: WgpuQuadDrawItem) -> WgpuVertexColor {
     match quad.kind {
-        WgpuQuadKind::Background => color_or(quad.style.background, WgpuVertexColor::transparent()),
+        WgpuQuadKind::Background => {
+            color_or(quad.style.background, WgpuVertexColor::transparent()).with_alpha(quad.alpha)
+        }
         WgpuQuadKind::Glyph { .. } | WgpuQuadKind::Underline | WgpuQuadKind::Geometric => {
             color_or(quad.style.foreground, WgpuVertexColor::white())
         }
@@ -355,4 +361,38 @@ fn build_quad_indices(quad_count: usize) -> Vec<u32> {
 fn bytes_of_slice<T>(items: &[T]) -> &[u8] {
     let byte_len = std::mem::size_of_val(items);
     unsafe { std::slice::from_raw_parts(items.as_ptr() as *const u8, byte_len) }
+}
+
+#[cfg(test)]
+mod tests {
+    use germinal_ports::rendering::frame_plan_builder::{RgbColorDto, TextStyleDto};
+
+    use super::WgpuQuadVertexBufferBuilder;
+    use crate::rendering::pty_surface::renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind};
+
+    #[test]
+    fn preserves_background_alpha_in_gpu_vertices() {
+        let quad = WgpuQuadDrawItem {
+            kind: WgpuQuadKind::Background,
+            x_px: 0,
+            y_px: 0,
+            width_px: 80,
+            height_px: 24,
+            style: TextStyleDto {
+                background: Some(RgbColorDto::new(20, 40, 60)),
+                ..TextStyleDto::plain()
+            },
+            alpha: 128,
+        };
+
+        let buffer = WgpuQuadVertexBufferBuilder::new().build(&[quad]);
+
+        assert_eq!(buffer.vertices.len(), 4);
+        assert!(
+            buffer
+                .vertices
+                .iter()
+                .all(|vertex| (vertex.color[3] - 128.0 / 255.0).abs() < f32::EPSILON)
+        );
+    }
 }

@@ -1818,9 +1818,7 @@ fn dominant_background_of_term(
             continue;
         }
         let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors, color_theme);
-        let Some(background) = style.background else {
-            continue;
-        };
+        let background = style.background.unwrap_or(color_theme.background);
         let cell_width = u64::from(terminal_char_cell_width(cell.c).max(1));
         if let Some((_, weight)) = weights.iter_mut().find(|(color, _)| *color == background) {
             *weight += cell_width;
@@ -1835,18 +1833,21 @@ fn dominant_background_of_term(
 }
 
 fn style_of_cell(
-    fg: Color,
-    bg: Color,
+    mut foreground_color: Color,
+    mut background_color: Color,
     flags: Flags,
     colors: &Colors,
     color_theme: &TerminalColorTheme,
 ) -> TextStyleDto {
-    let mut foreground = color_to_rgb(fg, colors, color_theme);
-    let mut background = color_to_rgb(bg, colors, color_theme);
-
     if flags.contains(Flags::INVERSE) {
-        std::mem::swap(&mut foreground, &mut background);
+        std::mem::swap(&mut foreground_color, &mut background_color);
     }
+    let foreground = color_to_rgb(foreground_color, colors, color_theme);
+    let background = if background_color == Color::Named(NamedColor::Background) {
+        None
+    } else {
+        color_to_rgb(background_color, colors, color_theme)
+    };
 
     TextStyleDto {
         foreground,
@@ -3102,7 +3103,7 @@ mod tests {
         let default_run = snapshot
             .text_runs
             .iter()
-            .find(|run| run.text == "default ")
+            .find(|run| run.text == "default")
             .expect("default run should exist");
         let blue_run = snapshot
             .text_runs
@@ -3111,7 +3112,9 @@ mod tests {
             .expect("blue run should exist");
 
         assert_eq!(default_run.style.foreground, Some(color_theme.foreground));
+        assert_eq!(default_run.style.background, None);
         assert_eq!(blue_run.style.foreground, Some(color_theme.palette[4]));
+        assert_eq!(blue_run.style.background, None);
         assert_eq!(
             store
                 .render_surface_snapshot_of(target_id)
@@ -3216,6 +3219,20 @@ mod tests {
         assert_eq!(
             selected_snapshot.default_background,
             RgbColorDto::new(30, 30, 47)
+        );
+    }
+
+    #[test]
+    fn sparse_explicit_background_does_not_replace_the_terminal_background() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(1);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b[48;2;122;162;247m \x1b[0m");
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+
+        assert_eq!(
+            snapshot.default_background,
+            TerminalColorTheme::default().background
         );
     }
 

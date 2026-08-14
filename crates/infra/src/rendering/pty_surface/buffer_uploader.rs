@@ -180,6 +180,7 @@ mod tests {
             width_px: 8,
             height_px: 16,
             style,
+            alpha: u8::MAX,
         }]);
 
         let uploader = WgpuBufferUploader::new();

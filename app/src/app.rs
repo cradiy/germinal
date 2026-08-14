@@ -152,6 +152,7 @@ impl App {
         let terminal_osc52_mode = config.terminal_osc52_mode();
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
+        let window_opacity = config.window.opacity;
         let audible_bell = AudibleBell::new(config.bell.command.clone());
 
         let app = Self {
@@ -178,6 +179,7 @@ impl App {
                 window_title,
                 cursor_blink_interval,
                 terminal_color_theme,
+                window_opacity,
             ),
             render_runtime: None,
             render_window_id: None,
@@ -223,6 +225,7 @@ impl App {
                 .create_window(
                     winit::window::Window::default_attributes()
                         .with_title(self.config.window.title.as_str())
+                        .with_transparent(self.config.window.opacity < 1.0)
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             f64::from(self.config.window.width_px),
                             f64::from(self.config.window.height_px),

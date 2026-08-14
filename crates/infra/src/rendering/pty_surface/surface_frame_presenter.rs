@@ -8,7 +8,7 @@ use crate::rendering::pty_surface::{
         WgpuTerminalRenderView,
     },
     pipeline_factory::WgpuTerminalPipeline,
-    render_target_plan::WgpuTerminalRenderTargetPlan,
+    render_target_plan::{WgpuTerminalClearColor, WgpuTerminalRenderTargetPlan},
     renderer_backend::WgpuRendererConfig,
     visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
@@ -80,7 +80,7 @@ impl WgpuTerminalSurfaceFramePresenter {
                     label: Some("germinal.terminal.command_encoder"),
                 });
         let create_command_encoder = create_encoder_started_at.elapsed();
-        clear_target_view(&mut command_encoder, &target_view);
+        clear_target_view(&mut command_encoder, &target_view, input.clear_color);
 
         let render_to_view_started_at = Instant::now();
         let render_results = input
@@ -145,13 +145,17 @@ impl WgpuTerminalSurfaceFramePresenter {
     }
 }
 
-fn clear_target_view(command_encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+fn clear_target_view(
+    command_encoder: &mut wgpu::CommandEncoder,
+    target_view: &wgpu::TextureView,
+    clear_color: WgpuTerminalClearColor,
+) {
     let color_attachment = Some(wgpu::RenderPassColorAttachment {
         view: target_view,
         depth_slice: None,
         resolve_target: None,
         ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            load: wgpu::LoadOp::Clear(clear_color.into()),
             store: wgpu::StoreOp::Store,
         },
     });
@@ -174,6 +178,7 @@ pub struct WgpuTerminalWorkspacePresentInput<'a, 'window> {
     pub pipeline: &'a WgpuTerminalPipeline,
     pub surfaces: &'a [WgpuTerminalWorkspaceSurface<'a>],
     pub visual_bell: Option<WgpuVisualBellFrame>,
+    pub clear_color: WgpuTerminalClearColor,
 }
 
 pub struct WgpuTerminalWorkspaceSurface<'a> {

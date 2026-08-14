@@ -30,7 +30,7 @@ use germinal_ports::{
     seq::Seq,
 };
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     window::{UserAttentionType, Window, WindowId},
@@ -46,7 +46,9 @@ use crate::rendering::pty_surface::{
     frame_renderer::WgpuTerminalFrameRenderer,
     pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
     pipeline_spec::WgpuTerminalPipelineSpec,
-    render_target_plan::{WgpuTerminalLoadOp, WgpuTerminalRenderTargetPlan},
+    render_target_plan::{
+        WgpuTerminalClearColor, WgpuTerminalLoadOp, WgpuTerminalRenderTargetPlan,
+    },
     renderer_backend::WgpuRendererConfig,
     surface_frame_presenter::{
         WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
@@ -105,6 +107,7 @@ pub struct WgpuTerminalWindowRuntime {
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     color_theme: TerminalColorTheme,
+    background_opacity: f32,
     needs_redraw: bool,
     visual_bell_until: Option<Instant>,
     cursor_blink_interval: Duration,
@@ -120,6 +123,24 @@ struct CursorBlinkSignature {
     x: u32,
     y: u32,
     shape: RenderSurfaceCursorShape,
+}
+
+fn normalized_opacity(opacity: f32) -> f32 {
+    if opacity.is_finite() {
+        opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+fn transparent_surface_alpha_mode(
+    supported: &[wgpu::CompositeAlphaMode],
+) -> wgpu::CompositeAlphaMode {
+    if supported.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
+        wgpu::CompositeAlphaMode::Auto
+    }
 }
 
 fn ime_cursor_area(
@@ -167,6 +188,7 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     base_title: String,
     cursor_blink_interval: Duration,
     color_theme: TerminalColorTheme,
+    background_opacity: f32,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
@@ -175,12 +197,14 @@ impl WgpuTerminalWindowRuntimeFactory {
         base_title: String,
         cursor_blink_interval: Duration,
         color_theme: TerminalColorTheme,
+        background_opacity: f32,
     ) -> Self {
         Self {
             profile,
             base_title,
             cursor_blink_interval,
             color_theme,
+            background_opacity: normalized_opacity(background_opacity),
         }
     }
 
@@ -194,6 +218,7 @@ impl WgpuTerminalWindowRuntimeFactory {
             self.base_title.clone(),
             self.cursor_blink_interval,
             self.color_theme,
+            self.background_opacity,
         ))
     }
 }
@@ -205,7 +230,9 @@ impl WgpuTerminalWindowRuntime {
         base_title: String,
         cursor_blink_interval: Duration,
         color_theme: TerminalColorTheme,
+        background_opacity: f32,
     ) -> Result<Self, WindowRuntimeError> {
+        let background_opacity = normalized_opacity(background_opacity);
         let instance = wgpu::Instance::default();
 
         let surface = instance
@@ -234,12 +261,23 @@ impl WgpuTerminalWindowRuntime {
             .await
             .map_err(|source| WindowRuntimeError::RequestDevice { source })?;
 
-        let surface_config = surface.get_default_config(&adapter, width, height).ok_or(
+        let mut surface_config = surface.get_default_config(&adapter, width, height).ok_or(
             WindowRuntimeError::MissingSurfaceConfig {
                 width_px: width,
                 height_px: height,
             },
         )?;
+        if background_opacity < 1.0 {
+            let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
+            surface_config.alpha_mode = transparent_surface_alpha_mode(&alpha_modes);
+            if surface_config.alpha_mode != wgpu::CompositeAlphaMode::PreMultiplied {
+                warn!(
+                    ?alpha_modes,
+                    selected = ?surface_config.alpha_mode,
+                    "surface does not expose premultiplied alpha; window transparency is platform-dependent"
+                );
+            }
+        }
 
         surface.configure(&device, &surface_config);
 
@@ -288,6 +326,7 @@ impl WgpuTerminalWindowRuntime {
             size_info,
             profile,
             color_theme,
+            background_opacity,
             needs_redraw: false,
             visual_bell_until: None,
             cursor_blink_interval: cursor_blink_interval.max(Duration::from_millis(1)),
@@ -489,6 +528,7 @@ impl WgpuTerminalWindowRuntime {
                     surface_snapshot,
                     renderer_config: WgpuRendererConfig::from(size_info)
                         .with_color_theme(self.color_theme)
+                        .with_background_opacity(self.background_opacity)
                         .with_blinking_cursor_visible(blinking_cursor_visible),
                 })
             })
@@ -513,6 +553,7 @@ impl WgpuTerminalWindowRuntime {
                 surface_snapshot: &tab_bar_surface.snapshot,
                 renderer_config: WgpuRendererConfig::from(size_info)
                     .with_color_theme(self.color_theme)
+                    .with_background_opacity(self.background_opacity)
                     .with_blinking_cursor_visible(blinking_cursor_visible),
             });
         }
@@ -535,6 +576,11 @@ impl WgpuTerminalWindowRuntime {
                 pipeline: &self.pipeline,
                 surfaces: &surfaces,
                 visual_bell,
+                clear_color: if self.background_opacity < 1.0 {
+                    WgpuTerminalClearColor::transparent()
+                } else {
+                    WgpuTerminalClearColor::black()
+                },
             }) {
             Ok(result) => {
                 self.perf.record_frame(row_count, run_count, &result);
@@ -1209,10 +1255,33 @@ mod tests {
 
     use super::{
         TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
-        ime_cursor_area,
+        ime_cursor_area, normalized_opacity, transparent_surface_alpha_mode,
     };
     use germinal_ports::pty_host::color_theme::TerminalColorTheme;
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
+
+    #[test]
+    fn opacity_is_clamped_and_non_finite_values_fall_back_to_opaque() {
+        assert_eq!(normalized_opacity(-0.5), 0.0);
+        assert_eq!(normalized_opacity(0.75), 0.75);
+        assert_eq!(normalized_opacity(1.5), 1.0);
+        assert_eq!(normalized_opacity(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn transparency_prefers_premultiplied_surface_alpha() {
+        assert_eq!(
+            transparent_surface_alpha_mode(&[
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ]),
+            wgpu::CompositeAlphaMode::PreMultiplied
+        );
+        assert_eq!(
+            transparent_surface_alpha_mode(&[wgpu::CompositeAlphaMode::Opaque]),
+            wgpu::CompositeAlphaMode::Auto
+        );
+    }
 
     #[test]
     fn cursor_blink_phase_alternates_and_reports_the_next_deadline() {

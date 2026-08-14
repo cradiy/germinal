@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 
 use crate::rendering::pty_surface::{
-    glyph_atlas_bind_group::WgpuTerminalGlyphAtlasBindGroupFactory,
+    glyph_atlas_bind_group::{
+        WgpuTerminalGlyphAtlasBindGroup, WgpuTerminalGlyphAtlasBindGroupFactory,
+    },
+    glyph_atlas_texture::{WgpuTerminalGlyphAtlasTexture, WgpuTerminalGlyphAtlasTextureFactory},
     pipeline_spec::WgpuTerminalPipelineSpec,
 };
 
@@ -43,6 +46,15 @@ impl WgpuTerminalPipelineFactory {
         let glyph_atlas_bind_group_factory = WgpuTerminalGlyphAtlasBindGroupFactory::new();
 
         let glyph_atlas_bind_group_layout = glyph_atlas_bind_group_factory.create_layout(device);
+        // The shader declares group 1 statically, so wgpu requires it for every draw even when
+        // the frame contains only solid-color quads and has no glyph atlas yet.
+        let fallback_glyph_atlas_texture =
+            WgpuTerminalGlyphAtlasTextureFactory::new().create_fallback(device);
+        let fallback_glyph_atlas_bind_group = glyph_atlas_bind_group_factory.create_bind_group(
+            device,
+            &glyph_atlas_bind_group_layout,
+            &fallback_glyph_atlas_texture,
+        );
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("germinal.terminal.pipeline_layout"),
@@ -83,6 +95,8 @@ impl WgpuTerminalPipelineFactory {
             render_pipeline,
             viewport_bind_group_layout,
             glyph_atlas_bind_group_layout,
+            _fallback_glyph_atlas_texture: fallback_glyph_atlas_texture,
+            fallback_glyph_atlas_bind_group,
         }
     }
 }
@@ -100,4 +114,6 @@ pub struct WgpuTerminalPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
     pub viewport_bind_group_layout: wgpu::BindGroupLayout,
     pub glyph_atlas_bind_group_layout: wgpu::BindGroupLayout,
+    _fallback_glyph_atlas_texture: WgpuTerminalGlyphAtlasTexture,
+    pub fallback_glyph_atlas_bind_group: WgpuTerminalGlyphAtlasBindGroup,
 }

@@ -46,17 +46,19 @@ impl<'pass, 'resource> WgpuTerminalRenderPassEncoder
                 dynamic_offsets,
             );
 
-            if let Some(glyph_atlas_bind_group) = self.glyph_atlas_bind_group {
-                self.render_pass
-                    .set_bind_group(1, Some(&glyph_atlas_bind_group.bind_group), &[]);
-            }
+            let glyph_atlas_bind_group = self
+                .glyph_atlas_bind_group
+                .unwrap_or(&self.pipeline.fallback_glyph_atlas_bind_group);
+            self.render_pass
+                .set_bind_group(1, Some(&glyph_atlas_bind_group.bind_group), &[]);
 
             return;
         }
 
-        if index == 1
-            && let Some(glyph_atlas_bind_group) = self.glyph_atlas_bind_group
-        {
+        if index == 1 {
+            let glyph_atlas_bind_group = self
+                .glyph_atlas_bind_group
+                .unwrap_or(&self.pipeline.fallback_glyph_atlas_bind_group);
             self.render_pass.set_bind_group(
                 1,
                 Some(&glyph_atlas_bind_group.bind_group),

@@ -72,6 +72,19 @@ Styled faces are optional. When omitted, Germinal asks the primary family for th
 weight and slant. Fallback families are checked in their configured order for glyphs missing from
 the selected primary face; the system font fallback remains the final fallback.
 
+## Background opacity
+
+Window background opacity is configured independently from the terminal colors:
+
+```toml
+[window]
+opacity = 0.92
+```
+
+The value must be between `0.0` (fully transparent background) and `1.0` (opaque). Text, images,
+cursor content, and explicit application background colors remain opaque. Transparency also
+depends on support from the window system and compositor.
+
 ## Kitty color themes
 
 Germinal can load a Kitty color theme directly. Set one path in

@@ -517,6 +517,7 @@ pub struct WgpuRendererConfig {
     pub blinking_cursor_visible: bool,
     pub cursor_color: RgbColorDto,
     pub cursor_text_color: RgbColorDto,
+    pub background_alpha: u8,
 }
 impl WgpuRendererConfig {
     pub fn with_blinking_cursor_visible(mut self, visible: bool) -> Self {
@@ -527,6 +528,11 @@ impl WgpuRendererConfig {
     pub fn with_color_theme(mut self, theme: TerminalColorTheme) -> Self {
         self.cursor_color = theme.cursor;
         self.cursor_text_color = theme.cursor_text;
+        self
+    }
+
+    pub fn with_background_opacity(mut self, opacity: f32) -> Self {
+        self.background_alpha = opacity_alpha(opacity);
         self
     }
 
@@ -544,6 +550,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            background_alpha: u8::MAX,
         }
     }
 
@@ -562,6 +569,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            background_alpha: u8::MAX,
         }
     }
 
@@ -633,7 +641,16 @@ impl Default for WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            background_alpha: u8::MAX,
         }
+    }
+}
+
+fn opacity_alpha(opacity: f32) -> u8 {
+    if opacity.is_finite() {
+        (opacity.clamp(0.0, 1.0) * f32::from(u8::MAX)).round() as u8
+    } else {
+        u8::MAX
     }
 }
 
@@ -777,6 +794,7 @@ pub struct WgpuQuadDrawItem {
     pub width_px: u32,
     pub height_px: u32,
     pub style: TextStyleDto,
+    pub alpha: u8,
 }
 impl WgpuQuadDrawItem {
     fn surface_background(config: WgpuRendererConfig, color: RgbColorDto) -> Self {
@@ -794,6 +812,7 @@ impl WgpuQuadDrawItem {
                 background: Some(color),
                 ..TextStyleDto::plain()
             },
+            alpha: config.background_alpha,
         }
     }
 
@@ -809,6 +828,7 @@ impl WgpuQuadDrawItem {
             width_px: glyph.pixel_width(config),
             height_px: config.row_height_px(glyph.y),
             style: glyph.style,
+            alpha: u8::MAX,
         }
     }
 
@@ -826,6 +846,7 @@ impl WgpuQuadDrawItem {
             width_px: cell_width.max(1) * config.cell_width_px,
             height_px: config.row_height_px(y),
             style,
+            alpha: u8::MAX,
         }
     }
 
@@ -845,6 +866,7 @@ impl WgpuQuadDrawItem {
             width_px: cell_width.max(1) * config.cell_width_px,
             height_px: 1,
             style,
+            alpha: u8::MAX,
         }
     }
 
@@ -862,6 +884,7 @@ impl WgpuQuadDrawItem {
             width_px: width_px.max(1),
             height_px: height_px.max(1),
             style,
+            alpha: u8::MAX,
         }
     }
 
@@ -879,6 +902,7 @@ impl WgpuQuadDrawItem {
             width_px: width_px.max(1),
             height_px: height_px.max(1),
             style: TextStyleDto::plain(),
+            alpha: u8::MAX,
         }
     }
 }
@@ -997,7 +1021,9 @@ mod tests {
             TerminalCellSize::new(8, 16),
             TerminalPadding::ZERO,
         );
-        let backend = WgpuRendererBackend::new(WgpuRendererConfig::from(size_info));
+        let backend = WgpuRendererBackend::new(
+            WgpuRendererConfig::from(size_info).with_background_opacity(0.5),
+        );
         let background = RgbColorDto::new(20, 21, 30);
         backend.render_surface(&RenderSurfaceSnapshot {
             target_id: RenderTargetId::new(1),
@@ -1018,6 +1044,7 @@ mod tests {
         assert_eq!(backgrounds[0].width_px, 100);
         assert_eq!(backgrounds[0].height_px, 35);
         assert_eq!(backgrounds[0].style.background, Some(background));
+        assert_eq!(backgrounds[0].alpha, 128);
     }
 
     #[test]

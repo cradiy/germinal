@@ -135,6 +135,10 @@ impl GerminalConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if !self.window.opacity.is_finite() || !(0.0..=1.0).contains(&self.window.opacity) {
+            return Err("window.opacity must be a finite number between 0.0 and 1.0".to_string());
+        }
+
         for (name, face) in [
             ("font.normal", Some(&self.font.normal)),
             ("font.bold", self.font.bold.as_ref()),
@@ -383,6 +387,7 @@ pub struct WindowConfig {
     pub title: String,
     pub width_px: u32,
     pub height_px: u32,
+    pub opacity: f32,
 }
 
 impl Default for WindowConfig {
@@ -391,6 +396,7 @@ impl Default for WindowConfig {
             title: "Germinal".to_string(),
             width_px: 960,
             height_px: 540,
+            opacity: 1.0,
         }
     }
 }
@@ -762,6 +768,7 @@ mod tests {
         let contents = toml::to_string_pretty(&GerminalConfig::default()).unwrap();
 
         let value: toml::Value = toml::from_str(&contents).unwrap();
+        assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
         assert_eq!(
             value["font"]["normal"]["family"].as_str(),
@@ -811,6 +818,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.tabs.position, TabBarPosition::Top);
+    }
+
+    #[test]
+    fn validates_window_opacity() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [window]
+            opacity = 0.82
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.window.opacity, 0.82);
+        assert!(config.validate().is_ok());
+
+        for opacity in [-0.1, 1.1, f32::INFINITY, f32::NAN] {
+            let mut config = GerminalConfig::default();
+            config.window.opacity = opacity;
+            assert!(config.validate().unwrap_err().contains("window.opacity"));
+        }
     }
 
     #[test]
