@@ -44,8 +44,8 @@ use germinal_ports::{
 use tracing::warn;
 
 use super::pty_input_encoder::{
-    PtyMouseEncoder, PtyScrollAction, encode_focus_changed, encode_ime_commit, encode_key_event,
-    encode_paste, mouse_reporting_enabled,
+    PtyMouseEncoder, PtyScrollAction, encode_focus_changed, encode_ime_commit,
+    encode_key_event_with_repeat, encode_paste, mouse_reporting_enabled,
 };
 
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -254,15 +254,17 @@ where
                 }
                 WindowInputEvent::Key {
                     state: key_state,
+                    repeat,
                     logical_key,
                     text,
                 } => {
                     let modifiers = *state.modifiers.borrow();
-                    send_pty_host_key(
+                    send_pty_host_key_event(
                         state,
                         pty_host_id,
                         modifiers,
                         key_state,
+                        repeat,
                         &logical_key,
                         text.as_deref(),
                     );
@@ -457,11 +459,32 @@ fn send_pty_host_focus(state: &PtyServiceState, pty_host_id: PtyHostId, focused:
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
+#[cfg(test)]
 fn send_pty_host_key(
     state: &PtyServiceState,
     pty_host_id: PtyHostId,
     modifiers: WindowInputModifiers,
     key_state: WindowInputElementState,
+    logical_key: &WindowInputKey,
+    text: Option<&str>,
+) {
+    send_pty_host_key_event(
+        state,
+        pty_host_id,
+        modifiers,
+        key_state,
+        false,
+        logical_key,
+        text,
+    );
+}
+
+fn send_pty_host_key_event(
+    state: &PtyServiceState,
+    pty_host_id: PtyHostId,
+    modifiers: WindowInputModifiers,
+    key_state: WindowInputElementState,
+    repeat: bool,
     logical_key: &WindowInputKey,
     text: Option<&str>,
 ) {
@@ -477,10 +500,11 @@ fn send_pty_host_key(
         send_vi_mode_key(runtime, modifiers, key_state, logical_key);
         return;
     }
-    let Some(bytes) = encode_key_event(
+    let Some(bytes) = encode_key_event_with_repeat(
         runtime.input_modes.load(),
         modifiers,
         key_state,
+        repeat,
         logical_key,
         text,
     ) else {

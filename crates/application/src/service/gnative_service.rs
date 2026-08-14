@@ -175,6 +175,7 @@ fn gnative_input_event_from(
             }
             WindowInputEvent::Key {
                 state,
+                repeat: _,
                 logical_key,
                 text,
             } => Some(GNativeInputEvent::Key {
@@ -479,6 +480,7 @@ mod tests {
             gshell_id: GShellId::new(1),
             event: GShellInputEvent::Window(WindowInputEvent::Key {
                 state: WindowInputElementState::Pressed,
+                repeat: true,
                 logical_key: WindowInputKey::Character("a".into()),
                 text: Some("a".into()),
             }),
@@ -508,6 +510,7 @@ mod tests {
             gshell_id: GShellId::new(2),
             event: GShellInputEvent::Window(WindowInputEvent::Key {
                 state: WindowInputElementState::Pressed,
+                repeat: false,
                 logical_key: WindowInputKey::Named(WindowInputNamedKey::F1),
                 text: None,
             }),

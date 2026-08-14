@@ -10,6 +10,11 @@ const SGR_MOUSE: u32 = 1 << 3;
 const MOUSE_REPORT_CLICK: u32 = 1 << 4;
 const MOUSE_DRAG: u32 = 1 << 5;
 const MOUSE_MOTION: u32 = 1 << 6;
+const KITTY_DISAMBIGUATE_ESC_CODES: u32 = 1 << 7;
+const KITTY_REPORT_EVENT_TYPES: u32 = 1 << 8;
+const KITTY_REPORT_ALTERNATE_KEYS: u32 = 1 << 9;
+const KITTY_REPORT_ALL_KEYS_AS_ESC: u32 = 1 << 10;
+const KITTY_REPORT_ASSOCIATED_TEXT: u32 = 1 << 11;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalInputModes(u32);
@@ -80,6 +85,62 @@ impl TerminalInputModes {
     pub const fn mouse_tracking(self) -> bool {
         self.mouse_report_click() || self.mouse_drag() || self.mouse_motion()
     }
+
+    pub const fn with_kitty_keyboard(
+        mut self,
+        disambiguate_esc_codes: bool,
+        report_event_types: bool,
+        report_alternate_keys: bool,
+        report_all_keys_as_escape_codes: bool,
+        report_associated_text: bool,
+    ) -> Self {
+        if disambiguate_esc_codes {
+            self.0 |= KITTY_DISAMBIGUATE_ESC_CODES;
+        }
+        if report_event_types {
+            self.0 |= KITTY_REPORT_EVENT_TYPES;
+        }
+        if report_alternate_keys {
+            self.0 |= KITTY_REPORT_ALTERNATE_KEYS;
+        }
+        if report_all_keys_as_escape_codes {
+            self.0 |= KITTY_REPORT_ALL_KEYS_AS_ESC;
+        }
+        if report_associated_text {
+            self.0 |= KITTY_REPORT_ASSOCIATED_TEXT;
+        }
+        self
+    }
+
+    pub const fn kitty_keyboard(self) -> bool {
+        self.0
+            & (KITTY_DISAMBIGUATE_ESC_CODES
+                | KITTY_REPORT_EVENT_TYPES
+                | KITTY_REPORT_ALTERNATE_KEYS
+                | KITTY_REPORT_ALL_KEYS_AS_ESC
+                | KITTY_REPORT_ASSOCIATED_TEXT)
+            != 0
+    }
+
+    pub const fn kitty_disambiguate_esc_codes(self) -> bool {
+        self.0 & KITTY_DISAMBIGUATE_ESC_CODES != 0
+    }
+
+    pub const fn kitty_report_event_types(self) -> bool {
+        self.0 & KITTY_REPORT_EVENT_TYPES != 0
+    }
+
+    pub const fn kitty_report_alternate_keys(self) -> bool {
+        self.0 & KITTY_REPORT_ALTERNATE_KEYS != 0
+    }
+
+    pub const fn kitty_report_all_keys_as_escape_codes(self) -> bool {
+        self.0 & KITTY_REPORT_ALL_KEYS_AS_ESC != 0
+    }
+
+    pub const fn kitty_report_associated_text(self) -> bool {
+        self.0 & KITTY_REPORT_ASSOCIATED_TEXT != 0
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,11 +166,18 @@ mod tests {
     fn shared_state_publishes_input_modes() {
         let state = TerminalInputModeState::default();
         let reader = state.clone();
-        let modes = TerminalInputModes::new(true, true, true, true, true, false, false);
+        let modes = TerminalInputModes::new(true, true, true, true, true, false, false)
+            .with_kitty_keyboard(true, true, true, true, true);
 
         state.store(modes);
 
         assert_eq!(reader.load(), modes);
         assert!(reader.load().mouse_tracking());
+        assert!(reader.load().kitty_keyboard());
+        assert!(reader.load().kitty_disambiguate_esc_codes());
+        assert!(reader.load().kitty_report_event_types());
+        assert!(reader.load().kitty_report_alternate_keys());
+        assert!(reader.load().kitty_report_all_keys_as_escape_codes());
+        assert!(reader.load().kitty_report_associated_text());
     }
 }

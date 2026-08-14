@@ -95,6 +95,16 @@ pub enum WindowInputNamedKey {
     Delete,
     PageUp,
     PageDown,
+    CapsLock,
+    ScrollLock,
+    NumLock,
+    PrintScreen,
+    Pause,
+    ContextMenu,
+    Shift,
+    Control,
+    Alt,
+    Super,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +120,7 @@ pub enum WindowInputEvent {
     FocusChanged(bool),
     Key {
         state: WindowInputElementState,
+        repeat: bool,
         logical_key: WindowInputKey,
         text: Option<String>,
     },

@@ -20,6 +20,7 @@ pub(super) enum PtyScrollAction {
     ScrollDisplay(i32),
 }
 
+#[cfg(test)]
 pub(super) fn encode_key_event(
     modes: TerminalInputModes,
     modifiers: WindowInputModifiers,
@@ -27,6 +28,21 @@ pub(super) fn encode_key_event(
     logical_key: &WindowInputKey,
     text: Option<&str>,
 ) -> Option<Vec<u8>> {
+    encode_key_event_with_repeat(modes, modifiers, state, false, logical_key, text)
+}
+
+pub(super) fn encode_key_event_with_repeat(
+    modes: TerminalInputModes,
+    modifiers: WindowInputModifiers,
+    state: WindowInputElementState,
+    repeat: bool,
+    logical_key: &WindowInputKey,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    if modes.kitty_keyboard() {
+        return encode_kitty_key_event(modes, modifiers, state, repeat, logical_key, text);
+    }
+
     if state != WindowInputElementState::Pressed {
         return None;
     }
@@ -360,9 +376,257 @@ fn named_key_bytes(
         WindowInputNamedKey::F10 => tilde_key_sequence(21, modifiers),
         WindowInputNamedKey::F11 => tilde_key_sequence(23, modifiers),
         WindowInputNamedKey::F12 => tilde_key_sequence(24, modifiers),
+        WindowInputNamedKey::CapsLock
+        | WindowInputNamedKey::ScrollLock
+        | WindowInputNamedKey::NumLock
+        | WindowInputNamedKey::PrintScreen
+        | WindowInputNamedKey::Pause
+        | WindowInputNamedKey::ContextMenu
+        | WindowInputNamedKey::Shift
+        | WindowInputNamedKey::Control
+        | WindowInputNamedKey::Alt
+        | WindowInputNamedKey::Super => return None,
     };
 
     Some(bytes)
+}
+
+fn encode_kitty_key_event(
+    modes: TerminalInputModes,
+    modifiers: WindowInputModifiers,
+    state: WindowInputElementState,
+    repeat: bool,
+    logical_key: &WindowInputKey,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    if state == WindowInputElementState::Released && !modes.kitty_report_event_types() {
+        return None;
+    }
+
+    match logical_key {
+        WindowInputKey::Named(key) => {
+            kitty_named_key_bytes(modes, modifiers, state, repeat, *key, text)
+        }
+        WindowInputKey::Character(key) => {
+            kitty_character_key_bytes(modes, modifiers, state, repeat, key, text)
+        }
+        WindowInputKey::Unidentified => None,
+    }
+}
+
+fn kitty_character_key_bytes(
+    modes: TerminalInputModes,
+    modifiers: WindowInputModifiers,
+    state: WindowInputElementState,
+    repeat: bool,
+    key: &str,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    if state == WindowInputElementState::Pressed
+        && !modes.kitty_report_all_keys_as_escape_codes()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
+        && !modifiers.super_key()
+    {
+        return text_bytes(&WindowInputKey::Character(key.to_string()), text);
+    }
+
+    let mut characters = key.chars();
+    let shifted = characters.next()?;
+    if characters.next().is_some() {
+        return (state == WindowInputElementState::Pressed
+            && !modes.kitty_report_all_keys_as_escape_codes())
+        .then(|| text.unwrap_or(key).as_bytes().to_vec());
+    }
+
+    let event_type = kitty_event_type(modes, state, repeat);
+    let is_legacy_key = shifted.is_ascii_alphanumeric() || shifted.is_ascii_punctuation();
+    let use_legacy = !modes.kitty_report_alternate_keys()
+        && event_type.is_empty()
+        && is_legacy_key
+        && !(modes.kitty_disambiguate_esc_codes()
+            && (modifiers.control_key() || modifiers.alt_key()))
+        && !modifiers.super_key()
+        && !modes.kitty_report_all_keys_as_escape_codes();
+    if use_legacy {
+        return legacy_character_bytes(modifiers, shifted, text);
+    }
+
+    let base = kitty_unshift_ascii(shifted);
+    let mut key_code = u32::from(base).to_string();
+    if modes.kitty_report_alternate_keys() && base != shifted {
+        key_code.push(':');
+        key_code.push_str(&u32::from(shifted).to_string());
+    }
+    let modifiers = kitty_modifier_parameter(modifiers);
+    let associated_text = kitty_associated_text(modes, state, text);
+    Some(format!("\x1b[{key_code};{modifiers}{event_type}{associated_text}u").into_bytes())
+}
+
+fn kitty_named_key_bytes(
+    modes: TerminalInputModes,
+    modifiers: WindowInputModifiers,
+    state: WindowInputElementState,
+    repeat: bool,
+    key: WindowInputNamedKey,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    let modifiers = kitty_modifier_parameter(modifiers);
+    let event_type = kitty_event_type(modes, state, repeat);
+    let associated_text = kitty_associated_text(modes, state, text);
+
+    let bytes = match key {
+        WindowInputNamedKey::Enter => {
+            format!("\x1b[13;{modifiers}{event_type}{associated_text}u")
+        }
+        WindowInputNamedKey::Tab => {
+            format!("\x1b[9;{modifiers}{event_type}{associated_text}u")
+        }
+        WindowInputNamedKey::Backspace => {
+            format!("\x1b[127;{modifiers}{event_type}{associated_text}u")
+        }
+        WindowInputNamedKey::Escape => {
+            format!("\x1b[27;{modifiers}{event_type}{associated_text}u")
+        }
+        WindowInputNamedKey::ArrowUp => format!("\x1b[1;{modifiers}{event_type}A"),
+        WindowInputNamedKey::ArrowDown => format!("\x1b[1;{modifiers}{event_type}B"),
+        WindowInputNamedKey::ArrowRight => format!("\x1b[1;{modifiers}{event_type}C"),
+        WindowInputNamedKey::ArrowLeft => format!("\x1b[1;{modifiers}{event_type}D"),
+        WindowInputNamedKey::Home => format!("\x1b[1;{modifiers}{event_type}H"),
+        WindowInputNamedKey::End => format!("\x1b[1;{modifiers}{event_type}F"),
+        WindowInputNamedKey::Insert => format!("\x1b[2;{modifiers}{event_type}~"),
+        WindowInputNamedKey::Delete => format!("\x1b[3;{modifiers}{event_type}~"),
+        WindowInputNamedKey::PageUp => format!("\x1b[5;{modifiers}{event_type}~"),
+        WindowInputNamedKey::PageDown => format!("\x1b[6;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F1 => format!("\x1b[11;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F2 => format!("\x1b[12;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F3 => format!("\x1b[13;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F4 => format!("\x1b[14;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F5 => format!("\x1b[15;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F6 => format!("\x1b[17;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F7 => format!("\x1b[18;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F8 => format!("\x1b[19;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F9 => format!("\x1b[20;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F10 => format!("\x1b[21;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F11 => format!("\x1b[23;{modifiers}{event_type}~"),
+        WindowInputNamedKey::F12 => format!("\x1b[24;{modifiers}{event_type}~"),
+        WindowInputNamedKey::CapsLock
+        | WindowInputNamedKey::ScrollLock
+        | WindowInputNamedKey::NumLock
+        | WindowInputNamedKey::PrintScreen
+        | WindowInputNamedKey::Pause
+        | WindowInputNamedKey::ContextMenu
+        | WindowInputNamedKey::Shift
+        | WindowInputNamedKey::Control
+        | WindowInputNamedKey::Alt
+        | WindowInputNamedKey::Super => {
+            if !modes.kitty_report_all_keys_as_escape_codes() {
+                return None;
+            }
+            let code = match key {
+                WindowInputNamedKey::CapsLock => 57358,
+                WindowInputNamedKey::ScrollLock => 57359,
+                WindowInputNamedKey::NumLock => 57360,
+                WindowInputNamedKey::PrintScreen => 57361,
+                WindowInputNamedKey::Pause => 57362,
+                WindowInputNamedKey::ContextMenu => 57363,
+                WindowInputNamedKey::Shift => 57441,
+                WindowInputNamedKey::Control => 57442,
+                WindowInputNamedKey::Alt => 57443,
+                WindowInputNamedKey::Super => 57444,
+                _ => unreachable!(),
+            };
+            format!("\x1b[{code};{modifiers}{event_type}{associated_text}u")
+        }
+    };
+
+    Some(bytes.into_bytes())
+}
+
+fn kitty_event_type(
+    modes: TerminalInputModes,
+    state: WindowInputElementState,
+    repeat: bool,
+) -> &'static str {
+    if !modes.kitty_report_event_types() {
+        return "";
+    }
+    match (state, repeat) {
+        (WindowInputElementState::Released, _) => ":3",
+        (WindowInputElementState::Pressed, true) => ":2",
+        (WindowInputElementState::Pressed, false) => "",
+    }
+}
+
+fn kitty_modifier_parameter(modifiers: WindowInputModifiers) -> u8 {
+    1 + u8::from(modifiers.shift_key())
+        + u8::from(modifiers.alt_key()) * 2
+        + u8::from(modifiers.control_key()) * 4
+        + u8::from(modifiers.super_key()) * 8
+}
+
+fn kitty_associated_text(
+    modes: TerminalInputModes,
+    state: WindowInputElementState,
+    text: Option<&str>,
+) -> String {
+    if !modes.kitty_report_associated_text() || state == WindowInputElementState::Released {
+        return String::new();
+    }
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return String::new();
+    };
+    let codepoints = text
+        .chars()
+        .map(|character| u32::from(character).to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    format!(";{codepoints}")
+}
+
+fn kitty_unshift_ascii(character: char) -> char {
+    match character {
+        'A'..='Z' => character.to_ascii_lowercase(),
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => character,
+    }
+}
+
+fn legacy_character_bytes(
+    modifiers: WindowInputModifiers,
+    character: char,
+    text: Option<&str>,
+) -> Option<Vec<u8>> {
+    let key = WindowInputKey::Character(character.to_string());
+    if modifiers.control_key() {
+        return ctrl_bytes_from_key(&key)
+            .or_else(|| control_text_bytes(text))
+            .map(|bytes| prefix_escape_if(bytes, modifiers.alt_key()));
+    }
+    if modifiers.alt_key() {
+        return text_bytes(&key, text).map(|bytes| prefix_escape_if(bytes, true));
+    }
+    text_bytes(&key, text)
 }
 
 fn cursor_key_sequence(
@@ -515,6 +779,22 @@ mod tests {
         .unwrap()
     }
 
+    fn kitty_modes(
+        disambiguate: bool,
+        event_types: bool,
+        alternate_keys: bool,
+        all_keys: bool,
+        associated_text: bool,
+    ) -> TerminalInputModes {
+        TerminalInputModes::default().with_kitty_keyboard(
+            disambiguate,
+            event_types,
+            alternate_keys,
+            all_keys,
+            associated_text,
+        )
+    }
+
     #[test]
     fn application_cursor_mode_changes_arrow_sequences() {
         let modifiers = WindowInputModifiers::new(false, false, false, false);
@@ -664,6 +944,150 @@ mod tests {
                 Some("\x03"),
             ),
             Some(vec![0x03]),
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguates_control_text_keys() {
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, false, false),
+                WindowInputModifiers::new(true, false, false, false),
+                WindowInputElementState::Pressed,
+                false,
+                &WindowInputKey::Character("i".into()),
+                None,
+            ),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_encodes_space_in_legacy_and_report_all_modes() {
+        let space = WindowInputKey::Character(" ".into());
+        let none = WindowInputModifiers::new(false, false, false, false);
+
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, false, false),
+                none,
+                WindowInputElementState::Pressed,
+                false,
+                &space,
+                Some(" "),
+            ),
+            Some(b" ".to_vec())
+        );
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, true, false),
+                none,
+                WindowInputElementState::Pressed,
+                false,
+                &space,
+                Some(" "),
+            ),
+            Some(b"\x1b[32;1u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_reports_press_repeat_release_alternate_key_and_text() {
+        let modes = kitty_modes(true, true, true, true, true);
+        let modifiers = WindowInputModifiers::new(false, false, true, false);
+        let key = WindowInputKey::Character("A".into());
+
+        for (state, repeat, expected) in [
+            (
+                WindowInputElementState::Pressed,
+                false,
+                b"\x1b[97:65;2;65u".as_slice(),
+            ),
+            (
+                WindowInputElementState::Pressed,
+                true,
+                b"\x1b[97:65;2:2;65u".as_slice(),
+            ),
+            (
+                WindowInputElementState::Released,
+                false,
+                b"\x1b[97:65;2:3u".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                encode_key_event_with_repeat(modes, modifiers, state, repeat, &key, Some("A")),
+                Some(expected.to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_reports_named_key_events_and_suppresses_unsupported_releases() {
+        let enter = WindowInputKey::Named(WindowInputNamedKey::Enter);
+        let events = kitty_modes(true, true, false, false, false);
+        let none = WindowInputModifiers::new(false, false, false, false);
+
+        assert_eq!(
+            encode_key_event_with_repeat(
+                events,
+                none,
+                WindowInputElementState::Pressed,
+                true,
+                &enter,
+                None,
+            ),
+            Some(b"\x1b[13;1:2u".to_vec())
+        );
+        assert_eq!(
+            encode_key_event_with_repeat(
+                events,
+                none,
+                WindowInputElementState::Released,
+                false,
+                &enter,
+                None,
+            ),
+            Some(b"\x1b[13;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, false, false),
+                none,
+                WindowInputElementState::Released,
+                false,
+                &enter,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_reports_extended_function_keys_only_when_requested() {
+        let shift = WindowInputKey::Named(WindowInputNamedKey::Shift);
+        let modifiers = WindowInputModifiers::new(false, false, true, false);
+
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, false, false),
+                modifiers,
+                WindowInputElementState::Pressed,
+                false,
+                &shift,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            encode_key_event_with_repeat(
+                kitty_modes(true, false, false, true, false),
+                modifiers,
+                WindowInputElementState::Pressed,
+                false,
+                &shift,
+                None,
+            ),
+            Some(b"\x1b[57441;2u".to_vec())
         );
     }
 

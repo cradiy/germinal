@@ -1108,6 +1108,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let winit::event::KeyEvent {
                     state,
+                    repeat,
                     logical_key,
                     physical_key,
                     text,
@@ -1135,6 +1136,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     gshell_id: self.focused_gshell(),
                     event: GShellInputEvent::Window(WindowInputEvent::Key {
                         state,
+                        repeat,
                         logical_key,
                         text,
                     }),
@@ -1302,6 +1304,16 @@ fn named_key_name(key: WindowInputNamedKey) -> &'static str {
         WindowInputNamedKey::Delete => "Delete",
         WindowInputNamedKey::PageUp => "PageUp",
         WindowInputNamedKey::PageDown => "PageDown",
+        WindowInputNamedKey::CapsLock => "CapsLock",
+        WindowInputNamedKey::ScrollLock => "ScrollLock",
+        WindowInputNamedKey::NumLock => "NumLock",
+        WindowInputNamedKey::PrintScreen => "PrintScreen",
+        WindowInputNamedKey::Pause => "Pause",
+        WindowInputNamedKey::ContextMenu => "ContextMenu",
+        WindowInputNamedKey::Shift => "Shift",
+        WindowInputNamedKey::Control => "Control",
+        WindowInputNamedKey::Alt => "Alt",
+        WindowInputNamedKey::Super => "Super",
     }
 }
 
@@ -1469,6 +1481,7 @@ fn winit_element_state_to_port(state: ElementState) -> WindowInputElementState {
 fn winit_key_to_port(key: Key) -> WindowInputKey {
     match key {
         Key::Named(named) => match named {
+            NamedKey::Space => WindowInputKey::Character(" ".to_string()),
             NamedKey::F1 => WindowInputKey::Named(WindowInputNamedKey::F1),
             NamedKey::F2 => WindowInputKey::Named(WindowInputNamedKey::F2),
             NamedKey::F3 => WindowInputKey::Named(WindowInputNamedKey::F3),
@@ -1495,6 +1508,18 @@ fn winit_key_to_port(key: Key) -> WindowInputKey {
             NamedKey::Delete => WindowInputKey::Named(WindowInputNamedKey::Delete),
             NamedKey::PageUp => WindowInputKey::Named(WindowInputNamedKey::PageUp),
             NamedKey::PageDown => WindowInputKey::Named(WindowInputNamedKey::PageDown),
+            NamedKey::CapsLock => WindowInputKey::Named(WindowInputNamedKey::CapsLock),
+            NamedKey::ScrollLock => WindowInputKey::Named(WindowInputNamedKey::ScrollLock),
+            NamedKey::NumLock => WindowInputKey::Named(WindowInputNamedKey::NumLock),
+            NamedKey::PrintScreen => WindowInputKey::Named(WindowInputNamedKey::PrintScreen),
+            NamedKey::Pause => WindowInputKey::Named(WindowInputNamedKey::Pause),
+            NamedKey::ContextMenu => WindowInputKey::Named(WindowInputNamedKey::ContextMenu),
+            NamedKey::Shift => WindowInputKey::Named(WindowInputNamedKey::Shift),
+            NamedKey::Control => WindowInputKey::Named(WindowInputNamedKey::Control),
+            NamedKey::Alt | NamedKey::AltGraph => WindowInputKey::Named(WindowInputNamedKey::Alt),
+            NamedKey::Super | NamedKey::Meta | NamedKey::Hyper => {
+                WindowInputKey::Named(WindowInputNamedKey::Super)
+            }
             _ => WindowInputKey::Unidentified,
         },
         Key::Character(text) => WindowInputKey::Character(text.to_string()),
@@ -1689,6 +1714,12 @@ mod tests {
             (NamedKey::Insert, WindowInputNamedKey::Insert),
             (NamedKey::PageUp, WindowInputNamedKey::PageUp),
             (NamedKey::PageDown, WindowInputNamedKey::PageDown),
+            (NamedKey::CapsLock, WindowInputNamedKey::CapsLock),
+            (NamedKey::NumLock, WindowInputNamedKey::NumLock),
+            (NamedKey::Shift, WindowInputNamedKey::Shift),
+            (NamedKey::Control, WindowInputNamedKey::Control),
+            (NamedKey::Alt, WindowInputNamedKey::Alt),
+            (NamedKey::Super, WindowInputNamedKey::Super),
         ];
 
         for (winit_key, port_key) in cases {
@@ -1697,6 +1728,14 @@ mod tests {
                 WindowInputKey::Named(port_key)
             );
         }
+    }
+
+    #[test]
+    fn maps_named_space_to_terminal_text_key() {
+        assert_eq!(
+            winit_key_to_port(Key::Named(NamedKey::Space)),
+            WindowInputKey::Character(" ".to_string())
+        );
     }
 
     #[test]

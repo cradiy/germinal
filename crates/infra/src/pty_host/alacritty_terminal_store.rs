@@ -818,6 +818,13 @@ impl AlacrittyTerminalStore {
             mode.contains(TermMode::MOUSE_DRAG),
             mode.contains(TermMode::MOUSE_MOTION),
         )
+        .with_kitty_keyboard(
+            mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+            mode.contains(TermMode::REPORT_EVENT_TYPES),
+            mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+            mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+            mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+        )
     }
 
     pub fn synchronized_update_pending(&self, render_target_id: RenderTargetId) -> bool {
@@ -1219,6 +1226,7 @@ impl AlacrittyTermState {
         );
         let config = Config {
             scrolling_history: scrollback_history,
+            kitty_keyboard: true,
             default_cursor_style: CursorStyle {
                 shape: match cursor_style.shape {
                     TerminalCursorShape::Block => CursorShape::Block,
@@ -2150,6 +2158,28 @@ mod tests {
             Seq::new(2),
             b"\x1b[?1l\x1b[?2004l\x1b[?1004l\x1b[?1002l\x1b[?1006l",
         );
+        assert_eq!(store.input_modes(target_id), TerminalInputModes::default());
+    }
+
+    #[test]
+    fn parses_reports_and_pops_kitty_keyboard_modes() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(46);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b[>31u\x1b[?u");
+        let modes = store.input_modes(target_id);
+        assert!(modes.kitty_keyboard());
+        assert!(modes.kitty_disambiguate_esc_codes());
+        assert!(modes.kitty_report_event_types());
+        assert!(modes.kitty_report_alternate_keys());
+        assert!(modes.kitty_report_all_keys_as_escape_codes());
+        assert!(modes.kitty_report_associated_text());
+        assert_eq!(
+            store.take_pending_pty_writes(target_id),
+            vec![b"\x1b[?31u".to_vec()]
+        );
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b[<u");
         assert_eq!(store.input_modes(target_id), TerminalInputModes::default());
     }
 

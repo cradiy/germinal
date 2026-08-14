@@ -1313,7 +1313,7 @@ mod tests {
             .expect("PTY input state should send");
         input
             .send(TerminalWorkerInput::Bytes(
-                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h".to_vec(),
+                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[>3u".to_vec(),
             ))
             .expect("terminal mode sequences should send");
 
@@ -1326,6 +1326,8 @@ mod tests {
         assert!(modes.focus_in_out());
         assert!(modes.sgr_mouse());
         assert!(modes.mouse_report_click());
+        assert!(modes.kitty_disambiguate_esc_codes());
+        assert!(modes.kitty_report_event_types());
     }
 
     #[test]
