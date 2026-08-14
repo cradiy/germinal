@@ -100,8 +100,24 @@ impl RendererBackend for WgpuRendererBackend {
             }
         }
 
+        let mut ime_rows = Vec::new();
         let mut cursor_quads = Vec::new();
-        if let Some(cursor) = snapshot.cursor {
+        if let (Some(cursor), Some(preedit)) = (snapshot.cursor, snapshot.ime_preedit.as_ref()) {
+            ime_rows = render_ime_preedit(preedit, cursor, snapshot.default_background, config);
+            if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
+            {
+                append_cursor_quads(
+                    &mut cursor_quads,
+                    RenderSurfaceCursorSnapshot {
+                        x,
+                        y,
+                        focused: cursor.focused,
+                        shape: RenderSurfaceCursorShape::Beam,
+                    },
+                    config,
+                );
+            }
+        } else if let Some(cursor) = snapshot.cursor {
             append_cursor_quads(&mut cursor_quads, cursor, config);
         }
 
@@ -112,8 +128,15 @@ impl RendererBackend for WgpuRendererBackend {
                 row.background_quads.len() + row.glyph_quads.len() + row.underline_quads.len()
             })
             .sum();
-        let mut quads =
-            Vec::with_capacity(1 + pixel_quads.len() + total_row_quads + cursor_quads.len());
+        let ime_quad_count = ime_rows
+            .iter()
+            .map(|row| {
+                row.background_quads.len() + row.glyph_quads.len() + row.underline_quads.len()
+            })
+            .sum::<usize>();
+        let mut quads = Vec::with_capacity(
+            1 + pixel_quads.len() + total_row_quads + ime_quad_count + cursor_quads.len(),
+        );
         quads.push(WgpuQuadDrawItem::surface_background(
             config,
             snapshot.default_background,
@@ -128,6 +151,15 @@ impl RendererBackend for WgpuRendererBackend {
         for row in inner.rendered_rows.values() {
             quads.extend(row.underline_quads.iter().copied());
         }
+        for row in &ime_rows {
+            quads.extend(row.background_quads.iter().copied());
+        }
+        for row in &ime_rows {
+            quads.extend(row.glyph_quads.iter().copied());
+        }
+        for row in &ime_rows {
+            quads.extend(row.underline_quads.iter().copied());
+        }
         quads.extend(cursor_quads);
 
         inner.render_count += 1;
@@ -135,6 +167,83 @@ impl RendererBackend for WgpuRendererBackend {
         inner.last_seq = Some(snapshot.latest_seq);
         inner.quads = quads;
     }
+}
+
+fn render_ime_preedit(
+    preedit: &germinal_ports::rendering::surface_snapshot::RenderSurfaceImePreeditSnapshot,
+    cursor: RenderSurfaceCursorSnapshot,
+    default_background: RgbColorDto,
+    config: WgpuRendererConfig,
+) -> Vec<WgpuRenderedRow> {
+    if preedit.text.is_empty() || config.grid_columns == 0 || config.grid_rows == 0 {
+        return Vec::new();
+    }
+
+    let selection = preedit.cursor_range.map(|(start, end)| {
+        (
+            start.min(end).min(preedit.text.len()),
+            start.max(end).min(preedit.text.len()),
+        )
+    });
+    let mut rows = BTreeMap::<u32, RenderSurfaceRowSnapshot>::new();
+    let mut x = cursor.x.min(config.grid_columns - 1);
+    let mut y = cursor.y.min(config.grid_rows - 1);
+
+    for (byte_index, character) in preedit.text.char_indices() {
+        let width = terminal_char_cell_width(character);
+        if width == 0 {
+            continue;
+        }
+        if x.saturating_add(width) > config.grid_columns {
+            x = 0;
+            y = y.saturating_add(1);
+        }
+        if y >= config.grid_rows {
+            break;
+        }
+
+        let character_end = byte_index + character.len_utf8();
+        let selected = selection
+            .is_some_and(|(start, end)| start != end && byte_index < end && character_end > start);
+        let style = if selected {
+            TextStyleDto {
+                foreground: Some(default_background),
+                background: Some(CURSOR_COLOR),
+                bold: false,
+                italic: false,
+                underline: true,
+            }
+        } else {
+            TextStyleDto {
+                foreground: Some(CURSOR_COLOR),
+                background: Some(default_background),
+                bold: false,
+                italic: false,
+                underline: true,
+            }
+        };
+        rows.entry(y)
+            .or_insert_with(|| RenderSurfaceRowSnapshot {
+                y,
+                runs: Vec::new(),
+            })
+            .runs
+            .push(
+                germinal_ports::rendering::surface_snapshot::RenderSurfaceRunSnapshot {
+                    x,
+                    text: character.to_string(),
+                    style,
+                },
+            );
+
+        x = x.saturating_add(width);
+        if x >= config.grid_columns {
+            x = 0;
+            y = y.saturating_add(1);
+        }
+    }
+
+    rows.values().map(|row| render_row(row, config)).collect()
 }
 
 fn append_pixel_rect_quads_from_row(
@@ -722,7 +831,8 @@ mod tests {
             render_target_id::RenderTargetId,
             renderer_backend::RendererBackend,
             surface_snapshot::{
-                RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+                RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
+                RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot,
                 RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
             },
         },
@@ -730,7 +840,7 @@ mod tests {
     };
 
     use super::{
-        WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
+        CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
         append_pixel_rect_quads_from_row,
     };
 
@@ -820,6 +930,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: None,
+            ime_preedit: None,
         });
 
         let backgrounds = backend.state().background_quads();
@@ -890,6 +1001,7 @@ mod tests {
                 focused: true,
                 shape: RenderSurfaceCursorShape::Block,
             }),
+            ime_preedit: None,
         });
 
         let cursors = backend.state().geometric_quads();
@@ -918,6 +1030,7 @@ mod tests {
                     focused: true,
                     shape,
                 }),
+                ime_preedit: None,
             });
             backend.state().geometric_quads()
         };
@@ -953,9 +1066,82 @@ mod tests {
                 focused: false,
                 shape: RenderSurfaceCursorShape::Block,
             }),
+            ime_preedit: None,
         });
 
         assert!(backend.state().geometric_quads().is_empty());
+    }
+
+    #[test]
+    fn ime_preedit_wraps_wide_glyphs_and_renders_selection_and_caret() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+            cell_width_px: 8,
+            cell_height_px: 16,
+            content_origin_x: 0,
+            content_origin_y: 0,
+            content_width_px: 32,
+            content_height_px: 32,
+            grid_columns: 4,
+            grid_rows: 2,
+        });
+        let default_background = RgbColorDto::new(0, 0, 0);
+
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background,
+            rows: vec![],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 3,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+            }),
+            ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
+                text: "你a".to_string(),
+                cursor_range: Some((0, 3)),
+            }),
+        });
+
+        let state = backend.state();
+        let glyphs = state.glyph_quads();
+        assert_eq!(glyphs.len(), 2);
+        assert_eq!(
+            glyphs[0].kind,
+            WgpuQuadKind::Glyph {
+                c: '你',
+                bold: false
+            }
+        );
+        assert_eq!(
+            (glyphs[0].x_px, glyphs[0].y_px, glyphs[0].width_px),
+            (0, 16, 16)
+        );
+        assert_eq!(
+            glyphs[1].kind,
+            WgpuQuadKind::Glyph {
+                c: 'a',
+                bold: false
+            }
+        );
+        assert_eq!(
+            (glyphs[1].x_px, glyphs[1].y_px, glyphs[1].width_px),
+            (16, 16, 8)
+        );
+
+        let backgrounds = state.background_quads();
+        assert_eq!(backgrounds.len(), 3);
+        assert_eq!(backgrounds[1].style.background, Some(CURSOR_COLOR));
+        assert_eq!(backgrounds[2].style.background, Some(default_background));
+        assert_eq!(state.underline_quads().len(), 2);
+
+        let caret = state.geometric_quads();
+        assert_eq!(caret.len(), 1);
+        assert_eq!((caret[0].x_px, caret[0].y_px), (16, 16));
+        assert_eq!((caret[0].width_px, caret[0].height_px), (1, 16));
     }
 
     #[test]
@@ -987,6 +1173,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
             cursor: None,
+            ime_preedit: None,
         });
 
         let state = backend.state();
@@ -1029,6 +1216,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
             cursor: None,
+            ime_preedit: None,
         });
 
         let state = backend.state();
@@ -1070,6 +1258,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
             cursor: None,
+            ime_preedit: None,
         });
 
         let state = backend.state();

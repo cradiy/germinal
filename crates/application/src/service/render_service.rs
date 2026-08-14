@@ -12,7 +12,7 @@ use germinal_ports::{
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
     rendering::{
         render_target_id::RenderTargetId,
-        surface_snapshot::RenderSurfaceSnapshot,
+        surface_snapshot::{RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot},
         window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
         workspace_layout::RenderSurfacePlacement,
     },
@@ -28,6 +28,7 @@ pub struct RenderServiceState {
     focused_render_target: Option<RenderTargetId>,
     retired_render_targets: HashSet<RenderTargetId>,
     latest_surface_seqs: RefCell<HashMap<RenderTargetId, Seq>>,
+    ime_preedits: HashMap<RenderTargetId, RenderSurfaceImePreeditSnapshot>,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     surface_snapshot_rx: Receiver<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
@@ -43,6 +44,7 @@ impl RenderServiceState {
             focused_render_target: None,
             retired_render_targets: HashSet::new(),
             latest_surface_seqs: RefCell::new(HashMap::new()),
+            ime_preedits: HashMap::new(),
             surface_snapshot_tx,
             surface_snapshot_rx,
             snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -120,6 +122,10 @@ impl RenderServiceState {
         }
     }
 
+    fn apply_ime_preedit(&self, snapshot: &mut RenderSurfaceSnapshot) {
+        snapshot.ime_preedit = self.ime_preedits.get(&snapshot.target_id).cloned();
+    }
+
     fn request_redraw(&mut self) {
         self.redraw_pending = true;
     }
@@ -164,6 +170,7 @@ where
             {
                 let state: &RenderServiceState = self.prj_ref().as_ref();
                 state.apply_cursor_focus(&mut snapshot);
+                state.apply_ime_preedit(&mut snapshot);
             }
 
             self.prj_ref_mut()
@@ -239,10 +246,38 @@ where
         refresh_cursor_focus(self.prj_ref_mut());
     }
 
+    fn set_ime_preedit(
+        &mut self,
+        target_id: RenderTargetId,
+        preedit: Option<RenderSurfaceImePreeditSnapshot>,
+    ) {
+        {
+            let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+            if let Some(preedit) = preedit.clone() {
+                state.ime_preedits.insert(target_id, preedit);
+            } else {
+                state.ime_preedits.remove(&target_id);
+            }
+            state.redraw_pending = true;
+        }
+
+        let runtime = self
+            .prj_ref_mut()
+            .window_runtime_mut()
+            .expect("window runtime must be initialized before use");
+        for snapshot in runtime.surface_snapshots_mut() {
+            if snapshot.target_id == target_id {
+                snapshot.ime_preedit = preedit.clone();
+                break;
+            }
+        }
+    }
+
     fn remove_render_target(&mut self, target_id: RenderTargetId) {
         {
             let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
             state.retire_render_target(target_id);
+            state.ime_preedits.remove(&target_id);
         }
 
         self.prj_ref_mut()
@@ -310,7 +345,10 @@ where
 #[cfg(test)]
 mod tests {
     use germinal_ports::{
-        rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
+        rendering::{
+            render_target_id::RenderTargetId,
+            surface_snapshot::{RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot},
+        },
         seq::Seq,
     };
 
@@ -328,6 +366,7 @@ mod tests {
             image_surfaces: Vec::new(),
             dirty_rows: Vec::new(),
             cursor: None,
+            ime_preedit: None,
         }
     }
 
@@ -409,5 +448,24 @@ mod tests {
 
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].target_id, RenderTargetId::new(2));
+    }
+
+    #[test]
+    fn ime_preedit_state_is_applied_only_to_its_render_target() {
+        let target_id = RenderTargetId::new(1);
+        let preedit = RenderSurfaceImePreeditSnapshot {
+            text: "拼音".to_string(),
+            cursor_range: Some((3, 3)),
+        };
+        let mut state = RenderServiceState::new();
+        state.ime_preedits.insert(target_id, preedit.clone());
+        let mut first = snapshot(1, 1);
+        let mut second = snapshot(2, 1);
+
+        state.apply_ime_preedit(&mut first);
+        state.apply_ime_preedit(&mut second);
+
+        assert_eq!(first.ime_preedit, Some(preedit));
+        assert_eq!(second.ime_preedit, None);
     }
 }

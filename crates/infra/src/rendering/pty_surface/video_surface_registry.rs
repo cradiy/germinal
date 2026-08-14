@@ -210,6 +210,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: None,
+            ime_preedit: None,
         });
 
         assert_eq!(registry.registrations_for_target(target_id).len(), 2);
@@ -235,6 +236,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: None,
+            ime_preedit: None,
         });
 
         assert!(registry.registration(target_id, "left").is_none());
@@ -266,6 +268,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: None,
+            ime_preedit: None,
         });
 
         assert!(registry.remove_render_target(target_id));

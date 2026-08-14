@@ -216,6 +216,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         });
 
         let pipeline = SurfacePresentationPipeline::new(
@@ -275,6 +276,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: None,
+            ime_preedit: None,
         });
         let pipeline = SurfacePresentationPipeline::new(
             RejectingPresenter,

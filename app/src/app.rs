@@ -34,7 +34,10 @@ use germinal_ports::{
         },
     },
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
-    rendering::{render_target_id::RenderTargetId, workspace_layout::RenderSurfacePlacement},
+    rendering::{
+        render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceImePreeditSnapshot,
+        workspace_layout::RenderSurfacePlacement,
+    },
     service::{
         gnative_service::IGNativeService, gshell_service::IGShellService,
         render_service::IRenderService, workspace_service::IWorkspaceService,
@@ -75,6 +78,7 @@ pub struct App {
     paste_controller: HostPasteController,
     window_input_modifiers: WindowInputModifiers,
     window_focused: bool,
+    ime_enabled: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     pointer_gshell: Option<GShellId>,
     pane_navigation_enabled: bool,
@@ -134,6 +138,7 @@ impl App {
             paste_controller: HostPasteController::default(),
             window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
             window_focused: true,
+            ime_enabled: false,
             cursor_position: None,
             pointer_gshell: None,
             pane_navigation_enabled,
@@ -313,10 +318,14 @@ impl App {
 
         if state == WindowInputElementState::Pressed {
             match action {
-                KeyboardAction::ToggleViMode => self.route_input_to_gshell(GShellInput {
-                    gshell_id: self.focused_gshell(),
-                    event: GShellInputEvent::ToggleViMode,
-                }),
+                KeyboardAction::ToggleViMode => {
+                    let gshell_id = self.focused_gshell();
+                    self.clear_ime_preedit(gshell_id);
+                    self.route_input_to_gshell(GShellInput {
+                        gshell_id,
+                        event: GShellInputEvent::ToggleViMode,
+                    });
+                }
             }
         }
 
@@ -396,11 +405,29 @@ impl App {
     }
 
     fn apply_gshell_focus_change(&mut self, previous: GShellId, focused: GShellId) {
+        if previous != focused {
+            self.clear_ime_preedit(previous);
+        }
         if previous != focused && self.window_focused {
             self.route_focus_changed(previous, false);
             self.route_focus_changed(focused, true);
         }
         self.set_focused_render_target(RenderTargetId::new(focused.value()));
+        self.update_ime_cursor_area();
+    }
+
+    fn clear_ime_preedit(&mut self, gshell_id: GShellId) {
+        self.set_ime_preedit(RenderTargetId::new(gshell_id.value()), None);
+    }
+
+    fn update_ime_cursor_area(&self) {
+        if !self.ime_enabled {
+            return;
+        }
+        let Some(runtime) = self.render_runtime.as_ref() else {
+            return;
+        };
+        let _ = runtime.update_ime_cursor_area(RenderTargetId::new(self.focused_gshell().value()));
     }
 
     fn route_focus_changed(&self, gshell_id: GShellId, focused: bool) {
@@ -499,6 +526,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
         match event {
             RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id }) => {
+                self.clear_ime_preedit(gshell_id);
                 self.begin_gnative_mode(gshell_id);
                 if let Err(error) = self.begin_gnative_session(gshell_id) {
                     self.exit_gnative_mode(gshell_id);
@@ -528,6 +556,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 error!(gshell_id = gshell_id.value(), %reason, "failed to connect gnative session");
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::ExitGNative { gshell_id }) => {
+                self.clear_ime_preedit(gshell_id);
                 self.exit_gnative_session(gshell_id);
                 self.exit_gnative_mode(gshell_id);
                 self.consume_latest_terminal_snapshot();
@@ -535,6 +564,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { .. }) => {
                 self.consume_latest_terminal_snapshot();
+                self.update_ime_cursor_area();
                 self.request_redraw();
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
@@ -600,6 +630,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             WindowEvent::Focused(focused) => {
                 if self.window_focused != focused {
                     self.window_focused = focused;
+                    if !focused {
+                        self.clear_ime_preedit(self.focused_gshell());
+                    }
                     self.route_focus_changed(self.focused_gshell(), focused);
                 }
                 self.set_window_focused(focused);
@@ -704,17 +737,35 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     }),
                 });
             }
+            WindowEvent::Ime(Ime::Enabled) => {
+                self.ime_enabled = true;
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::Ime(Ime::Preedit(text, cursor_range)) => {
+                let target_id = RenderTargetId::new(self.focused_gshell().value());
+                let preedit = (!text.is_empty())
+                    .then_some(RenderSurfaceImePreeditSnapshot { text, cursor_range });
+                self.set_ime_preedit(target_id, preedit);
+                self.update_ime_cursor_area();
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
+                self.clear_ime_preedit(self.focused_gshell());
                 self.route_input_to_gshell(GShellInput {
                     gshell_id: self.focused_gshell(),
                     event: GShellInputEvent::Window(WindowInputEvent::Ime(text)),
                 });
+                self.update_ime_cursor_area();
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                self.ime_enabled = false;
+                self.clear_ime_preedit(self.focused_gshell());
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.update_ime_cursor_area();
         self.flush_redraw_request();
     }
 }

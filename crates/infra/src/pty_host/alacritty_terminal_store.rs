@@ -583,6 +583,7 @@ impl AlacrittyTerminalStore {
             image_surfaces: state.graphics.snapshots(&placeholder_cells),
             dirty_rows,
             cursor: None,
+            ime_preedit: None,
         }
     }
 

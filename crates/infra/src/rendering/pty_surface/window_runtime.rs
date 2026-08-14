@@ -18,7 +18,10 @@ use germinal_ports::{
 };
 use thiserror::Error;
 use tracing::info;
-use winit::window::{Window, WindowId};
+use winit::{
+    dpi::{PhysicalPosition, PhysicalSize},
+    window::{Window, WindowId},
+};
 
 #[cfg(target_os = "linux")]
 use crate::rendering::pty_surface::video_surface_dmabuf_importer::{
@@ -91,6 +94,45 @@ pub struct WgpuTerminalWindowRuntime {
     needs_redraw: bool,
     ui_stats: WindowUiStats,
     perf: WgpuTerminalRenderPerf,
+}
+
+fn ime_cursor_area(
+    placement: RenderSurfacePlacement,
+    size_info: TerminalSizeInfo,
+    snapshot: &RenderSurfaceSnapshot,
+) -> Option<(PhysicalPosition<u32>, PhysicalSize<u32>)> {
+    let cursor = snapshot.cursor?;
+    let viewport = size_info.render_viewport();
+    let cell_size = viewport.cell_size();
+    let (cursor_x, cursor_y) = snapshot
+        .ime_preedit
+        .as_ref()
+        .and_then(|preedit| {
+            preedit.cursor_cell(cursor, viewport.columns() as u32, viewport.rows() as u32)
+        })
+        .unwrap_or((cursor.x, cursor.y));
+    let x = placement
+        .x_px
+        .saturating_add(viewport.origin_x_px())
+        .saturating_add(cursor_x.saturating_mul(cell_size.width_px()));
+    let grid_rows = (viewport.rows() as u32).max(1);
+    let row_offset = |row: u32| {
+        ((u64::from(row.min(grid_rows)) * u64::from(size_info.content_height_px()))
+            / u64::from(grid_rows)) as u32
+    };
+    let row_top = row_offset(cursor_y);
+    let row_height = row_offset(cursor_y.saturating_add(1))
+        .saturating_sub(row_top)
+        .max(1);
+    let y = placement
+        .y_px
+        .saturating_add(viewport.origin_y_px())
+        .saturating_add(row_top);
+
+    Some((
+        PhysicalPosition::new(x, y),
+        PhysicalSize::new(cell_size.width_px().max(1), row_height),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +292,26 @@ impl WgpuTerminalWindowRuntime {
     pub fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
         self.surface_snapshots.insert(snapshot.target_id, snapshot);
         self.request_redraw();
+    }
+
+    pub fn update_ime_cursor_area(&self, target_id: RenderTargetId) -> bool {
+        let Some(placement) = self
+            .workspace_layout
+            .iter()
+            .find(|placement| placement.target_id == target_id)
+        else {
+            return false;
+        };
+        let Some(snapshot) = self.surface_snapshots.get(&target_id) else {
+            return false;
+        };
+        let size_info = self.terminal_size_info_for_window_size(placement.window_size());
+        let Some((position, size)) = ime_cursor_area(*placement, size_info, snapshot) else {
+            return false;
+        };
+
+        self.window.set_ime_cursor_area(position, size);
+        true
     }
 
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
@@ -781,7 +843,60 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::WindowUiStats;
+    use germinal_ports::{
+        pty_host::{
+            cell_size::TerminalCellSize,
+            size_info::{TerminalPadding, TerminalSizeInfo},
+        },
+        rendering::{
+            frame_plan_builder::RgbColorDto,
+            render_target_id::RenderTargetId,
+            surface_snapshot::{
+                RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
+                RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot,
+            },
+            workspace_layout::RenderSurfacePlacement,
+        },
+        seq::Seq,
+    };
+    use winit::dpi::{PhysicalPosition, PhysicalSize};
+
+    use super::{WindowUiStats, ime_cursor_area};
+
+    #[test]
+    fn ime_cursor_area_tracks_wrapped_preedit_in_a_partial_height_pane() {
+        let target_id = RenderTargetId::new(9);
+        let placement = RenderSurfacePlacement::new(target_id, 400, 20, 32, 35);
+        let size_info = TerminalSizeInfo::new(
+            placement.window_size(),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let snapshot = RenderSurfaceSnapshot {
+            target_id,
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 3,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+            }),
+            ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
+                text: "你".to_string(),
+                cursor_range: Some((3, 3)),
+            }),
+        };
+
+        assert_eq!(
+            ime_cursor_area(placement, size_info, &snapshot),
+            Some((PhysicalPosition::new(416, 37), PhysicalSize::new(8, 18)))
+        );
+    }
 
     #[test]
     fn window_ui_stats_formats_presented_frame_fps() {

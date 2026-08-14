@@ -255,6 +255,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         });
 
         let presentation_pipeline = SurfacePresentationPipeline::new(

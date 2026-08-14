@@ -253,6 +253,11 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
             }
         }
     }
+    if let Some(preedit) = surface_snapshot.ime_preedit.as_ref() {
+        for character in preedit.text.chars() {
+            glyphs.insert(WgpuTerminalGlyphKey::new(character, false));
+        }
+    }
 
     glyphs
 }
@@ -261,10 +266,33 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
 mod tests {
     use germinal_ports::rendering::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
-        surface_snapshot::{RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot},
+        surface_snapshot::{
+            RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
+        },
     };
 
     use super::*;
+
+    #[test]
+    fn preedit_characters_are_collected_for_the_glyph_atlas() {
+        let mut snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        };
+        snapshot.ime_preedit = Some(RenderSurfaceImePreeditSnapshot {
+            text: "拼".to_string(),
+            cursor_range: Some((3, 3)),
+        });
+
+        assert!(collect_glyphs(&snapshot).contains(&WgpuTerminalGlyphKey::new('拼', false)));
+    }
 
     #[test]
     fn builds_debug_glyph_atlas_frame_from_surface_snapshot() {
@@ -293,6 +321,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
@@ -341,6 +370,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
@@ -373,6 +403,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let blue_snapshot = RenderSurfaceSnapshot {
@@ -391,6 +422,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
@@ -420,6 +452,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
         let first_target = snapshot(RenderTargetId::new(1), "red");
         let second_target = snapshot(RenderTargetId::new(2), "blue");
@@ -449,6 +482,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
         let first_target = snapshot(RenderTargetId::new(1), "red");
         let second_target = snapshot(RenderTargetId::new(2), "blue");
@@ -482,6 +516,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let blue_snapshot = RenderSurfaceSnapshot {
@@ -500,6 +535,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,
+            ime_preedit: None,
         };
 
         let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
@@ -526,6 +562,7 @@ mod tests {
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
             cursor: None,
+            ime_preedit: None,
         };
 
         let builder = WgpuTerminalGlyphAtlasFrameBuilder::new();

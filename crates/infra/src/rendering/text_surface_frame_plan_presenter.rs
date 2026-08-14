@@ -236,6 +236,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
             image_surfaces: Vec::new(),
             dirty_rows: surface.latest_dirty_rows.clone(),
             cursor: None,
+            ime_preedit: None,
         })
     }
 }

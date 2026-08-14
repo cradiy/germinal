@@ -386,6 +386,16 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).set_focused_render_target(target_id)
     }
 
+    fn set_ime_preedit(
+        &mut self,
+        target_id: RenderTargetId,
+        preedit: Option<
+            germinal_ports::rendering::surface_snapshot::RenderSurfaceImePreeditSnapshot,
+        >,
+    ) {
+        RenderService::inj_ref_mut(self).set_ime_preedit(target_id, preedit)
+    }
+
     fn remove_render_target(&mut self, target_id: RenderTargetId) {
         RenderService::inj_ref_mut(self).remove_render_target(target_id)
     }
