@@ -105,6 +105,7 @@ impl App {
             GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
         );
         let terminal_profile = config.terminal_profile();
+        let scrollback_history = config.scrolling.history;
         let window_title = config.window.title.clone();
 
         let app = Self {
@@ -119,7 +120,10 @@ impl App {
             gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new()
                 .map_err(AppError::CreateGNativeTunnel)?,
             media_bridge: std::sync::Arc::clone(&media_bridge),
-            terminal_worker_backend: PlatformTerminalWorkerBackend::new(runtime_event_dispatcher),
+            terminal_worker_backend: PlatformTerminalWorkerBackend::new(
+                runtime_event_dispatcher,
+                scrollback_history,
+            ),
             render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(
                 terminal_profile,
                 window_title,

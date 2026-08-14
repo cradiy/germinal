@@ -46,6 +46,7 @@ struct TerminalWorkerRegistration<Dispatch> {
     proxy: Dispatch,
     gshell_id: GShellId,
     initial_size: TerminalGridSize,
+    scrollback_history: usize,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
     input_rx: Receiver<TerminalWorkerInput>,
@@ -72,6 +73,7 @@ where
                 registration.proxy,
                 registration.gshell_id,
                 to_alacritty_term_size(registration.initial_size),
+                registration.scrollback_history,
                 registration.surface_snapshot_tx,
                 registration.snapshot_wake_pending,
             ),
@@ -170,6 +172,7 @@ where
         proxy: Dispatch,
         gshell_id: GShellId,
         initial_size: TerminalGridSize,
+        scrollback_history: usize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
@@ -180,6 +183,7 @@ where
             proxy,
             gshell_id,
             initial_size,
+            scrollback_history,
             surface_snapshot_tx,
             snapshot_wake_pending,
             input_rx: rx,
@@ -285,11 +289,15 @@ where
         proxy: Dispatch,
         gshell_id: GShellId,
         initial_size: AlacrittyTermSize,
+        scrollback_history: usize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Self {
         let target_id = RenderTargetId::new(gshell_id.value());
-        let terminal_store = AlacrittyTerminalStore::with_size(initial_size);
+        let terminal_store = AlacrittyTerminalStore::with_size_and_scrollback_history(
+            initial_size,
+            scrollback_history,
+        );
 
         Self {
             proxy,
@@ -765,6 +773,7 @@ fn to_alacritty_term_size(size: TerminalGridSize) -> AlacrittyTermSize {
 
 pub struct PlatformTerminalWorkerBackend<Dispatch> {
     proxy: Dispatch,
+    scrollback_history: usize,
     pool: OnceLock<TerminalWorkerPool<Dispatch>>,
 }
 
@@ -772,18 +781,23 @@ impl<Dispatch> PlatformTerminalWorkerBackend<Dispatch>
 where
     Dispatch: IRuntimeEventDispatcher,
 {
-    pub fn new(proxy: Dispatch) -> Self {
+    pub fn new(proxy: Dispatch, scrollback_history: usize) -> Self {
         Self {
             proxy,
+            scrollback_history,
             pool: OnceLock::new(),
         }
     }
 
     #[cfg(test)]
-    fn with_worker_count(proxy: Dispatch, worker_count: usize) -> Self {
+    fn with_worker_count(proxy: Dispatch, worker_count: usize, scrollback_history: usize) -> Self {
         let pool = OnceLock::new();
         let _ = pool.set(TerminalWorkerPool::new(worker_count));
-        Self { proxy, pool }
+        Self {
+            proxy,
+            scrollback_history,
+            pool,
+        }
     }
 
     fn pool(&self) -> &TerminalWorkerPool<Dispatch> {
@@ -811,6 +825,7 @@ where
             self.proxy.clone(),
             gshell_id,
             initial_size,
+            self.scrollback_history,
             surface_snapshot_tx,
             snapshot_wake_pending,
         )
@@ -844,6 +859,8 @@ mod tests {
 
     use super::{PlatformTerminalWorkerBackend, TerminalWorkerRuntime};
 
+    const TEST_SCROLLBACK_HISTORY: usize = 10_000;
+
     #[derive(Clone)]
     struct TestDispatcher {
         tx: Sender<RuntimeEvent>,
@@ -865,8 +882,11 @@ mod tests {
     #[test]
     fn pooled_backend_handles_multiple_terminals_on_one_lane() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let backend =
-            PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
 
         let first_input = backend.spawn_terminal_worker(
@@ -926,8 +946,11 @@ mod tests {
     #[test]
     fn terminal_worker_strips_enter_gnative_control_sequence_and_dispatches_mode_switch() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let backend =
-            PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(3),
@@ -980,8 +1003,11 @@ mod tests {
     #[test]
     fn terminal_worker_publishes_parsed_input_modes() {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
-        let backend =
-            PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(4),
@@ -1017,8 +1043,11 @@ mod tests {
     #[test]
     fn terminal_worker_publishes_scrolled_history() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let backend =
-            PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let input = backend.spawn_terminal_worker(
@@ -1067,6 +1096,7 @@ mod tests {
             TestDispatcher { tx: event_tx },
             GShellId::new(5),
             super::AlacrittyTermSize::new(20, 4),
+            TEST_SCROLLBACK_HISTORY,
             snapshot_tx,
             wake_pending.clone(),
         );

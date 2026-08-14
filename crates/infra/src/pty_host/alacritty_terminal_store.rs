@@ -109,6 +109,7 @@ impl EventListener for PtyWriteEventListener {
 pub struct AlacrittyTerminalStore {
     inner: Rc<RefCell<HashMap<RenderTargetId, AlacrittyTermState>>>,
     size: AlacrittyTermSize,
+    scrollback_history: usize,
 }
 
 impl AlacrittyTerminalStore {
@@ -117,9 +118,17 @@ impl AlacrittyTerminalStore {
     }
 
     pub fn with_size(size: AlacrittyTermSize) -> Self {
+        Self::with_size_and_scrollback_history(size, Config::default().scrolling_history)
+    }
+
+    pub fn with_size_and_scrollback_history(
+        size: AlacrittyTermSize,
+        scrollback_history: usize,
+    ) -> Self {
         Self {
             inner: Rc::new(RefCell::new(HashMap::new())),
             size,
+            scrollback_history,
         }
     }
 
@@ -137,7 +146,7 @@ impl AlacrittyTerminalStore {
 
         let state = inner
             .entry(render_target_id)
-            .or_insert_with(|| AlacrittyTermState::new(self.size));
+            .or_insert_with(|| AlacrittyTermState::new(self.size, self.scrollback_history));
 
         for event in state.graphics_decoder.feed(bytes) {
             match event {
@@ -189,7 +198,7 @@ impl AlacrittyTerminalStore {
 
         let state = inner
             .entry(render_target_id)
-            .or_insert_with(|| AlacrittyTermState::new(size));
+            .or_insert_with(|| AlacrittyTermState::new(size, self.scrollback_history));
 
         state.resize(size);
         state.latest_seq = seq;
@@ -462,10 +471,14 @@ pub struct AlacrittyTermState {
 }
 
 impl AlacrittyTermState {
-    fn new(size: AlacrittyTermSize) -> Self {
+    fn new(size: AlacrittyTermSize, scrollback_history: usize) -> Self {
         let (pending_write_tx, pending_write_rx) = mpsc::channel();
         let event_listener = PtyWriteEventListener::new(pending_write_tx.clone());
-        let mut term = Term::new(Config::default(), &size, event_listener.clone());
+        let config = Config {
+            scrolling_history: scrollback_history,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, event_listener.clone());
 
         term.reset_damage();
 
@@ -1103,6 +1116,31 @@ mod tests {
         assert!(store.scroll_display(target_id, Seq::new(3), Scroll::Bottom));
         assert!(store.cursor_snapshot(target_id).is_some());
         assert!(!store.scroll_display(target_id, Seq::new(4), Scroll::Bottom));
+    }
+
+    #[test]
+    fn limits_scrollback_to_configured_history() {
+        let store = AlacrittyTerminalStore::with_size_and_scrollback_history(
+            AlacrittyTermSize::new(8, 2),
+            1,
+        );
+        let target_id = RenderTargetId::new(49);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree\r\nfour");
+
+        assert!(store.scroll_display(target_id, Seq::new(2), Scroll::Top));
+        let history_text: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+
+        assert!(!history_text.contains("one"));
+        assert!(history_text.contains("two"));
+        assert!(history_text.contains("three"));
+        assert!(!history_text.contains("four"));
     }
 
     #[test]

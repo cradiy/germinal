@@ -56,6 +56,7 @@ impl AppPaths {
 pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
+    pub scrolling: ScrollingConfig,
     pub logging: LoggingConfig,
 }
 
@@ -80,6 +81,7 @@ impl Default for GerminalConfig {
         Self {
             window: WindowConfig::default(),
             font: FontConfig::default(),
+            scrolling: ScrollingConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -130,6 +132,18 @@ impl Default for FontFaceConfig {
         Self {
             family: TerminalFontFamily::default().name().to_owned(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScrollingConfig {
+    pub history: usize,
+}
+
+impl Default for ScrollingConfig {
+    fn default() -> Self {
+        Self { history: 10_000 }
     }
 }
 
@@ -218,7 +232,7 @@ mod tests {
     use super::GerminalConfig;
 
     #[test]
-    fn default_config_serializes_alacritty_style_font_fields() {
+    fn default_config_serializes_alacritty_style_fields() {
         let contents = toml::to_string_pretty(&GerminalConfig::default()).unwrap();
 
         let value: toml::Value = toml::from_str(&contents).unwrap();
@@ -227,6 +241,7 @@ mod tests {
             value["font"]["normal"]["family"].as_str(),
             Some(TerminalFontFamily::default().name())
         );
+        assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
     }
 
     #[test]
@@ -242,5 +257,18 @@ mod tests {
 
         assert_eq!(profile.font_family().name(), "JetBrains Mono");
         assert_eq!(profile.font_size().logical_px(), 18.0);
+    }
+
+    #[test]
+    fn parses_scrollback_history_limit() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [scrolling]
+            history = 512
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.scrolling.history, 512);
     }
 }

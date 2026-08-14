@@ -13,7 +13,7 @@ stable platform for GNative applications.
 ## P0: Scrollback, selection, and Vi copy mode
 
 - [x] Use a bounded scrollback buffer for every PTY pane.
-- [ ] Make the scrollback history limit configurable.
+- [x] Make the scrollback history limit configurable.
 - [x] Track a per-pane viewport offset independently from the terminal cursor.
 - [x] Route mouse-wheel input to scrollback when the PTY application has not enabled mouse
       reporting.
