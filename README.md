@@ -2,6 +2,10 @@
 
 Germinal is a keyboard-first graphical terminal that combines PTY shell compatibility with structured UI apps.
 
+## Project origin
+
+This project originated as a fork of [zooeywm/germinal](https://github.com/zooeywm/germinal).
+
 ## Demo
 
 run
