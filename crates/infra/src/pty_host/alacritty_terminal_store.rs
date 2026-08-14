@@ -153,6 +153,7 @@ impl AlacrittyTerminalStore {
         let state = inner
             .entry(render_target_id)
             .or_insert_with(|| AlacrittyTermState::new(self.size, self.scrollback_history));
+        let previous_selection = state.term.selection.clone();
 
         for event in state.graphics_decoder.feed(bytes) {
             match event {
@@ -182,6 +183,7 @@ impl AlacrittyTerminalStore {
                 }
             }
         }
+        state.mark_selection_damage_if_changed(previous_selection);
 
         state.latest_seq = seq;
         state.total_bytes += bytes.len() as u64;
@@ -206,7 +208,9 @@ impl AlacrittyTerminalStore {
             .entry(render_target_id)
             .or_insert_with(|| AlacrittyTermState::new(size, self.scrollback_history));
 
+        let previous_selection = state.term.selection.clone();
         state.resize(size);
+        state.mark_selection_damage_if_changed(previous_selection);
         state.latest_seq = seq;
 
         AlacrittyTermApplyStats {
@@ -598,6 +602,12 @@ impl AlacrittyTermState {
 
         self.processor.stop_sync(&mut self.term);
         true
+    }
+
+    fn mark_selection_damage_if_changed(&mut self, previous: Option<Selection>) {
+        if self.term.selection != previous {
+            self.selection_damage = true;
+        }
     }
 }
 
@@ -1314,6 +1324,106 @@ mod tests {
             TerminalSelectionPoint::new(1, 0, TerminalSelectionSide::Left),
         ));
 
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn unrelated_output_preserves_the_active_selection() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 4));
+        let target_id = RenderTargetId::new(53);
+        store.apply_bytes(target_id, Seq::new(1), b"hello");
+        store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(2, 0, TerminalSelectionSide::Left),
+        );
+
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[2;1Hworld");
+
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn scrolling_output_moves_selection_with_its_content() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(57);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo");
+        store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(1, 0, TerminalSelectionSide::Left),
+        );
+
+        store.apply_bytes(target_id, Seq::new(3), b"\r\nthree");
+
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
+        store.scroll_display(target_id, Seq::new(4), Scroll::Top);
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn destructive_output_clears_selection_and_redraws_the_old_highlight() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 5));
+        let target_id = RenderTargetId::new(54);
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b[3;1Hselected");
+        store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Line,
+            TerminalSelectionPoint::new(2, 2, TerminalSelectionSide::Left),
+        );
+        store.clear_damage_up_to(target_id, Seq::new(2));
+
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[3;1H\x1b[2K");
+
+        assert_eq!(store.selection_text(target_id), None);
+        assert_eq!(
+            store
+                .render_surface_snapshot_of(target_id)
+                .unwrap()
+                .dirty_rows,
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn resize_preserves_selection_by_height_and_clears_it_by_width() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(55);
+        store.apply_bytes(target_id, Seq::new(1), b"hello");
+        store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(2, 0, TerminalSelectionSide::Left),
+        );
+
+        store.resize(target_id, Seq::new(3), AlacrittyTermSize::new(20, 5));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("hello"));
+
+        store.resize(target_id, Seq::new(4), AlacrittyTermSize::new(10, 5));
+        assert_eq!(store.selection_text(target_id), None);
+    }
+
+    #[test]
+    fn viewport_scrolling_preserves_selection_anchors() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(56);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
+        store.scroll_display(target_id, Seq::new(2), Scroll::Top);
+        store.start_selection(
+            target_id,
+            Seq::new(3),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(1, 0, TerminalSelectionSide::Left),
+        );
+
+        store.scroll_display(target_id, Seq::new(4), Scroll::Bottom);
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
+
+        store.scroll_display(target_id, Seq::new(5), Scroll::Top);
         assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
     }
 

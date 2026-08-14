@@ -21,7 +21,7 @@ stable platform for GNative applications.
       scrollback.
 - [x] Add character, word, and line selection with mouse dragging, double-click, and triple-click.
 - [x] Add `Ctrl+Shift+C` clipboard copy without interfering with PTY input.
-- [ ] Clear or preserve selections consistently when output, resize, focus, or viewport state
+- [x] Clear or preserve selections consistently when output, resize, focus, or viewport state
       changes.
 
 ### Vi copy mode

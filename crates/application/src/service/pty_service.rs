@@ -335,10 +335,15 @@ fn send_pty_host_paste(state: &PtyServiceState, pty_host_id: PtyHostId, text: &s
 }
 
 fn send_pty_host_focus(state: &PtyServiceState, pty_host_id: PtyHostId, focused: bool) {
-    let runtimes = state.pty_host_runtimes.borrow();
-    let Some(runtime) = runtimes.get(&pty_host_id) else {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
+    if !focused {
+        runtime.click_tracker.reset();
+        runtime.selection_dragging = false;
+        runtime.selection_end = None;
+    }
     let Some(bytes) = encode_focus_changed(runtime.input_modes.load(), focused) else {
         return;
     };
@@ -533,8 +538,8 @@ mod tests {
 
     use super::{
         PtyClickTracker, PtyMouseEncoder, PtyPaneRuntime, PtyServiceState,
-        request_pty_host_selection, return_to_live_display, send_pty_host_pointer_button,
-        send_pty_host_pointer_moved,
+        request_pty_host_selection, return_to_live_display, send_pty_host_focus,
+        send_pty_host_pointer_button, send_pty_host_pointer_moved,
     };
 
     #[test]
@@ -677,5 +682,35 @@ mod tests {
             terminal_worker_rx.try_recv(),
             Ok(TerminalWorkerInput::RequestSelectionText)
         ));
+    }
+
+    #[test]
+    fn losing_focus_ends_drag_without_clearing_the_terminal_selection() {
+        let state = PtyServiceState::new();
+        let pty_host_id = PtyHostId::new(2);
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(2);
+        let selection_end = TerminalSelectionPoint::new(3, 1, TerminalSelectionSide::Right);
+        state.pty_host_runtimes.borrow_mut().insert(
+            pty_host_id,
+            PtyPaneRuntime {
+                pty_input_sender,
+                terminal_worker_sender,
+                input_modes: TerminalInputModeState::default(),
+                mouse: PtyMouseEncoder::new(TerminalPtySize::new(2, 10, 100, 20)),
+                click_tracker: PtyClickTracker::default(),
+                selection_dragging: true,
+                selection_end: Some(selection_end),
+                display_scrolled: false,
+            },
+        );
+
+        send_pty_host_focus(&state, pty_host_id, false);
+
+        let runtimes = state.pty_host_runtimes.borrow();
+        let runtime = runtimes.get(&pty_host_id).unwrap();
+        assert!(!runtime.selection_dragging);
+        assert_eq!(runtime.selection_end, None);
+        assert!(terminal_worker_rx.try_recv().is_err());
     }
 }
