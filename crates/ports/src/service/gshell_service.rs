@@ -1,10 +1,13 @@
-use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+};
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
 
 use crate::{
     event::gshell_input::GShellInput,
-    pty_host::{size_info::TerminalSizeInfo, terminal_size::TerminalPtySize},
+    pty_host::{size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig},
     rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
@@ -12,7 +15,7 @@ pub trait IGShellService {
     fn ensure_gshell(
         &self,
         gshell_id: GShellId,
-        pty_size: TerminalPtySize,
+        spawn_config: PtySpawnConfig,
         term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
@@ -21,6 +24,7 @@ pub trait IGShellService {
     fn enter_gnative_mode(&self, gshell_id: GShellId);
     fn exit_gnative_mode(&self, gshell_id: GShellId);
     fn remove_gshell(&self, gshell_id: GShellId);
+    fn gshell_working_directory(&self, gshell_id: GShellId) -> Option<PathBuf>;
     fn route_input_to_gshell(&self, input: GShellInput);
     fn resize_gshell(&self, gshell_id: GShellId, size_info: TerminalSizeInfo);
 }

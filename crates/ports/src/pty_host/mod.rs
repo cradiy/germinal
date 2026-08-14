@@ -15,6 +15,7 @@ pub mod render_viewport;
 pub mod scale_factor;
 pub mod size_info;
 pub mod snapshot;
+pub mod spawn_config;
 pub mod terminal_clipboard;
 pub mod terminal_geometric_glyph;
 pub mod terminal_input_mode;

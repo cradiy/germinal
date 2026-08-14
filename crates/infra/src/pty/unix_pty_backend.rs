@@ -4,7 +4,7 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::Pt
 use germinal_ports::{
     event::runtime_event_dispatcher::IRuntimeEventDispatcher,
     pty_host::{
-        pty_backend::IPtyBackend, pty_input::PtyInputSender, terminal_size::TerminalPtySize,
+        pty_backend::IPtyBackend, pty_input::PtyInputSender, spawn_config::PtySpawnConfig,
         worker_input::TerminalWorkerInput,
     },
 };
@@ -26,7 +26,7 @@ impl IPtyBackend for PlatformPtyBackend {
         proxy: Dispatch,
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
-        initial_size: TerminalPtySize,
+        spawn_config: PtySpawnConfig,
         shell_env: Vec<(String, String)>,
         terminal_worker_sender: SyncSender<TerminalWorkerInput>,
     ) -> PtyInputSender
@@ -37,7 +37,7 @@ impl IPtyBackend for PlatformPtyBackend {
             proxy,
             gshell_id,
             pty_host_id,
-            initial_size,
+            spawn_config,
             shell_env,
             terminal_worker_sender,
         )

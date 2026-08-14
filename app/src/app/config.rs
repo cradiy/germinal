@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use germinal_ports::pty_host::{
@@ -9,6 +9,7 @@ use germinal_ports::pty_host::{
     font_size::TerminalFontSize,
     profile::TerminalProfile,
     size_info::{TerminalPadding, TerminalSizeConfig},
+    spawn_config::PtyShellCommand,
     terminal_clipboard::TerminalOsc52Mode,
 };
 use germinal_ports::rendering::tab_bar::TabBarPosition;
@@ -90,6 +91,56 @@ impl GerminalConfig {
     pub fn terminal_osc52_mode(&self) -> TerminalOsc52Mode {
         self.terminal.osc52.into()
     }
+
+    pub fn pty_shell_command(&self) -> Option<PtyShellCommand> {
+        self.terminal.shell.as_ref().map(|shell| {
+            let program = expand_home(Path::new(&shell.program))
+                .to_string_lossy()
+                .into_owned();
+            PtyShellCommand::new(program, shell.args.clone())
+        })
+    }
+
+    pub fn configured_working_directory(&self) -> Option<PathBuf> {
+        self.terminal.working_directory.as_deref().map(expand_home)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(working_directory) = self.configured_working_directory()
+            && !working_directory.is_dir()
+        {
+            return Err(format!(
+                "working_directory is not an existing directory: {}",
+                working_directory.display()
+            ));
+        }
+
+        if let Some(shell) = self.pty_shell_command() {
+            if shell.program.trim().is_empty() {
+                return Err("terminal.shell.program must not be empty".to_string());
+            }
+            if !program_exists(&shell.program) {
+                return Err(format!(
+                    "terminal.shell.program was not found or is not executable: {}",
+                    shell.program
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn expand_home(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    if components.next() != Some(Component::Normal("~".as_ref())) {
+        return path.to_path_buf();
+    }
+
+    let Some(home) = env::var_os("HOME") else {
+        return path.to_path_buf();
+    };
+    PathBuf::from(home).join(components.as_path())
 }
 
 impl Default for GerminalConfig {
@@ -112,14 +163,27 @@ impl Default for GerminalConfig {
 #[serde(default)]
 pub struct TerminalConfig {
     pub osc52: Osc52Policy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellConfig>,
 }
 
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             osc52: Osc52Policy::OnlyCopy,
+            working_directory: None,
+            shell: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellConfig {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -493,12 +557,50 @@ pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
             path: paths.config_file().to_path_buf(),
             source,
         })?;
-    let config = toml::from_str(&contents).map_err(|source| AppError::ParseConfig {
-        path: paths.config_file().to_path_buf(),
-        source,
-    })?;
+    let config: GerminalConfig =
+        toml::from_str(&contents).map_err(|source| AppError::ParseConfig {
+            path: paths.config_file().to_path_buf(),
+            source,
+        })?;
+    config
+        .validate()
+        .map_err(|message| AppError::InvalidConfig {
+            path: paths.config_file().to_path_buf(),
+            message,
+        })?;
 
     Ok((config, paths))
+}
+
+fn program_exists(program: &str) -> bool {
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() > 1 {
+        return is_executable_file(path);
+    }
+
+    env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(program))
+        .any(|candidate| is_executable_file(&candidate))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn write_default_config(paths: &AppPaths) -> AppResult<()> {
@@ -537,7 +639,7 @@ mod tests {
     };
     use germinal_ports::rendering::tab_bar::TabBarPosition;
 
-    use super::{GerminalConfig, KeyboardAction};
+    use super::{GerminalConfig, KeyboardAction, ShellConfig};
 
     #[test]
     fn default_config_serializes_alacritty_style_fields() {
@@ -628,6 +730,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.terminal_osc52_mode(), TerminalOsc52Mode::CopyPaste);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_shell_command_and_working_directory() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [terminal]
+            working_directory = "/tmp"
+
+            [terminal.shell]
+            program = "/bin/sh"
+            args = ["-l"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.configured_working_directory(), Some("/tmp".into()));
+        let shell = config.pty_shell_command().unwrap();
+        assert_eq!(shell.program, "/bin/sh");
+        assert_eq!(shell.args, ["-l"]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_shell_and_working_directory_configuration() {
+        let mut config = GerminalConfig::default();
+        config.terminal.working_directory = Some("/path/that/does/not/exist".into());
+        assert!(config.validate().unwrap_err().contains("working_directory"));
+
+        config.terminal.working_directory = None;
+        config.terminal.shell = Some(ShellConfig {
+            program: "definitely-not-a-germinal-test-program".to_string(),
+            args: Vec::new(),
+        });
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("terminal.shell.program")
+        );
     }
 
     #[test]

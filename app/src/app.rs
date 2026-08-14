@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    path::PathBuf,
     process::Command,
     time::{Duration, Instant},
 };
@@ -49,7 +50,8 @@ use germinal_ports::{
         },
     },
     pty_host::{
-        hyperlink::TerminalHyperlink, size_info::TerminalSizeInfo, window_size::TerminalWindowSize,
+        hyperlink::TerminalHyperlink, size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig,
+        window_size::TerminalWindowSize,
     },
     rendering::{
         render_target_id::RenderTargetId,
@@ -104,6 +106,7 @@ pub struct App {
     ime_enabled: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     pointer_gshell: Option<GShellId>,
+    pending_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
     terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
     hyperlink_pointer_consumed: bool,
     pane_navigation_enabled: bool,
@@ -183,6 +186,7 @@ impl App {
             ime_enabled: false,
             cursor_position: None,
             pointer_gshell: None,
+            pending_working_directories: RefCell::new(HashMap::new()),
             terminal_hyperlinks: HashMap::new(),
             hyperlink_pointer_consumed: false,
             pane_navigation_enabled,
@@ -303,13 +307,45 @@ impl App {
         let snapshot_wake_pending = self.snapshot_wake_pending();
         for placement in placements {
             let size_info = self.terminal_size_info_for_surface(placement);
-            self.ensure_gshell(
+            let spawn_config = self.pty_spawn_config_for_gshell(
                 GShellId::new(placement.target_id.value()),
                 size_info.pty_size(),
+            );
+            self.ensure_gshell(
+                GShellId::new(placement.target_id.value()),
+                spawn_config,
                 size_info.grid_size(),
                 surface_snapshot_tx.clone(),
                 std::sync::Arc::clone(&snapshot_wake_pending),
             );
+        }
+    }
+
+    fn pty_spawn_config_for_gshell(
+        &self,
+        gshell_id: GShellId,
+        initial_size: germinal_ports::pty_host::terminal_size::TerminalPtySize,
+    ) -> PtySpawnConfig {
+        let working_directory = self
+            .pending_working_directories
+            .borrow_mut()
+            .remove(&gshell_id)
+            .or_else(|| self.config.configured_working_directory());
+        PtySpawnConfig {
+            shell: self.config.pty_shell_command(),
+            working_directory,
+            initial_size,
+        }
+    }
+
+    fn inherit_working_directory(&self, source: GShellId, target: GShellId) {
+        let working_directory = self
+            .gshell_working_directory(source)
+            .or_else(|| self.config.configured_working_directory());
+        if let Some(working_directory) = working_directory {
+            self.pending_working_directories
+                .borrow_mut()
+                .insert(target, working_directory);
         }
     }
 
@@ -326,6 +362,7 @@ impl App {
     fn split_focused_workspace_pane(&mut self, direction: PaneSplitDirection) {
         let previous_gshell = self.focused_gshell();
         let focused_gshell = self.split_focused_gshell(direction);
+        self.inherit_working_directory(previous_gshell, focused_gshell);
         self.pane_navigation_enabled = true;
 
         if self.render_runtime.is_none() {
@@ -347,6 +384,7 @@ impl App {
     fn create_workspace_tab(&mut self) {
         let previous_gshell = self.focused_gshell();
         let focused_gshell = self.create_tab_gshell();
+        self.inherit_working_directory(previous_gshell, focused_gshell);
         self.activate_workspace_tab(previous_gshell, focused_gshell);
     }
 
@@ -487,6 +525,9 @@ impl App {
 
         self.apply_gshell_focus_change(previous_gshell, focused_gshell);
         for closed_gshell in closed_gshells {
+            self.pending_working_directories
+                .borrow_mut()
+                .remove(&closed_gshell);
             self.terminal_hyperlinks.remove(&closed_gshell);
             self.remove_gshell(closed_gshell);
             self.remove_render_target(RenderTargetId::new(closed_gshell.value()));

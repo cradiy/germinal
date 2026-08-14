@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::AtomicBool,
@@ -26,6 +27,7 @@ use germinal_ports::{
     pty_host::{
         pty_backend::{IPtyBackend, IPtyBackendProvider},
         pty_input::{PtyInput, PtyInputSender},
+        spawn_config::PtySpawnConfig,
         terminal_input_mode::{TerminalInputModeState, TerminalInputModes},
         terminal_size::TerminalPtySize,
         worker_input::{
@@ -154,7 +156,7 @@ where
         &self,
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
-        pty_size: TerminalPtySize,
+        spawn_config: PtySpawnConfig,
         term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
@@ -185,11 +187,12 @@ where
             }
         };
 
+        let pty_size = spawn_config.initial_size;
         let pty_input_sender = self.prj_ref().pty_backend().spawn_pty(
             proxy,
             gshell_id,
             pty_host_id,
-            pty_size,
+            spawn_config,
             shell_env,
             terminal_worker_sender.clone(),
         );
@@ -322,6 +325,16 @@ where
         state.pty_host_runtimes.borrow_mut().remove(&pty_host_id);
     }
 
+    fn pty_host_working_directory(&self, pty_host_id: PtyHostId) -> Option<PathBuf> {
+        let state: &PtyServiceState = self.prj_ref().as_ref();
+        let runtimes = state.pty_host_runtimes.borrow();
+        let process_id = runtimes
+            .get(&pty_host_id)?
+            .pty_input_sender
+            .child_process_id()?;
+        process_working_directory(process_id)
+    }
+
     fn resize_pty_host(
         &self,
         pty_host_id: PtyHostId,
@@ -343,6 +356,17 @@ where
             .terminal_worker_sender
             .send(TerminalWorkerInput::Resize(term_size));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_working_directory(process_id: u32) -> Option<PathBuf> {
+    let path = std::fs::read_link(format!("/proc/{process_id}/cwd")).ok()?;
+    path.is_dir().then_some(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_working_directory(_process_id: u32) -> Option<PathBuf> {
+    None
 }
 
 fn request_pty_host_selection(state: &PtyServiceState, pty_host_id: PtyHostId) {
@@ -1090,6 +1114,15 @@ mod tests {
         send_pty_host_pointer_button, send_pty_host_pointer_moved, send_vi_mode_key,
         toggle_pty_host_search, toggle_pty_host_vi_mode,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_a_live_process_working_directory_from_proc() {
+        assert_eq!(
+            super::process_working_directory(std::process::id()),
+            std::env::current_dir().ok()
+        );
+    }
 
     #[test]
     fn input_returns_a_scrolled_pane_to_the_live_display_once() {

@@ -28,6 +28,8 @@ pub enum AppError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("invalid config file {path}: {message}")]
+    InvalidConfig { path: PathBuf, message: String },
     #[error("failed to serialize config: {0}")]
     SerializeConfig(#[source] toml::ser::Error),
     #[error("failed to write config file {path}: {source}")]

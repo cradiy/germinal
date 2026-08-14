@@ -78,6 +78,9 @@ async fn run_compio_bridge<Dispatch>(
     for arg in &config.shell.args {
         command.arg(arg);
     }
+    if let Some(working_directory) = &config.working_directory {
+        command.cwd(working_directory);
+    }
     apply_default_terminal_env(&mut command);
     apply_shell_env(&mut command, &config.shell_env);
 
@@ -91,6 +94,9 @@ async fn run_compio_bridge<Dispatch>(
         }));
         return;
     };
+    if let Some(process_id) = child.process_id() {
+        input_rx.set_child_process_id(process_id);
+    }
 
     drop(pair.slave);
 

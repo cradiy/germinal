@@ -9,6 +9,7 @@ use germinal_ports::{
     event::runtime_event_dispatcher::IRuntimeEventDispatcher,
     pty_host::{
         pty_input::{PtyInputSender, pty_input_channel},
+        spawn_config::PtySpawnConfig,
         terminal_size::TerminalPtySize,
         worker_input::TerminalWorkerInput,
     },
@@ -30,14 +31,20 @@ pub(crate) struct PtyBridgeConfig {
     pub shell: ShellCommand,
     pub shell_env: Vec<(String, String)>,
     pub initial_size: TerminalPtySize,
+    pub working_directory: Option<PathBuf>,
 }
 
 impl PtyBridgeConfig {
-    pub fn new(initial_size: TerminalPtySize, shell_env: Vec<(String, String)>) -> Self {
+    pub fn new(shell_env: Vec<(String, String)>, spawn_config: PtySpawnConfig) -> Self {
+        let initial_size = spawn_config.initial_size;
         Self {
-            shell: default_shell_command(),
+            shell: spawn_config
+                .shell
+                .map(|shell| ShellCommand::new(shell.program, shell.args))
+                .unwrap_or_else(default_shell_command),
             shell_env,
             initial_size,
+            working_directory: spawn_config.working_directory,
         }
     }
 }
@@ -49,7 +56,7 @@ impl PtyBridge {
         proxy: Dispatch,
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
-        initial_size: TerminalPtySize,
+        spawn_config: PtySpawnConfig,
         shell_env: Vec<(String, String)>,
         terminal_worker_tx: SyncSender<TerminalWorkerInput>,
     ) -> PtyInputSender
@@ -60,7 +67,7 @@ impl PtyBridge {
             proxy,
             gshell_id,
             pty_host_id,
-            PtyBridgeConfig::new(initial_size, shell_env),
+            PtyBridgeConfig::new(shell_env, spawn_config),
             terminal_worker_tx,
         )
     }
@@ -193,10 +200,34 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{
-        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, preferred_terminal_term_name_with_paths,
-        terminfo_exists_in_paths,
+    use germinal_ports::pty_host::{
+        spawn_config::{PtyShellCommand, PtySpawnConfig},
+        terminal_size::TerminalPtySize,
     };
+
+    use super::{
+        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridgeConfig,
+        preferred_terminal_term_name_with_paths, terminfo_exists_in_paths,
+    };
+
+    #[test]
+    fn bridge_config_preserves_shell_and_working_directory() {
+        let config = PtyBridgeConfig::new(
+            Vec::new(),
+            PtySpawnConfig {
+                shell: Some(PtyShellCommand::new(
+                    "/bin/test-shell".to_string(),
+                    vec!["--login".to_string()],
+                )),
+                working_directory: Some("/tmp/project".into()),
+                initial_size: TerminalPtySize::new(24, 80, 960, 576),
+            },
+        );
+
+        assert_eq!(config.shell.program, "/bin/test-shell");
+        assert_eq!(config.shell.args, ["--login"]);
+        assert_eq!(config.working_directory, Some("/tmp/project".into()));
+    }
 
     #[test]
     fn finds_terminfo_in_letter_directory() {

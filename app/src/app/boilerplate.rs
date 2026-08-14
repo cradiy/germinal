@@ -215,14 +215,14 @@ impl IGShellService for App {
     fn ensure_gshell(
         &self,
         gshell_id: GShellId,
-        pty_size: TerminalPtySize,
+        spawn_config: germinal_ports::pty_host::spawn_config::PtySpawnConfig,
         term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
         GShellService::inj_ref(self).ensure_gshell(
             gshell_id,
-            pty_size,
+            spawn_config,
             term_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
@@ -245,6 +245,10 @@ impl IGShellService for App {
         GShellService::inj_ref(self).remove_gshell(gshell_id)
     }
 
+    fn gshell_working_directory(&self, gshell_id: GShellId) -> Option<std::path::PathBuf> {
+        GShellService::inj_ref(self).gshell_working_directory(gshell_id)
+    }
+
     fn route_input_to_gshell(&self, input: GShellInput) {
         GShellService::inj_ref(self).route_input_to_gshell(input)
     }
@@ -259,7 +263,7 @@ impl IPtyService for App {
         &self,
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
-        pty_size: TerminalPtySize,
+        spawn_config: germinal_ports::pty_host::spawn_config::PtySpawnConfig,
         term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
@@ -267,7 +271,7 @@ impl IPtyService for App {
         PtyService::inj_ref(self).ensure_gshell_pty(
             gshell_id,
             pty_host_id,
-            pty_size,
+            spawn_config,
             term_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
@@ -280,6 +284,10 @@ impl IPtyService for App {
 
     fn remove_pty_host(&self, pty_host_id: PtyHostId) {
         PtyService::inj_ref(self).remove_pty_host(pty_host_id)
+    }
+
+    fn pty_host_working_directory(&self, pty_host_id: PtyHostId) -> Option<std::path::PathBuf> {
+        PtyService::inj_ref(self).pty_host_working_directory(pty_host_id)
     }
 
     fn resize_pty_host(

@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
     task::{Poll, Waker},
 };
 
@@ -24,6 +27,7 @@ struct PtyInputQueueState {
 struct PtyInputQueue {
     state: Mutex<PtyInputQueueState>,
     available: Condvar,
+    child_process_id: AtomicU32,
 }
 
 #[derive(Debug)]
@@ -80,6 +84,13 @@ impl Drop for PtyInputSender {
 }
 
 impl PtyInputSender {
+    pub fn child_process_id(&self) -> Option<u32> {
+        match self.queue.child_process_id.load(Ordering::Acquire) {
+            0 => None,
+            process_id => Some(process_id),
+        }
+    }
+
     pub fn send(&self, input: PtyInput) -> Result<(), PtyInput> {
         let mut state = self
             .queue
@@ -124,6 +135,12 @@ impl PtyInputSender {
 }
 
 impl PtyInputReceiver {
+    pub fn set_child_process_id(&self, process_id: u32) {
+        self.queue
+            .child_process_id
+            .store(process_id, Ordering::Release);
+    }
+
     pub async fn recv(&self) -> Option<PtyInput> {
         std::future::poll_fn(|cx| {
             let mut state = self
@@ -181,6 +198,7 @@ pub fn pty_input_channel() -> (PtyInputSender, PtyInputReceiver) {
             waker: None,
         }),
         available: Condvar::new(),
+        child_process_id: AtomicU32::new(0),
     });
 
     (
@@ -189,4 +207,20 @@ pub fn pty_input_channel() -> (PtyInputSender, PtyInputReceiver) {
         },
         PtyInputReceiver { queue },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiver_publishes_the_child_process_id_to_all_senders() {
+        let (sender, receiver) = pty_input_channel();
+        let sender_clone = sender.clone();
+
+        assert_eq!(sender.child_process_id(), None);
+        receiver.set_child_process_id(42);
+        assert_eq!(sender.child_process_id(), Some(42));
+        assert_eq!(sender_clone.child_process_id(), Some(42));
+    }
 }

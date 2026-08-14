@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool, mpsc::Sender},
 };
 
@@ -15,7 +16,7 @@ use germinal_domain::{
 };
 use germinal_ports::{
     event::gshell_input::GShellInput,
-    pty_host::{size_info::TerminalSizeInfo, terminal_size::TerminalPtySize},
+    pty_host::{size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig},
     rendering::surface_snapshot::RenderSurfaceSnapshot,
     service::{
         gnative_service::IGNativeService, gshell_service::IGShellService, pty_service::IPtyService,
@@ -132,7 +133,7 @@ where
     fn ensure_gshell(
         &self,
         gshell_id: GShellId,
-        pty_size: TerminalPtySize,
+        spawn_config: PtySpawnConfig,
         term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
@@ -148,7 +149,7 @@ where
         self.prj_ref().ensure_gshell_pty(
             gshell_id,
             pty_host_id,
-            pty_size,
+            spawn_config,
             term_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
@@ -178,6 +179,12 @@ where
 
         self.prj_ref().remove_pty_host(pty_host_id);
         self.prj_ref().exit_gnative_session(gshell_id);
+    }
+
+    fn gshell_working_directory(&self, gshell_id: GShellId) -> Option<PathBuf> {
+        let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+        let pty_host_id = state.pty_host_id_of(gshell_id)?;
+        self.prj_ref().pty_host_working_directory(pty_host_id)
     }
 
     fn route_input_to_gshell(&self, input: GShellInput) {
