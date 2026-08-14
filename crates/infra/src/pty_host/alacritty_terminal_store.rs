@@ -9,11 +9,11 @@ use std::{
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
-    index::{Column, Point, Side},
+    index::{Boundary, Column, Direction, Point, Side},
     selection::{Selection, SelectionType},
     term::{
         Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport,
-        viewport_to_point,
+        search::RegexSearch, viewport_to_point,
     },
     vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
@@ -27,7 +27,8 @@ use germinal_ports::{
         width::terminal_char_cell_width,
         worker_input::{
             TerminalSelectionKind, TerminalSelectionPoint, TerminalSelectionSide, TerminalViMotion,
-            TerminalViSelectionKind, TerminalViTextObject,
+            TerminalViSearchDirection, TerminalViSearchPrompt, TerminalViSelectionKind,
+            TerminalViTextObject,
         },
     },
     rendering::{
@@ -309,6 +310,10 @@ impl AlacrittyTerminalStore {
             return false;
         }
 
+        if !enabled {
+            state.term.scroll_display(Scroll::Bottom);
+            state.vi_search_prompt = None;
+        }
         state.term.toggle_vi_mode();
         state.latest_seq = seq;
         state.selection_damage = true;
@@ -460,6 +465,67 @@ impl AlacrittyTerminalStore {
         true
     }
 
+    pub fn set_vi_search_prompt(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        prompt: Option<TerminalViSearchPrompt>,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.term.mode().contains(TermMode::VI) || state.vi_search_prompt == prompt {
+            return false;
+        }
+
+        state.vi_search_prompt = prompt;
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn vi_search(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        pattern: &str,
+        direction: TerminalViSearchDirection,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.term.mode().contains(TermMode::VI) || pattern.is_empty() {
+            return false;
+        }
+
+        let Ok(mut regex) = RegexSearch::new(pattern) else {
+            return false;
+        };
+        let cursor = state.term.vi_mode_cursor.point;
+        let (origin, direction) = match direction {
+            TerminalViSearchDirection::Forward => {
+                (cursor.add(&state.term, Boundary::None, 1), Direction::Right)
+            }
+            TerminalViSearchDirection::Backward => {
+                (cursor.sub(&state.term, Boundary::None, 1), Direction::Left)
+            }
+        };
+        let Some(regex_match) =
+            state
+                .term
+                .search_next(&mut regex, origin, direction, Side::Left, None)
+        else {
+            return false;
+        };
+
+        state.term.vi_goto_point(*regex_match.start());
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
     pub fn vi_mode_enabled(&self, render_target_id: RenderTargetId) -> bool {
         let inner = self.inner.borrow();
         inner
@@ -490,6 +556,14 @@ impl AlacrittyTerminalStore {
         let mut rows = visible_surface_rows(&state.term);
         if state.term.mode().contains(TermMode::VI) {
             append_vi_mode_indicator(&mut rows, state.size.columns());
+            if let Some(prompt) = state.vi_search_prompt.as_ref() {
+                append_vi_search_prompt(
+                    &mut rows,
+                    state.size.columns(),
+                    state.size.screen_lines(),
+                    prompt,
+                );
+            }
         }
         let dirty_rows = dirty_rows_from_state(state);
 
@@ -919,6 +993,7 @@ pub struct AlacrittyTermState {
     total_bytes: u64,
     chunk_count: u64,
     selection_damage: bool,
+    vi_search_prompt: Option<TerminalViSearchPrompt>,
 }
 
 impl AlacrittyTermState {
@@ -945,6 +1020,7 @@ impl AlacrittyTermState {
             total_bytes: 0,
             chunk_count: 0,
             selection_damage: false,
+            vi_search_prompt: None,
         }
     }
 
@@ -1094,6 +1170,59 @@ fn append_vi_mode_indicator(rows: &mut Vec<RenderSurfaceRowSnapshot>, columns: u
         rows.push(RenderSurfaceRowSnapshot {
             y: 0,
             runs: vec![indicator],
+        });
+        rows.sort_by_key(|row| row.y);
+    }
+}
+
+fn append_vi_search_prompt(
+    rows: &mut Vec<RenderSurfaceRowSnapshot>,
+    columns: usize,
+    screen_lines: usize,
+    prompt: &TerminalViSearchPrompt,
+) {
+    if columns == 0 || screen_lines == 0 {
+        return;
+    }
+
+    let marker = match prompt.direction {
+        TerminalViSearchDirection::Forward => '/',
+        TerminalViSearchDirection::Backward => '?',
+    };
+    let query_columns = columns.saturating_sub(2);
+    let mut query = prompt
+        .query
+        .chars()
+        .rev()
+        .take(query_columns)
+        .collect::<Vec<_>>();
+    query.reverse();
+
+    let mut text = String::with_capacity(columns);
+    text.push(marker);
+    text.extend(query);
+    if text.chars().count() < columns {
+        text.push(' ');
+    }
+
+    let prompt_run = RenderSurfaceRunSnapshot {
+        x: 0,
+        text,
+        style: TextStyleDto {
+            foreground: Some(RgbColorDto::new(255, 255, 255)),
+            background: Some(RgbColorDto::new(38, 92, 168)),
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+    };
+    let row_index = screen_lines.saturating_sub(1) as u32;
+    if let Some(row) = rows.iter_mut().find(|row| row.y == row_index) {
+        row.runs.push(prompt_run);
+    } else {
+        rows.push(RenderSurfaceRowSnapshot {
+            y: row_index,
+            runs: vec![prompt_run],
         });
         rows.sort_by_key(|row| row.y);
     }
@@ -1741,6 +1870,129 @@ mod tests {
                 .display_offset(),
             0
         );
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_search_moves_between_wrapped_results_and_renders_the_prompt() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(12, 4));
+        let target_id = RenderTargetId::new(62);
+        store.apply_bytes(target_id, Seq::new(1), b"alpha\r\nbeta\r\nalpha");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+
+        assert!(store.set_vi_search_prompt(
+            target_id,
+            Seq::new(3),
+            Some(TerminalViSearchPrompt {
+                direction: TerminalViSearchDirection::Forward,
+                query: "alp".into(),
+            }),
+        ));
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert!(snapshot.rows.iter().any(|row| {
+            row.y == 3 && row.runs.iter().any(|run| run.x == 0 && run.text == "/alp ")
+        }));
+
+        assert!(store.set_vi_search_prompt(target_id, Seq::new(4), None));
+        assert!(store.vi_search(
+            target_id,
+            Seq::new(5),
+            "alpha",
+            TerminalViSearchDirection::Forward,
+        ));
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!((cursor.x, cursor.y), (0, 0));
+
+        assert!(store.vi_search(
+            target_id,
+            Seq::new(6),
+            "alpha",
+            TerminalViSearchDirection::Backward,
+        ));
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!((cursor.x, cursor.y), (0, 2));
+        assert!(!store.vi_search(
+            target_id,
+            Seq::new(7),
+            "[",
+            TerminalViSearchDirection::Forward,
+        ));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_mode_keeps_older_history_stable_during_output_and_returns_live_on_exit() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 3));
+        let target_id = RenderTargetId::new(63);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive",
+        );
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::Top));
+
+        let text_before_output: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect();
+        let offset_before_output = store
+            .inner
+            .borrow()
+            .get(&target_id)
+            .unwrap()
+            .term
+            .grid()
+            .display_offset();
+        assert!(offset_before_output > 0);
+        assert!(text_before_output.contains("one"));
+
+        store.apply_bytes(target_id, Seq::new(4), b"\r\nsix");
+        let offset_after_output = store
+            .inner
+            .borrow()
+            .get(&target_id)
+            .unwrap()
+            .term
+            .grid()
+            .display_offset();
+        let text_after_output: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(offset_after_output, offset_before_output + 1);
+        assert!(text_after_output.contains("one"));
+        assert!(!text_after_output.contains("six"));
+
+        assert!(store.set_vi_mode(target_id, Seq::new(5), false));
+        assert_eq!(
+            store
+                .inner
+                .borrow()
+                .get(&target_id)
+                .unwrap()
+                .term
+                .grid()
+                .display_offset(),
+            0
+        );
+        let live_text: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(live_text.contains("six"));
         assert!(store.take_pending_pty_writes(target_id).is_empty());
     }
 

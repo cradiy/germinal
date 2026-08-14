@@ -23,7 +23,8 @@ use germinal_ports::{
         worker_backend::ITerminalWorkerBackend,
         worker_input::{
             TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
-            TerminalViSelectionKind, TerminalViTextObject, TerminalWorkerInput,
+            TerminalViSearchDirection, TerminalViSearchPrompt, TerminalViSelectionKind,
+            TerminalViTextObject, TerminalWorkerInput,
         },
     },
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
@@ -408,6 +409,18 @@ where
                     self.unpublished_seq = Some(seq);
                 }
             }
+            TerminalWorkerInput::SetViSearchPrompt(prompt) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.set_vi_search_prompt(prompt) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::ViSearch { pattern, direction } => {
+                self.flush_pending_input();
+                if let Some(seq) = self.vi_search(&pattern, direction) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
             TerminalWorkerInput::SetPtyInput {
                 sender,
                 input_modes,
@@ -586,6 +599,22 @@ where
         let seq = Seq::new(self.seq);
         self.terminal_store
             .select_vi_text_object(self.target_id, seq, text_object)
+            .then_some(seq)
+    }
+
+    fn set_vi_search_prompt(&mut self, prompt: Option<TerminalViSearchPrompt>) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .set_vi_search_prompt(self.target_id, seq, prompt)
+            .then_some(seq)
+    }
+
+    fn vi_search(&mut self, pattern: &str, direction: TerminalViSearchDirection) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .vi_search(self.target_id, seq, pattern, direction)
             .then_some(seq)
     }
 

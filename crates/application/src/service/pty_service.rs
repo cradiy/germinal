@@ -30,7 +30,8 @@ use germinal_ports::{
         terminal_size::TerminalPtySize,
         worker_input::{
             TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
-            TerminalViSelectionKind, TerminalViTextObject, TerminalWorkerInput,
+            TerminalViSearchDirection, TerminalViSearchPrompt, TerminalViSelectionKind,
+            TerminalViTextObject, TerminalWorkerInput,
         },
     },
     rendering::surface_snapshot::RenderSurfaceSnapshot,
@@ -103,6 +104,20 @@ struct PtyPaneRuntime {
     vi_pending_g: bool,
     vi_selection_kind: Option<TerminalViSelectionKind>,
     vi_pending_text_object: Option<TerminalViTextObject>,
+    vi_search_input: Option<ViSearchInput>,
+    vi_last_search: Option<ViSearch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViSearchInput {
+    direction: TerminalViSearchDirection,
+    query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViSearch {
+    direction: TerminalViSearchDirection,
+    pattern: String,
 }
 
 #[derive(kudi::DepInj)]
@@ -200,6 +215,8 @@ where
                 vi_pending_g: false,
                 vi_selection_kind: None,
                 vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
             },
         );
     }
@@ -326,14 +343,20 @@ fn toggle_pty_host_vi_mode(state: &PtyServiceState, pty_host_id: PtyHostId) {
         return;
     };
 
-    runtime.vi_mode = !runtime.vi_mode;
+    if runtime.vi_mode {
+        leave_pty_host_vi_mode(runtime);
+        return;
+    }
+
+    runtime.vi_mode = true;
     runtime.vi_pending_g = false;
     runtime.vi_selection_kind = None;
     runtime.vi_pending_text_object = None;
+    runtime.vi_search_input = None;
 
     let _ = runtime
         .terminal_worker_sender
-        .send(TerminalWorkerInput::SetViMode(runtime.vi_mode));
+        .send(TerminalWorkerInput::SetViMode(true));
 }
 
 fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
@@ -422,6 +445,11 @@ fn send_vi_mode_key(
         return;
     }
 
+    if runtime.vi_search_input.is_some() {
+        send_vi_search_input_key(runtime, modifiers, logical_key);
+        return;
+    }
+
     if matches!(
         logical_key,
         WindowInputKey::Named(WindowInputNamedKey::Escape)
@@ -485,12 +513,11 @@ fn send_vi_mode_key(
                 runtime.vi_pending_g = false;
                 return;
             }
-            runtime.vi_mode = false;
-            runtime.vi_pending_g = false;
-            runtime.vi_pending_text_object = None;
-            let _ = runtime
-                .terminal_worker_sender
-                .send(TerminalWorkerInput::SetViMode(false));
+            leave_pty_host_vi_mode(runtime);
+            return;
+        }
+        "q" => {
+            leave_pty_host_vi_mode(runtime);
             return;
         }
         "y" => {
@@ -529,6 +556,33 @@ fn send_vi_mode_key(
                 ));
             return;
         }
+        "/" => {
+            start_vi_search(runtime, TerminalViSearchDirection::Forward);
+            return;
+        }
+        "?" => {
+            start_vi_search(runtime, TerminalViSearchDirection::Backward);
+            return;
+        }
+        "n" | "N" => {
+            runtime.vi_pending_g = false;
+            runtime.vi_pending_text_object = None;
+            let Some(search) = runtime.vi_last_search.clone() else {
+                return;
+            };
+            let direction = if key == "n" {
+                search.direction
+            } else {
+                search.direction.opposite()
+            };
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::ViSearch {
+                    pattern: search.pattern,
+                    direction,
+                });
+            return;
+        }
         _ => {}
     }
 
@@ -563,6 +617,121 @@ fn send_vi_mode_key(
             .terminal_worker_sender
             .send(TerminalWorkerInput::ViMotion(motion));
     }
+}
+
+fn leave_pty_host_vi_mode(runtime: &mut PtyPaneRuntime) {
+    runtime.vi_mode = false;
+    runtime.vi_pending_g = false;
+    runtime.vi_pending_text_object = None;
+    runtime.vi_search_input = None;
+    runtime.display_scrolled = false;
+    if runtime.vi_selection_kind.take().is_some() {
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::SetViSelection(None));
+    }
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetViMode(false));
+}
+
+fn start_vi_search(runtime: &mut PtyPaneRuntime, direction: TerminalViSearchDirection) {
+    runtime.vi_pending_g = false;
+    runtime.vi_pending_text_object = None;
+    runtime.vi_search_input = Some(ViSearchInput {
+        direction,
+        query: String::new(),
+    });
+    publish_vi_search_prompt(runtime);
+}
+
+fn send_vi_search_input_key(
+    runtime: &mut PtyPaneRuntime,
+    modifiers: WindowInputModifiers,
+    logical_key: &WindowInputKey,
+) {
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Escape)
+    ) {
+        runtime.vi_search_input = None;
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::SetViSearchPrompt(None));
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Backspace)
+    ) {
+        if let Some(search) = runtime.vi_search_input.as_mut() {
+            search.query.pop();
+        }
+        publish_vi_search_prompt(runtime);
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Enter)
+    ) {
+        let Some(search_input) = runtime.vi_search_input.take() else {
+            return;
+        };
+        let pattern = if search_input.query.is_empty() {
+            runtime
+                .vi_last_search
+                .as_ref()
+                .map(|search| search.pattern.clone())
+        } else {
+            Some(search_input.query)
+        };
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::SetViSearchPrompt(None));
+        let Some(pattern) = pattern else {
+            return;
+        };
+        runtime.vi_last_search = Some(ViSearch {
+            direction: search_input.direction,
+            pattern: pattern.clone(),
+        });
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::ViSearch {
+                pattern,
+                direction: search_input.direction,
+            });
+        return;
+    }
+
+    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+        return;
+    }
+    let WindowInputKey::Character(text) = logical_key else {
+        return;
+    };
+    let Some(search) = runtime.vi_search_input.as_mut() else {
+        return;
+    };
+    search
+        .query
+        .extend(text.chars().filter(|character| !character.is_control()));
+    publish_vi_search_prompt(runtime);
+}
+
+fn publish_vi_search_prompt(runtime: &PtyPaneRuntime) {
+    let prompt = runtime
+        .vi_search_input
+        .as_ref()
+        .map(|search| TerminalViSearchPrompt {
+            direction: search.direction,
+            query: search.query.clone(),
+        });
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetViSearchPrompt(prompt));
 }
 
 fn toggle_vi_selection_kind(
@@ -730,8 +899,9 @@ mod tests {
             terminal_size::TerminalPtySize,
             worker_input::{
                 TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
-                TerminalSelectionSide, TerminalViMotion, TerminalViSelectionKind,
-                TerminalViTextObject, TerminalWorkerInput,
+                TerminalSelectionSide, TerminalViMotion, TerminalViSearchDirection,
+                TerminalViSearchPrompt, TerminalViSelectionKind, TerminalViTextObject,
+                TerminalWorkerInput,
             },
         },
     };
@@ -760,6 +930,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
 
         return_to_live_display(&mut runtime);
@@ -796,6 +968,8 @@ mod tests {
                 vi_pending_g: false,
                 vi_selection_kind: None,
                 vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
             },
         );
 
@@ -855,6 +1029,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
         let no_modifiers = WindowInputModifiers::new(false, false, false, false);
 
@@ -906,6 +1082,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
 
         for (key, modifiers) in [
@@ -942,6 +1120,113 @@ mod tests {
     }
 
     #[test]
+    fn vi_mode_search_edits_commits_and_repeats_locally() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(16);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
+        };
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("/".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(Some(
+                TerminalViSearchPrompt {
+                    direction: TerminalViSearchDirection::Forward,
+                    ref query,
+                }
+            ))) if query.is_empty()
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("foo".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(Some(
+                TerminalViSearchPrompt { ref query, .. }
+            ))) if query == "foo"
+        ));
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Named(WindowInputNamedKey::Backspace),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(Some(
+                TerminalViSearchPrompt { ref query, .. }
+            ))) if query == "fo"
+        ));
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("o".into()),
+        );
+        let _ = terminal_worker_rx.try_recv();
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Named(WindowInputNamedKey::Enter),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(None))
+        ));
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ViSearch {
+                ref pattern,
+                direction: TerminalViSearchDirection::Forward,
+            }) if pattern == "foo"
+        ));
+
+        for (key, expected_direction) in [
+            ("n", TerminalViSearchDirection::Forward),
+            ("N", TerminalViSearchDirection::Backward),
+        ] {
+            send_vi_mode_key(
+                &mut runtime,
+                no_modifiers,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Character(key.into()),
+            );
+            assert!(matches!(
+                terminal_worker_rx.try_recv(),
+                Ok(TerminalWorkerInput::ViSearch { ref pattern, direction })
+                    if pattern == "foo" && direction == expected_direction
+            ));
+        }
+        assert!(runtime.vi_mode);
+    }
+
+    #[test]
     fn vi_mode_handles_visual_selection_and_insert_mode_locally() {
         let (pty_input_sender, _pty_input_rx) = pty_input_channel();
         let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(3);
@@ -958,6 +1243,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
         let no_modifiers = WindowInputModifiers::new(false, false, false, false);
 
@@ -1044,6 +1331,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
         let no_modifiers = WindowInputModifiers::new(false, false, false, false);
 
@@ -1134,6 +1423,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: Some(TerminalViSelectionKind::Character),
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
         let no_modifiers = WindowInputModifiers::new(false, false, false, false);
 
@@ -1173,6 +1464,8 @@ mod tests {
             vi_pending_g: false,
             vi_selection_kind: None,
             vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
         };
 
         send_vi_mode_key(
@@ -1185,6 +1478,47 @@ mod tests {
         assert!(!runtime.vi_mode);
         assert_eq!(runtime.vi_pending_text_object, None);
         assert_eq!(runtime.vi_selection_kind, None);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViMode(false))
+        ));
+    }
+
+    #[test]
+    fn vi_mode_q_clears_visual_selection_and_returns_to_live_input() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(2);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: true,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: Some(TerminalViSelectionKind::Character),
+            vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
+        };
+
+        send_vi_mode_key(
+            &mut runtime,
+            WindowInputModifiers::new(false, false, false, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("q".into()),
+        );
+
+        assert!(!runtime.vi_mode);
+        assert!(!runtime.display_scrolled);
+        assert_eq!(runtime.vi_selection_kind, None);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(None))
+        ));
         assert!(matches!(
             terminal_worker_rx.try_recv(),
             Ok(TerminalWorkerInput::SetViMode(false))
@@ -1237,6 +1571,8 @@ mod tests {
                 vi_pending_g: false,
                 vi_selection_kind: None,
                 vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
             },
         );
         let position = WindowPointerPosition::new(15.0, 5.0);
@@ -1331,6 +1667,8 @@ mod tests {
                 vi_pending_g: false,
                 vi_selection_kind: None,
                 vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
             },
         );
 

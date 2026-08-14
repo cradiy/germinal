@@ -60,6 +60,27 @@ pub enum TerminalViTextObject {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViSearchDirection {
+    Forward,
+    Backward,
+}
+
+impl TerminalViSearchDirection {
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Forward => Self::Backward,
+            Self::Backward => Self::Forward,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalViSearchPrompt {
+    pub direction: TerminalViSearchDirection,
+    pub query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSelectionPoint {
     pub column: u16,
     pub row: u16,
@@ -86,6 +107,11 @@ pub enum TerminalWorkerInput {
     ViMotion(TerminalViMotion),
     SetViSelection(Option<TerminalViSelectionKind>),
     SelectViTextObject(TerminalViTextObject),
+    SetViSearchPrompt(Option<TerminalViSearchPrompt>),
+    ViSearch {
+        pattern: String,
+        direction: TerminalViSearchDirection,
+    },
     SetPtyInput {
         sender: PtyInputSender,
         input_modes: TerminalInputModeState,
