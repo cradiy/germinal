@@ -1,6 +1,6 @@
 use crate::{
 	rendering::{
-		frame_plan_builder::TextStyleDto,
+		frame_plan_builder::{RgbColorDto, TextStyleDto},
 		render_target_id::RenderTargetId,
 		surface_snapshot::{RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot},
 	},
@@ -100,6 +100,7 @@ pub fn render_surface_snapshot_from_terminal_snapshot(
 	RenderSurfaceSnapshot {
 		target_id: snapshot.render_target_id,
 		latest_seq: snapshot.latest_seq,
+		default_background: RgbColorDto::new(0, 0, 0),
 		rows,
 		video_surfaces: Vec::new(),
 		image_surfaces: Vec::new(),

@@ -17,7 +17,8 @@ use germinal_ports::{
 		render_target_id::RenderTargetId,
 		renderer_backend::RendererBackend,
 		surface_snapshot::{
-			RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot, RenderSurfaceSnapshot,
+			RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+			RenderSurfaceSnapshot,
 		},
 	},
 	seq::Seq,
@@ -97,7 +98,10 @@ impl RendererBackend for WgpuRendererBackend {
 			.values()
 			.map(|row| row.background_quads.len() + row.glyph_quads.len() + row.underline_quads.len())
 			.sum();
-		let mut quads = Vec::with_capacity(pixel_quads.len() + total_row_quads + cursor_quads.len());
+		let mut quads = Vec::with_capacity(
+			1 + pixel_quads.len() + total_row_quads + cursor_quads.len(),
+		);
+		quads.push(WgpuQuadDrawItem::surface_background(config, snapshot.default_background));
 		quads.extend(pixel_quads);
 		for row in inner.rendered_rows.values() {
 			quads.extend(row.background_quads.iter().copied());
@@ -220,7 +224,44 @@ fn append_cursor_quads(
 		italic:     false,
 		underline:  false,
 	};
-	quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
+	let vertical_stroke = w.div_ceil(8).max(1);
+	let horizontal_stroke = h.div_ceil(8).max(1);
+	match cursor.shape {
+		RenderSurfaceCursorShape::Block => {
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
+		},
+		RenderSurfaceCursorShape::Underline => {
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x,
+				y + h.saturating_sub(horizontal_stroke),
+				w,
+				horizontal_stroke,
+				style,
+			));
+		},
+		RenderSurfaceCursorShape::Beam => {
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, vertical_stroke, h, style));
+		},
+		RenderSurfaceCursorShape::HollowBlock => {
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, horizontal_stroke, style));
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x,
+				y + h.saturating_sub(horizontal_stroke),
+				w,
+				horizontal_stroke,
+				style,
+			));
+			quads.push(WgpuQuadDrawItem::solid_rect(x, y, vertical_stroke, h, style));
+			quads.push(WgpuQuadDrawItem::solid_rect(
+				x + w.saturating_sub(vertical_stroke),
+				y,
+				vertical_stroke,
+				h,
+				style,
+			));
+		},
+		RenderSurfaceCursorShape::Hidden => {},
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +459,21 @@ pub struct WgpuQuadDrawItem {
 	pub style:     TextStyleDto,
 }
 impl WgpuQuadDrawItem {
+	fn surface_background(config: WgpuRendererConfig, color: RgbColorDto) -> Self {
+		Self {
+			kind: WgpuQuadKind::Background,
+			x_px: 0,
+			y_px: 0,
+			width_px: config
+				.content_width_px
+				.saturating_add(config.content_origin_x.saturating_mul(2)),
+			height_px: config
+				.content_height_px
+				.saturating_add(config.content_origin_y.saturating_mul(2)),
+			style: TextStyleDto { background: Some(color), ..TextStyleDto::plain() },
+		}
+	}
+
 	pub fn glyph(glyph: WgpuGlyphDrawItem, config: WgpuRendererConfig) -> Self {
 		Self {
 			kind:      WgpuQuadKind::Glyph { c: glyph.c, bold: glyph.style.bold },
@@ -519,13 +575,14 @@ mod tests {
 		},
 		rendering::{
 			frame_plan_builder::{
-				RenderCommandDto, RgbaColorDto, TextStyleDto, encode_pixel_fill_rect_command,
+				RenderCommandDto, RgbColorDto, RgbaColorDto, TextStyleDto,
+				encode_pixel_fill_rect_command,
 			},
 			render_target_id::RenderTargetId,
 			renderer_backend::RendererBackend,
 			surface_snapshot::{
-				RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
-				RenderSurfaceSnapshot,
+				RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+				RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
 			},
 		},
 		seq::Seq,
@@ -596,17 +653,52 @@ mod tests {
 	}
 
 	#[test]
+	fn surface_background_covers_partial_cell_remainder_without_stretching_last_cell() {
+		let size_info = TerminalSizeInfo::new(
+			TerminalWindowSize::new(100, 35),
+			TerminalCellSize::new(8, 16),
+			TerminalPadding::ZERO,
+		);
+		let backend = WgpuRendererBackend::new(WgpuRendererConfig::from(size_info));
+		let background = RgbColorDto::new(20, 21, 30);
+		backend.render_surface(&RenderSurfaceSnapshot {
+			target_id: RenderTargetId::new(1),
+			latest_seq: Seq::new(1),
+			default_background: background,
+			rows: vec![],
+			video_surfaces: vec![],
+			image_surfaces: vec![],
+			dirty_rows: vec![],
+			cursor: None,
+		});
+
+		let backgrounds = backend.state().background_quads();
+		assert_eq!(backgrounds.len(), 1);
+		assert_eq!(backgrounds[0].x_px, 0);
+		assert_eq!(backgrounds[0].y_px, 0);
+		assert_eq!(backgrounds[0].width_px, 100);
+		assert_eq!(backgrounds[0].height_px, 35);
+		assert_eq!(backgrounds[0].style.background, Some(background));
+	}
+
+	#[test]
 	fn focused_cursor_renders_as_a_solid_cell() {
 		let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
 
 		backend.render_surface(&RenderSurfaceSnapshot {
 			target_id: RenderTargetId::new(1),
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![],
 			video_surfaces: vec![],
 			image_surfaces: vec![],
 			dirty_rows: vec![],
-			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: true }),
+			cursor: Some(RenderSurfaceCursorSnapshot {
+				x: 2,
+				y: 3,
+				focused: true,
+				shape: RenderSurfaceCursorShape::Block,
+			}),
 		});
 
 		let cursors = backend.state().geometric_quads();
@@ -618,17 +710,53 @@ mod tests {
 	}
 
 	#[test]
+	fn renders_beam_underline_hollow_and_hidden_cursor_shapes() {
+		let render = |shape| {
+			let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+			backend.render_surface(&RenderSurfaceSnapshot {
+				target_id: RenderTargetId::new(1),
+				latest_seq: Seq::new(1),
+				default_background: RgbColorDto::new(0, 0, 0),
+				rows: vec![],
+				video_surfaces: vec![],
+				image_surfaces: vec![],
+				dirty_rows: vec![],
+				cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: true, shape }),
+			});
+			backend.state().geometric_quads()
+		};
+
+		let beam = render(RenderSurfaceCursorShape::Beam);
+		assert_eq!(beam.len(), 1);
+		assert_eq!((beam[0].width_px, beam[0].height_px), (1, 16));
+
+		let underline = render(RenderSurfaceCursorShape::Underline);
+		assert_eq!(underline.len(), 1);
+		assert_eq!((underline[0].width_px, underline[0].height_px), (8, 2));
+		assert_eq!(underline[0].y_px, 62);
+
+		assert_eq!(render(RenderSurfaceCursorShape::HollowBlock).len(), 4);
+		assert!(render(RenderSurfaceCursorShape::Hidden).is_empty());
+	}
+
+	#[test]
 	fn unfocused_cursor_is_hidden() {
 		let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
 
 		backend.render_surface(&RenderSurfaceSnapshot {
 			target_id: RenderTargetId::new(1),
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![],
 			video_surfaces: vec![],
 			image_surfaces: vec![],
 			dirty_rows: vec![],
-			cursor: Some(RenderSurfaceCursorSnapshot { x: 2, y: 3, focused: false }),
+			cursor: Some(RenderSurfaceCursorSnapshot {
+				x: 2,
+				y: 3,
+				focused: false,
+				shape: RenderSurfaceCursorShape::Block,
+			}),
 		});
 
 		assert!(backend.state().geometric_quads().is_empty());
@@ -650,6 +778,7 @@ mod tests {
 		backend.render_surface(&RenderSurfaceSnapshot {
 			target_id:      RenderTargetId::new(1),
 			latest_seq:     Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -691,6 +820,7 @@ mod tests {
 		backend.render_surface(&RenderSurfaceSnapshot {
 			target_id:      RenderTargetId::new(1),
 			latest_seq:     Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -731,6 +861,7 @@ mod tests {
 		backend.render_surface(&RenderSurfaceSnapshot {
 			target_id:      RenderTargetId::new(1),
 			latest_seq:     Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows:           vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {

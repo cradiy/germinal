@@ -222,6 +222,9 @@ mod tests {
 		surface_provider.insert(RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: seq,
+			default_background: germinal_ports::rendering::frame_plan_builder::RgbColorDto::new(
+				0, 0, 0,
+			),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {

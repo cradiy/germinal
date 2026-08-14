@@ -25,7 +25,7 @@ use germinal_ports::{
 	},
 	rendering::{
 		render_target_id::RenderTargetId,
-		surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot},
+		surface_snapshot::RenderSurfaceSnapshot,
 	},
 	seq::Seq,
 };
@@ -474,10 +474,7 @@ where Dispatch: IRuntimeEventDispatcher
 		self.perf.publish_snapshot += snapshot_started_at.elapsed();
 
 		let cursor_started_at = Instant::now();
-		snapshot.cursor = self
-			.terminal_store
-			.cursor_position_0_based(self.target_id)
-			.map(|(x, y)| RenderSurfaceCursorSnapshot { x, y, focused: true });
+		snapshot.cursor = self.terminal_store.cursor_snapshot(self.target_id);
 		self.perf.publish_cursor += cursor_started_at.elapsed();
 
 		let send_started_at = Instant::now();

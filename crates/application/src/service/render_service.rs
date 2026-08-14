@@ -319,6 +319,9 @@ mod tests {
 		RenderSurfaceSnapshot {
 			target_id: RenderTargetId::new(target),
 			latest_seq: Seq::new(seq),
+			default_background: germinal_ports::rendering::frame_plan_builder::RgbColorDto::new(
+				0, 0, 0,
+			),
 			rows: Vec::new(),
 			video_surfaces: Vec::new(),
 			image_surfaces: Vec::new(),

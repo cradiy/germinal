@@ -233,7 +233,7 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
 #[cfg(test)]
 mod tests {
 	use germinal_ports::rendering::{
-		frame_plan_builder::TextStyleDto,
+		frame_plan_builder::{RgbColorDto, TextStyleDto},
 		surface_snapshot::{RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot},
 	};
 
@@ -246,6 +246,7 @@ mod tests {
 		let snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(9),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![
@@ -300,6 +301,7 @@ mod tests {
 		let snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(9),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -331,6 +333,7 @@ mod tests {
 		let red_snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -348,6 +351,7 @@ mod tests {
 		let blue_snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(2),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -376,6 +380,7 @@ mod tests {
 		let snapshot = |target_id, text: &str| RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y: 0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -404,6 +409,7 @@ mod tests {
 		let snapshot = |target_id, text: &str| RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y: 0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -436,6 +442,7 @@ mod tests {
 		let red_snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -453,6 +460,7 @@ mod tests {
 		let blue_snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(2),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![RenderSurfaceRowSnapshot {
 				y:    0,
 				runs: vec![RenderSurfaceRunSnapshot {
@@ -485,6 +493,7 @@ mod tests {
 		let snapshot = RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: Vec::new(),
 			video_surfaces: vec![],
 			image_surfaces: vec![],

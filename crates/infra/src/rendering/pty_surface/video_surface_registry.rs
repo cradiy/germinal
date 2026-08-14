@@ -158,7 +158,9 @@ struct WgpuVideoSurfaceState {
 
 #[cfg(test)]
 mod tests {
-	use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
+	use germinal_ports::rendering::{
+		frame_plan_builder::RgbColorDto, surface_snapshot::RenderSurfaceSnapshot,
+	};
 
 	use super::*;
 
@@ -170,6 +172,7 @@ mod tests {
 		registry.sync_snapshot(&RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![],
 			video_surfaces: vec![
 				RenderSurfaceVideoSurfaceSnapshot {
@@ -201,6 +204,7 @@ mod tests {
 		registry.sync_snapshot(&RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(2),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![],
 			video_surfaces: vec![RenderSurfaceVideoSurfaceSnapshot {
 				id:        "right".to_string(),
@@ -229,6 +233,7 @@ mod tests {
 		registry.sync_snapshot(&RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: Seq::new(1),
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows: vec![],
 			video_surfaces: vec![RenderSurfaceVideoSurfaceSnapshot {
 				id:        "video".to_string(),

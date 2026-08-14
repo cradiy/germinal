@@ -10,7 +10,8 @@ use germinal_ports::{
 	},
 	rendering::{
 		frame_plan_builder::{
-			BuiltFramePlan, RenderCommandDto, TextStyleDto, encode_pixel_fill_rect_command,
+			BuiltFramePlan, RenderCommandDto, RgbColorDto, TextStyleDto,
+			encode_pixel_fill_rect_command,
 		},
 		frame_plan_presenter::FramePlanPresenter,
 		render_target_id::RenderTargetId,
@@ -208,6 +209,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
 		Some(RenderSurfaceSnapshot {
 			target_id,
 			latest_seq: surface.latest_seq,
+			default_background: RgbColorDto::new(0, 0, 0),
 			rows,
 			video_surfaces: surface.video_surfaces.clone(),
 			image_surfaces: Vec::new(),

@@ -1,19 +1,23 @@
 use std::sync::Arc;
 
 use crate::{
-	rendering::{frame_plan_builder::TextStyleDto, render_target_id::RenderTargetId},
+	rendering::{
+		frame_plan_builder::{RgbColorDto, TextStyleDto},
+		render_target_id::RenderTargetId,
+	},
 	seq::Seq,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSurfaceSnapshot {
-	pub target_id:      RenderTargetId,
-	pub latest_seq:     Seq,
-	pub rows:           Vec<RenderSurfaceRowSnapshot>,
-	pub video_surfaces: Vec<RenderSurfaceVideoSurfaceSnapshot>,
-	pub image_surfaces: Vec<RenderSurfaceImageSnapshot>,
-	pub dirty_rows:     Vec<u32>,
-	pub cursor:         Option<RenderSurfaceCursorSnapshot>,
+	pub target_id:          RenderTargetId,
+	pub latest_seq:         Seq,
+	pub default_background: RgbColorDto,
+	pub rows:               Vec<RenderSurfaceRowSnapshot>,
+	pub video_surfaces:     Vec<RenderSurfaceVideoSurfaceSnapshot>,
+	pub image_surfaces:     Vec<RenderSurfaceImageSnapshot>,
+	pub dirty_rows:         Vec<u32>,
+	pub cursor:             Option<RenderSurfaceCursorSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +67,17 @@ pub struct RenderSurfaceCursorSnapshot {
 	pub x:       u32,
 	pub y:       u32,
 	pub focused: bool,
+	pub shape:   RenderSurfaceCursorShape,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSurfaceCursorShape {
+	#[default]
+	Block,
+	Underline,
+	Beam,
+	HollowBlock,
+	Hidden,
 }
 
 pub trait RenderSurfaceSnapshotProvider {

@@ -10,7 +10,7 @@ use alacritty_terminal::{
 	event::{Event, EventListener},
 	grid::Dimensions,
 	term::{Config, Term, TermDamage, TermMode, cell::Flags, color::Colors},
-	vte::ansi::{Color, NamedColor, Processor, Rgb, StdSyncHandler},
+	vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_ports::{
 	pty_host::{
@@ -23,7 +23,10 @@ use germinal_ports::{
 	rendering::{
 		frame_plan_builder::{RgbColorDto, TextStyleDto},
 		render_target_id::RenderTargetId,
-		surface_snapshot::{RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot},
+		surface_snapshot::{
+			RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+			RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+		},
 	},
 	seq::Seq,
 };
@@ -188,10 +191,16 @@ impl AlacrittyTerminalStore {
 		let dirty_rows = dirty_rows_of(state.term.damage(), state.size.screen_lines());
 
 		let placeholder_cells = kitty_placeholder_cells(&state.term);
+		let renderable = state.term.renderable_content();
+		let default_background = renderable.colors[NamedColor::Background]
+			.map(rgb_to_dto)
+			.or_else(|| dominant_background_of(&rows))
+			.unwrap_or(RgbColorDto::new(0, 0, 0));
 
 		RenderSurfaceSnapshot {
 			target_id: render_target_id,
 			latest_seq: state.latest_seq,
+			default_background,
 			rows,
 			video_surfaces: Vec::new(),
 			image_surfaces: state.graphics.snapshots(&placeholder_cells),
@@ -295,6 +304,32 @@ impl AlacrittyTerminalStore {
 		let col = u32::try_from(point.column.0).ok()?;
 
 		Some((col, row))
+	}
+
+	pub fn cursor_snapshot(
+		&self,
+		render_target_id: RenderTargetId,
+	) -> Option<RenderSurfaceCursorSnapshot> {
+		let inner = self.inner.borrow();
+		let state = inner.get(&render_target_id)?;
+		if !state.term.mode().contains(TermMode::SHOW_CURSOR) {
+			return None;
+		}
+
+		let shape = match state.term.cursor_style().shape {
+			CursorShape::Block => RenderSurfaceCursorShape::Block,
+			CursorShape::Underline => RenderSurfaceCursorShape::Underline,
+			CursorShape::Beam => RenderSurfaceCursorShape::Beam,
+			CursorShape::HollowBlock => RenderSurfaceCursorShape::HollowBlock,
+			CursorShape::Hidden => RenderSurfaceCursorShape::Hidden,
+		};
+		let point = state.term.grid().cursor.point;
+		Some(RenderSurfaceCursorSnapshot {
+			x: u32::try_from(point.column.0).ok()?,
+			y: u32::try_from(point.line.0).ok()?,
+			focused: true,
+			shape,
+		})
 	}
 }
 
@@ -696,6 +731,27 @@ fn style_has_visible_content(style: TextStyleDto) -> bool {
 	style.background.is_some() || style.underline || style.bold || style.italic
 }
 
+fn dominant_background_of(rows: &[RenderSurfaceRowSnapshot]) -> Option<RgbColorDto> {
+	let mut weights = Vec::<(RgbColorDto, u64)>::new();
+	for run in rows.iter().flat_map(|row| &row.runs) {
+		let Some(background) = run.style.background else {
+			continue;
+		};
+		let cell_width = run
+			.text
+			.chars()
+			.map(terminal_char_cell_width)
+			.map(u64::from)
+			.sum::<u64>();
+		if let Some((_, weight)) = weights.iter_mut().find(|(color, _)| *color == background) {
+			*weight += cell_width;
+		} else {
+			weights.push((background, cell_width));
+		}
+	}
+	weights.into_iter().max_by_key(|(_, weight)| *weight).map(|(color, _)| color)
+}
+
 fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextStyleDto {
 	let mut foreground = color_to_rgb(fg, colors);
 	let mut background = color_to_rgb(bg, colors);
@@ -901,6 +957,24 @@ mod tests {
 	}
 
 	#[test]
+	fn exports_decscusr_cursor_shape() {
+		let store = AlacrittyTerminalStore::new();
+		let target_id = RenderTargetId::new(46);
+		store.apply_bytes(target_id, Seq::new(1), b"\x1b[6 q");
+
+		assert_eq!(
+			store.cursor_snapshot(target_id).unwrap().shape,
+			RenderSurfaceCursorShape::Beam,
+		);
+
+		store.apply_bytes(target_id, Seq::new(2), b"\x1b[4 q");
+		assert_eq!(
+			store.cursor_snapshot(target_id).unwrap().shape,
+			RenderSurfaceCursorShape::Underline,
+		);
+	}
+
+	#[test]
 	fn buffers_synchronized_update_until_end_or_timeout() {
 		let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 4));
 		let target_id = RenderTargetId::new(45);
@@ -1095,6 +1169,17 @@ mod tests {
 		assert!(!run.text.is_empty());
 		assert!(run.text.chars().all(|c| c == ' '));
 		assert_eq!(run.style.background, Some(RgbColorDto::new(0, 0, 0)));
+	}
+
+	#[test]
+	fn uses_dominant_application_background_for_surface_padding() {
+		let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(4, 2));
+		let target_id = RenderTargetId::new(1);
+
+		store.apply_bytes(target_id, Seq::new(1), b"\x1b[48;2;30;30;47m\x1b[2J");
+		let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+
+		assert_eq!(snapshot.default_background, RgbColorDto::new(30, 30, 47));
 	}
 
 	#[test]

@@ -698,7 +698,12 @@ fn present_frame<Dispatch>(
 }
 
 fn cursor_snapshot(cursor: GNativeFrameCursor) -> RenderSurfaceCursorSnapshot {
-	RenderSurfaceCursorSnapshot { x: cursor.x, y: cursor.y, focused: true }
+	RenderSurfaceCursorSnapshot {
+		x: cursor.x,
+		y: cursor.y,
+		focused: true,
+		shape: Default::default(),
+	}
 }
 
 fn dispatch_exit_gnative<Dispatch>(gshell_id: GShellId, dispatcher: &Dispatch)
