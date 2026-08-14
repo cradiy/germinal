@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, process::Command};
+use std::{cell::RefCell, collections::HashMap, process::Command, time::Duration};
 
 mod boilerplate;
 mod config;
@@ -870,6 +870,12 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.consume_latest_terminal_snapshot();
                 self.update_ime_cursor_area();
                 self.request_redraw();
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::Bell { .. }) => {
+                self.ring_bell(
+                    Duration::from_millis(self.config.bell.duration_ms),
+                    self.config.bell.urgent_on_unfocused && !self.window_focused,
+                );
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged { gshell_id, title }) => {
                 self.update_gshell_title(gshell_id, title);

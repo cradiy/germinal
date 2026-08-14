@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
+    time::Duration,
 };
 
 use germinal_ports::{
@@ -222,6 +223,14 @@ where
             .window_runtime_mut()
             .expect("window runtime must be initialized before use")
             .set_window_title(title);
+    }
+
+    fn ring_bell(&mut self, visual_duration: Duration, request_attention: bool) {
+        self.prj_ref_mut()
+            .window_runtime_mut()
+            .expect("window runtime must be initialized before use")
+            .ring_bell(visual_duration, request_attention);
+        self.prj_ref_mut().as_mut().redraw_pending = true;
     }
 
     fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {

@@ -32,7 +32,7 @@ use thiserror::Error;
 use tracing::info;
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
-    window::{Window, WindowId},
+    window::{UserAttentionType, Window, WindowId},
 };
 
 #[cfg(target_os = "linux")]
@@ -55,6 +55,7 @@ use crate::rendering::pty_surface::{
     },
     video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
     video_surface_registry::WgpuVideoSurfaceRegistry,
+    visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
 
@@ -105,6 +106,7 @@ pub struct WgpuTerminalWindowRuntime {
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     needs_redraw: bool,
+    visual_bell_until: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
 }
 
@@ -232,7 +234,12 @@ impl WgpuTerminalWindowRuntime {
         )?;
         let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);
         let divider_renderer = WgpuWorkspaceDividerRenderer::new(&device, surface_config.format);
-        let presenter = WgpuTerminalSurfaceFramePresenter::new(frame_renderer, divider_renderer);
+        let visual_bell_renderer = WgpuVisualBellRenderer::new(&device, surface_config.format);
+        let presenter = WgpuTerminalSurfaceFramePresenter::new(
+            frame_renderer,
+            divider_renderer,
+            visual_bell_renderer,
+        );
 
         Ok(Self {
             window,
@@ -249,6 +256,7 @@ impl WgpuTerminalWindowRuntime {
             size_info,
             profile,
             needs_redraw: false,
+            visual_bell_until: None,
             perf: WgpuTerminalRenderPerf::new(),
         })
     }
@@ -360,6 +368,22 @@ impl WgpuTerminalWindowRuntime {
         self.window.set_title(title);
     }
 
+    pub fn ring_bell(&mut self, visual_duration: Duration, request_attention: bool) {
+        if !visual_duration.is_zero() {
+            let until = Instant::now() + visual_duration;
+            self.visual_bell_until = Some(
+                self.visual_bell_until
+                    .map_or(until, |current| current.max(until)),
+            );
+            self.request_redraw();
+        }
+
+        if request_attention {
+            self.window
+                .request_user_attention(Some(UserAttentionType::Informational));
+        }
+    }
+
     pub fn resize_surface_size_info(
         &mut self,
         window_size: TerminalWindowSize,
@@ -409,6 +433,7 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
+        let visual_bell = self.visual_bell_frame(Instant::now());
         let mut surfaces = self
             .workspace_layout
             .iter()
@@ -470,6 +495,7 @@ impl WgpuTerminalWindowRuntime {
                 queue: &self.queue,
                 pipeline: &self.pipeline,
                 surfaces: &surfaces,
+                visual_bell,
             }) {
             Ok(result) => {
                 self.perf.record_frame(row_count, run_count, &result);
@@ -479,6 +505,20 @@ impl WgpuTerminalWindowRuntime {
                 self.handle_present_error(error);
             }
         }
+    }
+
+    fn visual_bell_frame(&mut self, now: Instant) -> Option<WgpuVisualBellFrame> {
+        let until = self.visual_bell_until?;
+        if now >= until {
+            self.visual_bell_until = None;
+            return None;
+        }
+
+        self.request_redraw();
+        Some(WgpuVisualBellFrame::new(
+            self.surface_config.width,
+            self.surface_config.height,
+        ))
     }
 
     fn handle_present_error(&mut self, error: WgpuTerminalSurfaceFramePresentError) {
@@ -1041,6 +1081,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 
     fn set_window_title(&mut self, title: &str) {
         WgpuTerminalWindowRuntime::set_window_title(self, title);
+    }
+
+    fn ring_bell(&mut self, visual_duration: Duration, request_attention: bool) {
+        WgpuTerminalWindowRuntime::ring_bell(self, visual_duration, request_attention);
     }
 
     fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {

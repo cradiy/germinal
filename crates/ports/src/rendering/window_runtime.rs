@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
     rendering::{
@@ -14,6 +16,7 @@ pub trait ITerminalWindowRuntime {
     fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>);
     fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>);
     fn set_window_title(&mut self, title: &str);
+    fn ring_bell(&mut self, visual_duration: Duration, request_attention: bool);
     fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;
     fn terminal_size_info_for_window_size(
         &self,

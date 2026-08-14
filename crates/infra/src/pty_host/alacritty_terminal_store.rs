@@ -99,13 +99,19 @@ impl Dimensions for AlacrittyTermSize {
 struct PtyWriteEventListener {
     pending_writes: Sender<Vec<u8>>,
     pending_titles: Sender<Option<String>>,
+    pending_bells: Sender<()>,
 }
 
 impl PtyWriteEventListener {
-    fn new(pending_writes: Sender<Vec<u8>>, pending_titles: Sender<Option<String>>) -> Self {
+    fn new(
+        pending_writes: Sender<Vec<u8>>,
+        pending_titles: Sender<Option<String>>,
+        pending_bells: Sender<()>,
+    ) -> Self {
         Self {
             pending_writes,
             pending_titles,
+            pending_bells,
         }
     }
 }
@@ -121,6 +127,9 @@ impl EventListener for PtyWriteEventListener {
             }
             Event::ResetTitle => {
                 let _ = self.pending_titles.send(None);
+            }
+            Event::Bell => {
+                let _ = self.pending_bells.send(());
             }
             _ => {}
         }
@@ -641,6 +650,19 @@ impl AlacrittyTerminalStore {
         Some(state.title.clone())
     }
 
+    pub fn take_bell(&self, render_target_id: RenderTargetId) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+
+        let mut rang = false;
+        while state.pending_bell_rx.try_recv().is_ok() {
+            rang = true;
+        }
+        rang
+    }
+
     pub fn input_modes(&self, render_target_id: RenderTargetId) -> TerminalInputModes {
         let inner = self.inner.borrow();
         let Some(state) = inner.get(&render_target_id) else {
@@ -1019,6 +1041,7 @@ pub struct AlacrittyTermState {
     pending_write_tx: Sender<Vec<u8>>,
     pending_write_rx: Receiver<Vec<u8>>,
     pending_title_rx: Receiver<Option<String>>,
+    pending_bell_rx: Receiver<()>,
     title: Option<String>,
     title_changed: bool,
     processor: Processor<StdSyncHandler>,
@@ -1036,7 +1059,9 @@ impl AlacrittyTermState {
     fn new(size: AlacrittyTermSize, scrollback_history: usize) -> Self {
         let (pending_write_tx, pending_write_rx) = mpsc::channel();
         let (pending_title_tx, pending_title_rx) = mpsc::channel();
-        let event_listener = PtyWriteEventListener::new(pending_write_tx.clone(), pending_title_tx);
+        let (pending_bell_tx, pending_bell_rx) = mpsc::channel();
+        let event_listener =
+            PtyWriteEventListener::new(pending_write_tx.clone(), pending_title_tx, pending_bell_tx);
         let config = Config {
             scrolling_history: scrollback_history,
             ..Config::default()
@@ -1050,6 +1075,7 @@ impl AlacrittyTermState {
             pending_write_tx,
             pending_write_rx,
             pending_title_rx,
+            pending_bell_rx,
             title: None,
             title_changed: false,
             processor: Processor::<StdSyncHandler>::new(),
@@ -1785,6 +1811,17 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(2), b"\x1b]2;\x1b\\");
         assert_eq!(store.take_title_change(target_id), Some(None));
+    }
+
+    #[test]
+    fn captures_terminal_bell_events() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(83);
+
+        store.apply_bytes(target_id, Seq::new(1), b"before\x07after");
+
+        assert!(store.take_bell(target_id));
+        assert!(!store.take_bell(target_id));
     }
 
     #[test]

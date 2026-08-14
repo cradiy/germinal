@@ -49,6 +49,9 @@ pub enum GShellRuntimeEvent {
         gshell_id: GShellId,
         hyperlinks: Vec<TerminalHyperlink>,
     },
+    Bell {
+        gshell_id: GShellId,
+    },
     SelectionText {
         gshell_id: GShellId,
         text: Option<String>,

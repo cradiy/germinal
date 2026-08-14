@@ -29,5 +29,6 @@ pub mod video_surface_frame;
 pub mod video_surface_registry;
 pub mod video_surface_renderer;
 pub mod viewport_bind_group;
+pub mod visual_bell_renderer;
 pub mod window_runtime;
 pub mod workspace_divider_renderer;

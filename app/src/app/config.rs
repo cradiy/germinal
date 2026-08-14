@@ -58,6 +58,7 @@ pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
     pub scrolling: ScrollingConfig,
+    pub bell: BellConfig,
     pub tabs: TabsConfig,
     pub keyboard: KeyboardConfig,
     pub logging: LoggingConfig,
@@ -85,9 +86,26 @@ impl Default for GerminalConfig {
             window: WindowConfig::default(),
             font: FontConfig::default(),
             scrolling: ScrollingConfig::default(),
+            bell: BellConfig::default(),
             tabs: TabsConfig::default(),
             keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    pub duration_ms: u64,
+    pub urgent_on_unfocused: bool,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            duration_ms: 150,
+            urgent_on_unfocused: true,
         }
     }
 }
@@ -391,6 +409,8 @@ mod tests {
             Some(TerminalFontFamily::default().name())
         );
         assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
+        assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
+        assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
         assert_eq!(
             value["keyboard"]["bindings"][0]["action"].as_str(),
@@ -409,6 +429,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.tabs.position, TabBarPosition::Top);
+    }
+
+    #[test]
+    fn parses_visual_bell_configuration() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [bell]
+            duration_ms = 240
+            urgent_on_unfocused = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.bell.duration_ms, 240);
+        assert!(!config.bell.urgent_on_unfocused);
     }
 
     #[test]

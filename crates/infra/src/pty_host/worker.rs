@@ -498,6 +498,13 @@ where
                     title,
                 }));
         }
+        if self.terminal_store.take_bell(self.target_id) {
+            let _ = self
+                .proxy
+                .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Bell {
+                    gshell_id: self.gshell_id,
+                }));
+        }
 
         if enter_gnative {
             let _ = self
@@ -1245,6 +1252,46 @@ mod tests {
                 .expect("frame-ready event should arrive"),
             RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, .. })
                 if gshell_id == GShellId::new(5)
+        ));
+    }
+
+    #[test]
+    fn terminal_worker_dispatches_bell_event() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(8),
+            TerminalGridSize::new(80, 24),
+            snapshot_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(b"bell\x07".to_vec()))
+            .expect("terminal bell output should send");
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("surface snapshot should arrive");
+
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("bell event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::Bell {
+                gshell_id: GShellId::new(8),
+            })
+        );
+        assert!(matches!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("frame-ready event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, .. })
+                if gshell_id == GShellId::new(8)
         ));
     }
 

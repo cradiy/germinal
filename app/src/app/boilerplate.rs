@@ -385,6 +385,10 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).set_window_title(title)
     }
 
+    fn ring_bell(&mut self, visual_duration: std::time::Duration, request_attention: bool) {
+        RenderService::inj_ref_mut(self).ring_bell(visual_duration, request_attention)
+    }
+
     fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
         RenderService::inj_ref_mut(self).resize_window_size_info(window_size)
     }
