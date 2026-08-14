@@ -17,6 +17,7 @@ use germinal_ports::{
         runtime_event_dispatcher::IRuntimeEventDispatcher,
     },
     pty_host::{
+        cursor_style::TerminalCursorStyle,
         hyperlink::TerminalHyperlink,
         pty_input::{PtyInput, PtyInputSender},
         snapshot::TerminalSnapshotProvider,
@@ -52,6 +53,7 @@ struct TerminalWorkerRegistration<Dispatch> {
     gshell_id: GShellId,
     initial_size: TerminalGridSize,
     scrollback_history: usize,
+    cursor_style: TerminalCursorStyle,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
     input_rx: Receiver<TerminalWorkerInput>,
@@ -79,6 +81,7 @@ where
                 registration.gshell_id,
                 to_alacritty_term_size(registration.initial_size),
                 registration.scrollback_history,
+                registration.cursor_style,
                 registration.surface_snapshot_tx,
                 registration.snapshot_wake_pending,
             ),
@@ -178,6 +181,7 @@ where
         gshell_id: GShellId,
         initial_size: TerminalGridSize,
         scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
@@ -189,6 +193,7 @@ where
             gshell_id,
             initial_size,
             scrollback_history,
+            cursor_style,
             surface_snapshot_tx,
             snapshot_wake_pending,
             input_rx: rx,
@@ -296,13 +301,15 @@ where
         gshell_id: GShellId,
         initial_size: AlacrittyTermSize,
         scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Self {
         let target_id = RenderTargetId::new(gshell_id.value());
-        let terminal_store = AlacrittyTerminalStore::with_size_and_scrollback_history(
+        let terminal_store = AlacrittyTerminalStore::with_size_scrollback_and_cursor_style(
             initial_size,
             scrollback_history,
+            cursor_style,
         );
 
         Self {
@@ -937,6 +944,7 @@ fn to_alacritty_term_size(size: TerminalGridSize) -> AlacrittyTermSize {
 pub struct PlatformTerminalWorkerBackend<Dispatch> {
     proxy: Dispatch,
     scrollback_history: usize,
+    cursor_style: TerminalCursorStyle,
     pool: OnceLock<TerminalWorkerPool<Dispatch>>,
 }
 
@@ -944,10 +952,15 @@ impl<Dispatch> PlatformTerminalWorkerBackend<Dispatch>
 where
     Dispatch: IRuntimeEventDispatcher,
 {
-    pub fn new(proxy: Dispatch, scrollback_history: usize) -> Self {
+    pub fn new(
+        proxy: Dispatch,
+        scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
+    ) -> Self {
         Self {
             proxy,
             scrollback_history,
+            cursor_style,
             pool: OnceLock::new(),
         }
     }
@@ -959,6 +972,7 @@ where
         Self {
             proxy,
             scrollback_history,
+            cursor_style: TerminalCursorStyle::default(),
             pool,
         }
     }
@@ -989,6 +1003,7 @@ where
             gshell_id,
             initial_size,
             self.scrollback_history,
+            self.cursor_style,
             surface_snapshot_tx,
             snapshot_wake_pending,
         )
@@ -1024,7 +1039,7 @@ mod tests {
         rendering::surface_snapshot::RenderSurfaceSnapshot,
     };
 
-    use super::{PlatformTerminalWorkerBackend, TerminalWorkerRuntime};
+    use super::{PlatformTerminalWorkerBackend, TerminalCursorStyle, TerminalWorkerRuntime};
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
 
@@ -1419,6 +1434,7 @@ mod tests {
             GShellId::new(5),
             super::AlacrittyTermSize::new(20, 4),
             TEST_SCROLLBACK_HISTORY,
+            TerminalCursorStyle::default(),
             snapshot_tx,
             wake_pending.clone(),
         );

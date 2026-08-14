@@ -4,6 +4,7 @@ use std::{
 };
 
 use germinal_ports::pty_host::{
+    cursor_style::{TerminalCursorShape, TerminalCursorStyle},
     font_family::TerminalFontFamily,
     font_size::TerminalFontSize,
     profile::TerminalProfile,
@@ -57,6 +58,7 @@ impl AppPaths {
 pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
+    pub cursor: CursorConfig,
     pub scrolling: ScrollingConfig,
     pub bell: BellConfig,
     pub tabs: TabsConfig,
@@ -78,6 +80,10 @@ impl GerminalConfig {
             size_config,
         )
     }
+
+    pub fn terminal_cursor_style(&self) -> TerminalCursorStyle {
+        TerminalCursorStyle::new(self.cursor.shape.into(), self.cursor.blinking)
+    }
 }
 
 impl Default for GerminalConfig {
@@ -85,11 +91,49 @@ impl Default for GerminalConfig {
         Self {
             window: WindowConfig::default(),
             font: FontConfig::default(),
+            cursor: CursorConfig::default(),
             scrolling: ScrollingConfig::default(),
             bell: BellConfig::default(),
             tabs: TabsConfig::default(),
             keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CursorConfig {
+    pub shape: CursorShape,
+    pub blinking: bool,
+    pub blink_interval_ms: u64,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            shape: CursorShape::Block,
+            blinking: false,
+            blink_interval_ms: 750,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Beam,
+}
+
+impl From<CursorShape> for TerminalCursorShape {
+    fn from(shape: CursorShape) -> Self {
+        match shape {
+            CursorShape::Block => Self::Block,
+            CursorShape::Underline => Self::Underline,
+            CursorShape::Beam => Self::Beam,
         }
     }
 }
@@ -393,7 +437,10 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use germinal_ports::pty_host::font_family::TerminalFontFamily;
+    use germinal_ports::pty_host::{
+        cursor_style::{TerminalCursorShape, TerminalCursorStyle},
+        font_family::TerminalFontFamily,
+    };
     use germinal_ports::rendering::tab_bar::TabBarPosition;
 
     use super::{GerminalConfig, KeyboardAction};
@@ -409,6 +456,9 @@ mod tests {
             Some(TerminalFontFamily::default().name())
         );
         assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
+        assert_eq!(value["cursor"]["shape"].as_str(), Some("block"));
+        assert_eq!(value["cursor"]["blinking"].as_bool(), Some(false));
+        assert_eq!(value["cursor"]["blink_interval_ms"].as_integer(), Some(750));
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
@@ -416,6 +466,25 @@ mod tests {
             value["keyboard"]["bindings"][0]["action"].as_str(),
             Some("ToggleViMode")
         );
+    }
+
+    #[test]
+    fn parses_cursor_configuration() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [cursor]
+            shape = "beam"
+            blinking = true
+            blink_interval_ms = 320
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.terminal_cursor_style(),
+            TerminalCursorStyle::new(TerminalCursorShape::Beam, true)
+        );
+        assert_eq!(config.cursor.blink_interval_ms, 320);
     }
 
     #[test]

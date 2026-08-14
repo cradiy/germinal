@@ -1,5 +1,6 @@
 pub mod cell_size;
 pub mod content_size;
+pub mod cursor_style;
 pub mod font_config;
 pub mod font_family;
 pub mod font_size;

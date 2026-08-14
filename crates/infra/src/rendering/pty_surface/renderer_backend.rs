@@ -113,6 +113,7 @@ impl RendererBackend for WgpuRendererBackend {
                         y,
                         focused: cursor.focused,
                         shape: RenderSurfaceCursorShape::Beam,
+                        blinking: false,
                     },
                     config,
                 );
@@ -378,7 +379,7 @@ fn append_cursor_quads(
     cursor: RenderSurfaceCursorSnapshot,
     config: WgpuRendererConfig,
 ) {
-    if !cursor.focused {
+    if !cursor.focused || (cursor.blinking && !config.blinking_cursor_visible) {
         return;
     }
 
@@ -461,8 +462,14 @@ pub struct WgpuRendererConfig {
     pub content_height_px: u32,
     pub grid_columns: u32,
     pub grid_rows: u32,
+    pub blinking_cursor_visible: bool,
 }
 impl WgpuRendererConfig {
+    pub fn with_blinking_cursor_visible(mut self, visible: bool) -> Self {
+        self.blinking_cursor_visible = visible;
+        self
+    }
+
     pub fn from_render_viewport(viewport: TerminalRenderViewport) -> Self {
         let cell_size = viewport.cell_size();
         Self {
@@ -474,6 +481,7 @@ impl WgpuRendererConfig {
             content_height_px: viewport.grid_height_px(),
             grid_columns: viewport.columns() as u32,
             grid_rows: viewport.rows() as u32,
+            blinking_cursor_visible: true,
         }
     }
 
@@ -489,6 +497,7 @@ impl WgpuRendererConfig {
             content_height_px: size_info.content_height_px(),
             grid_columns: viewport.columns() as u32,
             grid_rows: viewport.rows() as u32,
+            blinking_cursor_visible: true,
         }
     }
 
@@ -557,6 +566,7 @@ impl Default for WgpuRendererConfig {
             content_height_px: 16,
             grid_columns: 1,
             grid_rows: 1,
+            blinking_cursor_visible: true,
         }
     }
 }
@@ -1000,6 +1010,7 @@ mod tests {
                 y: 3,
                 focused: true,
                 shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
             }),
             ime_preedit: None,
         });
@@ -1029,6 +1040,7 @@ mod tests {
                     y: 3,
                     focused: true,
                     shape,
+                    blinking: false,
                 }),
                 ime_preedit: None,
             });
@@ -1065,6 +1077,34 @@ mod tests {
                 y: 3,
                 focused: false,
                 shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: None,
+        });
+
+        assert!(backend.state().geometric_quads().is_empty());
+    }
+
+    #[test]
+    fn blinking_cursor_is_hidden_during_the_off_phase() {
+        let backend = WgpuRendererBackend::new(
+            WgpuRendererConfig::default().with_blinking_cursor_visible(false),
+        );
+
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 0,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: true,
             }),
             ime_preedit: None,
         });
@@ -1083,6 +1123,7 @@ mod tests {
             content_height_px: 32,
             grid_columns: 4,
             grid_rows: 2,
+            blinking_cursor_visible: true,
         });
         let default_background = RgbColorDto::new(0, 0, 0);
 
@@ -1099,6 +1140,7 @@ mod tests {
                 y: 0,
                 focused: true,
                 shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
             }),
             ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
                 text: "你a".to_string(),
@@ -1155,6 +1197,7 @@ mod tests {
             content_height_px: 16,
             grid_columns: 1,
             grid_rows: 1,
+            blinking_cursor_visible: true,
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {
@@ -1198,6 +1241,7 @@ mod tests {
             content_height_px: 16,
             grid_columns: 1,
             grid_rows: 1,
+            blinking_cursor_visible: true,
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {
@@ -1240,6 +1284,7 @@ mod tests {
             content_height_px: 16,
             grid_columns: 1,
             grid_rows: 1,
+            blinking_cursor_visible: true,
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {

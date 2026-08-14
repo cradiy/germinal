@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, process::Command, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 mod boilerplate;
 mod config;
@@ -58,8 +63,8 @@ use tracing::{debug, error, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
     window::WindowId,
 };
@@ -131,6 +136,8 @@ impl App {
         );
         let terminal_profile = config.terminal_profile();
         let scrollback_history = config.scrolling.history;
+        let terminal_cursor_style = config.terminal_cursor_style();
+        let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
 
         let app = Self {
@@ -148,10 +155,12 @@ impl App {
             terminal_worker_backend: PlatformTerminalWorkerBackend::new(
                 runtime_event_dispatcher,
                 scrollback_history,
+                terminal_cursor_style,
             ),
             render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(
                 terminal_profile,
                 window_title,
+                cursor_blink_interval,
             ),
             render_runtime: None,
             render_window_id: None,
@@ -814,6 +823,17 @@ impl App {
 }
 
 impl ApplicationHandler<RuntimeEvent> for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+        if self
+            .render_runtime
+            .as_ref()
+            .and_then(WgpuTerminalWindowRuntime::next_cursor_blink_deadline)
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.ensure_window_runtime(event_loop) {
             error!(error = %error, "failed to initialize Germinal window runtime");
@@ -1079,9 +1099,15 @@ impl ApplicationHandler<RuntimeEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.update_ime_cursor_area();
         self.flush_redraw_request();
+        let control_flow = self
+            .render_runtime
+            .as_ref()
+            .and_then(WgpuTerminalWindowRuntime::next_cursor_blink_deadline)
+            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        event_loop.set_control_flow(control_flow);
     }
 }
 

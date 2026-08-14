@@ -739,6 +739,7 @@ mod tests {
                 content_height_px: 80,
                 grid_columns: 18,
                 grid_rows: 5,
+                blinking_cursor_visible: true,
             },
         )
         .expect("expected fitted rect");
@@ -806,6 +807,7 @@ mod tests {
                 content_height_px: 600,
                 grid_columns: 100,
                 grid_rows: 50,
+                blinking_cursor_visible: true,
             },
         );
 

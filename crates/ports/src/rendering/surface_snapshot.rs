@@ -116,6 +116,7 @@ pub struct RenderSurfaceCursorSnapshot {
     pub y: u32,
     pub focused: bool,
     pub shape: RenderSurfaceCursorShape,
+    pub blinking: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +145,7 @@ mod tests {
             y: 0,
             focused: true,
             shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
         }
     }
 

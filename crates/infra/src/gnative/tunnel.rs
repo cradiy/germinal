@@ -759,6 +759,7 @@ fn cursor_snapshot(cursor: GNativeFrameCursor) -> RenderSurfaceCursorSnapshot {
         y: cursor.y,
         focused: true,
         shape: Default::default(),
+        blinking: false,
     }
 }
 

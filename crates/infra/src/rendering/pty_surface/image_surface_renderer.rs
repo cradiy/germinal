@@ -606,6 +606,7 @@ mod tests {
                 content_height_px: 100,
                 grid_columns: 10,
                 grid_rows: 10,
+                blinking_cursor_visible: true,
             },
         )
         .unwrap();
@@ -634,6 +635,7 @@ mod tests {
                 content_height_px: 100,
                 grid_columns: 10,
                 grid_rows: 10,
+                blinking_cursor_visible: true,
             },
         )
         .unwrap();

@@ -20,7 +20,8 @@ use germinal_ports::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
         render_target_id::RenderTargetId,
         surface_snapshot::{
-            RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+            RenderSurfaceCursorShape, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
+            RenderSurfaceSnapshot,
         },
         tab_bar::{TabBarPosition, TabBarSnapshot},
         window_runtime::ITerminalWindowRuntime,
@@ -107,7 +108,19 @@ pub struct WgpuTerminalWindowRuntime {
     profile: TerminalProfile,
     needs_redraw: bool,
     visual_bell_until: Option<Instant>,
+    cursor_blink_interval: Duration,
+    cursor_blink_signature: Option<CursorBlinkSignature>,
+    cursor_blink_epoch: Instant,
+    next_cursor_blink_at: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorBlinkSignature {
+    target_id: RenderTargetId,
+    x: u32,
+    y: u32,
+    shape: RenderSurfaceCursorShape,
 }
 
 fn ime_cursor_area(
@@ -153,13 +166,19 @@ fn ime_cursor_area(
 pub struct WgpuTerminalWindowRuntimeFactory {
     profile: TerminalProfile,
     base_title: String,
+    cursor_blink_interval: Duration,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
-    pub fn new(profile: TerminalProfile, base_title: String) -> Self {
+    pub fn new(
+        profile: TerminalProfile,
+        base_title: String,
+        cursor_blink_interval: Duration,
+    ) -> Self {
         Self {
             profile,
             base_title,
+            cursor_blink_interval,
         }
     }
 
@@ -171,6 +190,7 @@ impl WgpuTerminalWindowRuntimeFactory {
             window,
             self.profile.clone(),
             self.base_title.clone(),
+            self.cursor_blink_interval,
         ))
     }
 }
@@ -180,6 +200,7 @@ impl WgpuTerminalWindowRuntime {
         window: Arc<Window>,
         profile: TerminalProfile,
         base_title: String,
+        cursor_blink_interval: Duration,
     ) -> Result<Self, WindowRuntimeError> {
         let instance = wgpu::Instance::default();
 
@@ -241,6 +262,7 @@ impl WgpuTerminalWindowRuntime {
             visual_bell_renderer,
         );
 
+        let now = Instant::now();
         Ok(Self {
             window,
             base_title,
@@ -257,6 +279,10 @@ impl WgpuTerminalWindowRuntime {
             profile,
             needs_redraw: false,
             visual_bell_until: None,
+            cursor_blink_interval: cursor_blink_interval.max(Duration::from_millis(1)),
+            cursor_blink_signature: None,
+            cursor_blink_epoch: now,
+            next_cursor_blink_at: None,
             perf: WgpuTerminalRenderPerf::new(),
         })
     }
@@ -433,7 +459,9 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
-        let visual_bell = self.visual_bell_frame(Instant::now());
+        let now = Instant::now();
+        let visual_bell = self.visual_bell_frame(now);
+        let blinking_cursor_visible = self.blinking_cursor_frame(now);
         let mut surfaces = self
             .workspace_layout
             .iter()
@@ -448,7 +476,8 @@ impl WgpuTerminalWindowRuntime {
                     .with_origin(placement.x_px, placement.y_px)
                     .with_load_op(WgpuTerminalLoadOp::Load),
                     surface_snapshot,
-                    renderer_config: WgpuRendererConfig::from(size_info),
+                    renderer_config: WgpuRendererConfig::from(size_info)
+                        .with_blinking_cursor_visible(blinking_cursor_visible),
                 })
             })
             .collect::<Vec<_>>();
@@ -474,7 +503,8 @@ impl WgpuTerminalWindowRuntime {
                 )
                 .with_load_op(WgpuTerminalLoadOp::Load),
                 surface_snapshot: &tab_bar_surface.snapshot,
-                renderer_config: WgpuRendererConfig::from(size_info),
+                renderer_config: WgpuRendererConfig::from(size_info)
+                    .with_blinking_cursor_visible(blinking_cursor_visible),
             });
         }
         let row_count = surfaces
@@ -507,6 +537,40 @@ impl WgpuTerminalWindowRuntime {
         }
     }
 
+    pub fn next_cursor_blink_deadline(&self) -> Option<Instant> {
+        self.next_cursor_blink_at
+    }
+
+    fn blinking_cursor_frame(&mut self, now: Instant) -> bool {
+        let signature = self.workspace_layout.iter().find_map(|placement| {
+            let cursor = self.surface_snapshots.get(&placement.target_id)?.cursor?;
+            (cursor.focused && cursor.blinking && cursor.shape != RenderSurfaceCursorShape::Hidden)
+                .then_some(CursorBlinkSignature {
+                    target_id: placement.target_id,
+                    x: cursor.x,
+                    y: cursor.y,
+                    shape: cursor.shape,
+                })
+        });
+
+        let Some(signature) = signature else {
+            self.cursor_blink_signature = None;
+            self.next_cursor_blink_at = None;
+            return true;
+        };
+
+        if self.cursor_blink_signature != Some(signature) {
+            self.cursor_blink_signature = Some(signature);
+            self.cursor_blink_epoch = now;
+        }
+
+        let (visible, next_deadline) =
+            cursor_blink_phase(self.cursor_blink_epoch, now, self.cursor_blink_interval);
+        self.next_cursor_blink_at = Some(next_deadline);
+
+        visible
+    }
+
     fn visual_bell_frame(&mut self, now: Instant) -> Option<WgpuVisualBellFrame> {
         let until = self.visual_bell_until?;
         if now >= until {
@@ -533,6 +597,17 @@ impl WgpuTerminalWindowRuntime {
             | WgpuTerminalSurfaceFramePresentError::Validation => {}
         }
     }
+}
+
+fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool, Instant) {
+    let elapsed = now.saturating_duration_since(epoch);
+    let interval_nanos = interval.as_nanos().max(1);
+    let phase = elapsed.as_nanos() / interval_nanos;
+    let phase_elapsed_nanos = elapsed.as_nanos() % interval_nanos;
+    let remaining_nanos = interval_nanos.saturating_sub(phase_elapsed_nanos);
+    let remaining = Duration::from_nanos(u64::try_from(remaining_nanos).unwrap_or(u64::MAX));
+
+    (phase % 2 == 0, now + remaining)
 }
 
 const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
@@ -1113,6 +1188,8 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use germinal_ports::{
         pty_host::{
             cell_size::TerminalCellSize,
@@ -1134,9 +1211,28 @@ mod tests {
 
     use super::{
         TAB_BAR_FALLBACK_BACKGROUND, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface,
-        ime_cursor_area,
+        cursor_blink_phase, ime_cursor_area,
     };
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
+
+    #[test]
+    fn cursor_blink_phase_alternates_and_reports_the_next_deadline() {
+        let epoch = Instant::now();
+        let interval = Duration::from_millis(750);
+
+        assert_eq!(
+            cursor_blink_phase(epoch, epoch, interval),
+            (true, epoch + interval)
+        );
+        assert_eq!(
+            cursor_blink_phase(epoch, epoch + interval, interval),
+            (false, epoch + interval * 2)
+        );
+        assert_eq!(
+            cursor_blink_phase(epoch, epoch + interval * 2, interval),
+            (true, epoch + interval * 3)
+        );
+    }
 
     #[test]
     fn ime_cursor_area_tracks_wrapped_preedit_in_a_partial_height_pane() {
@@ -1160,6 +1256,7 @@ mod tests {
                 y: 0,
                 focused: true,
                 shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
             }),
             ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
                 text: "你".to_string(),

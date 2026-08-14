@@ -15,10 +15,11 @@ use alacritty_terminal::{
         Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport,
         search::RegexSearch, viewport_to_point,
     },
-    vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
+    vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_ports::{
     pty_host::{
+        cursor_style::{TerminalCursorShape, TerminalCursorStyle},
         hyperlink::TerminalHyperlink,
         snapshot::{
             TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider,
@@ -141,6 +142,7 @@ pub struct AlacrittyTerminalStore {
     inner: Rc<RefCell<HashMap<RenderTargetId, AlacrittyTermState>>>,
     size: AlacrittyTermSize,
     scrollback_history: usize,
+    cursor_style: TerminalCursorStyle,
 }
 
 impl AlacrittyTerminalStore {
@@ -149,17 +151,34 @@ impl AlacrittyTerminalStore {
     }
 
     pub fn with_size(size: AlacrittyTermSize) -> Self {
-        Self::with_size_and_scrollback_history(size, Config::default().scrolling_history)
+        Self::with_size_scrollback_and_cursor_style(
+            size,
+            Config::default().scrolling_history,
+            TerminalCursorStyle::default(),
+        )
     }
 
     pub fn with_size_and_scrollback_history(
         size: AlacrittyTermSize,
         scrollback_history: usize,
     ) -> Self {
+        Self::with_size_scrollback_and_cursor_style(
+            size,
+            scrollback_history,
+            TerminalCursorStyle::default(),
+        )
+    }
+
+    pub fn with_size_scrollback_and_cursor_style(
+        size: AlacrittyTermSize,
+        scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
+    ) -> Self {
         Self {
             inner: Rc::new(RefCell::new(HashMap::new())),
             size,
             scrollback_history,
+            cursor_style,
         }
     }
 
@@ -175,9 +194,9 @@ impl AlacrittyTerminalStore {
     ) -> AlacrittyTermApplyStats {
         let mut inner = self.inner.borrow_mut();
 
-        let state = inner
-            .entry(render_target_id)
-            .or_insert_with(|| AlacrittyTermState::new(self.size, self.scrollback_history));
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(self.size, self.scrollback_history, self.cursor_style)
+        });
         let previous_selection = state.term.selection.clone();
 
         for event in state.graphics_decoder.feed(bytes) {
@@ -230,9 +249,9 @@ impl AlacrittyTerminalStore {
     ) -> AlacrittyTermApplyStats {
         let mut inner = self.inner.borrow_mut();
 
-        let state = inner
-            .entry(render_target_id)
-            .or_insert_with(|| AlacrittyTermState::new(size, self.scrollback_history));
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(size, self.scrollback_history, self.cursor_style)
+        });
 
         let previous_selection = state.term.selection.clone();
         state.resize(size);
@@ -325,9 +344,9 @@ impl AlacrittyTerminalStore {
 
     pub fn set_vi_mode(&self, render_target_id: RenderTargetId, seq: Seq, enabled: bool) -> bool {
         let mut inner = self.inner.borrow_mut();
-        let state = inner
-            .entry(render_target_id)
-            .or_insert_with(|| AlacrittyTermState::new(self.size, self.scrollback_history));
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(self.size, self.scrollback_history, self.cursor_style)
+        });
         if state.term.mode().contains(TermMode::VI) == enabled {
             return false;
         }
@@ -768,6 +787,7 @@ impl AlacrittyTerminalStore {
             y: u32::try_from(point.line).ok()?,
             focused: true,
             shape,
+            blinking: state.term.cursor_style().blinking,
         })
     }
 }
@@ -1056,7 +1076,11 @@ pub struct AlacrittyTermState {
 }
 
 impl AlacrittyTermState {
-    fn new(size: AlacrittyTermSize, scrollback_history: usize) -> Self {
+    fn new(
+        size: AlacrittyTermSize,
+        scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
+    ) -> Self {
         let (pending_write_tx, pending_write_rx) = mpsc::channel();
         let (pending_title_tx, pending_title_rx) = mpsc::channel();
         let (pending_bell_tx, pending_bell_rx) = mpsc::channel();
@@ -1064,6 +1088,14 @@ impl AlacrittyTermState {
             PtyWriteEventListener::new(pending_write_tx.clone(), pending_title_tx, pending_bell_tx);
         let config = Config {
             scrolling_history: scrollback_history,
+            default_cursor_style: CursorStyle {
+                shape: match cursor_style.shape {
+                    TerminalCursorShape::Block => CursorShape::Block,
+                    TerminalCursorShape::Underline => CursorShape::Underline,
+                    TerminalCursorShape::Beam => CursorShape::Beam,
+                },
+                blinking: cursor_style.blinking,
+            },
             ..Config::default()
         };
         let mut term = Term::new(config, &size, event_listener.clone());
@@ -2300,18 +2332,36 @@ mod tests {
     fn exports_decscusr_cursor_shape() {
         let store = AlacrittyTerminalStore::new();
         let target_id = RenderTargetId::new(46);
-        store.apply_bytes(target_id, Seq::new(1), b"\x1b[6 q");
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b[5 q");
 
-        assert_eq!(
-            store.cursor_snapshot(target_id).unwrap().shape,
-            RenderSurfaceCursorShape::Beam,
-        );
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!(cursor.shape, RenderSurfaceCursorShape::Beam);
+        assert!(cursor.blinking);
 
         store.apply_bytes(target_id, Seq::new(2), b"\x1b[4 q");
-        assert_eq!(
-            store.cursor_snapshot(target_id).unwrap().shape,
-            RenderSurfaceCursorShape::Underline,
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!(cursor.shape, RenderSurfaceCursorShape::Underline);
+        assert!(!cursor.blinking);
+    }
+
+    #[test]
+    fn configured_default_cursor_style_is_used_until_decscusr_overrides_it() {
+        let store = AlacrittyTerminalStore::with_size_scrollback_and_cursor_style(
+            AlacrittyTermSize::default(),
+            Config::default().scrolling_history,
+            TerminalCursorStyle::new(TerminalCursorShape::Beam, true),
         );
+        let target_id = RenderTargetId::new(84);
+        store.apply_bytes(target_id, Seq::new(1), b"");
+
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!(cursor.shape, RenderSurfaceCursorShape::Beam);
+        assert!(cursor.blinking);
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b[2 q");
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!(cursor.shape, RenderSurfaceCursorShape::Block);
+        assert!(!cursor.blinking);
     }
 
     #[test]
