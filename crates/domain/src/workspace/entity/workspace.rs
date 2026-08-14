@@ -4,7 +4,7 @@ use crate::{
     aggregate_root::AggregateRoot,
     workspace::{
         entity::workspace_tab::WorkspaceTab,
-        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection},
+        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
     },
 };
 
@@ -18,7 +18,7 @@ impl Workspace {
     pub fn new(focused_pane: PaneId) -> Self {
         Self {
             active_tab_index: 0,
-            tabs: vec![WorkspaceTab::new(focused_pane)],
+            tabs: vec![WorkspaceTab::new(TabId::new(0), focused_pane)],
         }
     }
 
@@ -27,6 +27,13 @@ impl Workspace {
         assert!(
             active_tab_index < tabs.len(),
             "active tab index must be in range"
+        );
+        assert!(
+            tabs.iter().enumerate().all(|(index, tab)| tabs
+                .iter()
+                .skip(index + 1)
+                .all(|other| other.tab_id() != tab.tab_id())),
+            "workspace tab ids must be unique"
         );
 
         Self {
@@ -47,6 +54,76 @@ impl Workspace {
 
     pub fn focused_pane(&self) -> PaneId {
         self.active_tab().focused_pane()
+    }
+
+    pub fn active_tab_id(&self) -> TabId {
+        self.active_tab().tab_id()
+    }
+
+    pub fn create_tab(&mut self) -> TabId {
+        let tab_id = TabId::new(
+            self.tabs
+                .iter()
+                .map(|tab| tab.tab_id().value())
+                .max()
+                .unwrap_or(0)
+                + 1,
+        );
+        self.tabs.push(WorkspaceTab::new(tab_id, PaneId::new(0)));
+        self.active_tab_index = self.tabs.len() - 1;
+        tab_id
+    }
+
+    pub fn activate_next_tab(&mut self) -> TabId {
+        self.active_tab_index = (self.active_tab_index + 1) % self.tabs.len();
+        self.active_tab_id()
+    }
+
+    pub fn activate_previous_tab(&mut self) -> TabId {
+        self.active_tab_index = self
+            .active_tab_index
+            .checked_sub(1)
+            .unwrap_or(self.tabs.len() - 1);
+        self.active_tab_id()
+    }
+
+    pub fn activate_tab(&mut self, tab_id: TabId) -> bool {
+        let Some(index) = self.tabs.iter().position(|tab| tab.tab_id() == tab_id) else {
+            return false;
+        };
+        self.active_tab_index = index;
+        true
+    }
+
+    pub fn tab(&self, tab_id: TabId) -> Option<&WorkspaceTab> {
+        self.tabs.iter().find(|tab| tab.tab_id() == tab_id)
+    }
+
+    pub fn close_pane_in_tab(&mut self, tab_id: TabId, pane_id: PaneId) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.tab_id() == tab_id) else {
+            return false;
+        };
+        tab.close_pane(pane_id)
+    }
+
+    pub fn close_tab(&mut self, tab_id: TabId) -> Option<WorkspaceTab> {
+        if self.tabs.len() == 1 {
+            return None;
+        }
+        let index = self.tabs.iter().position(|tab| tab.tab_id() == tab_id)?;
+        let removed = self.tabs.remove(index);
+
+        if index < self.active_tab_index {
+            self.active_tab_index -= 1;
+        } else if index == self.active_tab_index {
+            self.active_tab_index = index.min(self.tabs.len() - 1);
+        }
+
+        Some(removed)
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     pub fn set_focused_pane(&mut self, pane_id: PaneId) -> bool {
@@ -101,7 +178,9 @@ impl AggregateRoot for Workspace {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection};
+    use crate::workspace::vo::{
+        pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId,
+    };
 
     #[test]
     fn main_workspace_starts_with_single_focused_pane() {
@@ -185,5 +264,56 @@ mod tests {
 
         assert!(!workspace.close_pane(PaneId::new(0)));
         assert_eq!(workspace.focused_pane(), PaneId::new(0));
+    }
+
+    #[test]
+    fn tabs_cycle_and_restore_their_own_focused_pane() {
+        let mut workspace = Workspace::two_pane();
+        let first_tab = workspace.active_tab_id();
+        let first_focus = workspace.focused_pane();
+
+        let second_tab = workspace.create_tab();
+        assert_ne!(second_tab, first_tab);
+        assert_eq!(workspace.tab_count(), 2);
+        assert_eq!(workspace.focused_pane(), PaneId::new(0));
+
+        assert_eq!(workspace.activate_previous_tab(), first_tab);
+        assert_eq!(workspace.focused_pane(), first_focus);
+        assert_eq!(workspace.activate_next_tab(), second_tab);
+    }
+
+    #[test]
+    fn closing_an_active_tab_focuses_the_tab_that_takes_its_position() {
+        let mut workspace = Workspace::main();
+        let first = workspace.active_tab_id();
+        let second = workspace.create_tab();
+        let third = workspace.create_tab();
+
+        assert!(workspace.activate_tab(second));
+        assert_eq!(
+            workspace.close_tab(second).map(|tab| tab.tab_id()),
+            Some(second)
+        );
+        assert_eq!(workspace.active_tab_id(), third);
+        assert_eq!(workspace.tab_count(), 2);
+
+        assert_eq!(
+            workspace.close_tab(first).map(|tab| tab.tab_id()),
+            Some(first)
+        );
+        assert_eq!(workspace.active_tab_id(), third);
+        assert!(workspace.close_tab(third).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "workspace tab ids must be unique")]
+    fn restored_workspace_rejects_duplicate_tab_ids() {
+        Workspace::from_tabs(
+            vec![
+                WorkspaceTab::new(TabId::new(7), PaneId::new(0)),
+                WorkspaceTab::new(TabId::new(7), PaneId::new(0)),
+            ],
+            0,
+        );
     }
 }

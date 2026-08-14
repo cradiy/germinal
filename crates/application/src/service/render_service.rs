@@ -13,6 +13,7 @@ use germinal_ports::{
     rendering::{
         render_target_id::RenderTargetId,
         surface_snapshot::{RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot},
+        tab_bar::TabBarSnapshot,
         window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
         workspace_layout::RenderSurfacePlacement,
     },
@@ -205,6 +206,14 @@ where
             .window_runtime_mut()
             .expect("window runtime must be initialized before use")
             .set_workspace_layout(placements);
+        self.prj_ref_mut().as_mut().redraw_pending = true;
+    }
+
+    fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
+        self.prj_ref_mut()
+            .window_runtime_mut()
+            .expect("window runtime must be initialized before use")
+            .set_tab_bar(tab_bar);
         self.prj_ref_mut().as_mut().redraw_pending = true;
     }
 

@@ -487,6 +487,14 @@ where
             self.forward_pty_writes(pending_pty_writes);
         }
         self.publish_input_modes();
+        if let Some(title) = self.terminal_store.take_title_change(self.target_id) {
+            let _ = self
+                .proxy
+                .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged {
+                    gshell_id: self.gshell_id,
+                    title,
+                }));
+        }
 
         if enter_gnative {
             let _ = self

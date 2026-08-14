@@ -97,21 +97,32 @@ impl Dimensions for AlacrittyTermSize {
 #[derive(Clone)]
 struct PtyWriteEventListener {
     pending_writes: Sender<Vec<u8>>,
+    pending_titles: Sender<Option<String>>,
 }
 
 impl PtyWriteEventListener {
-    fn new(pending_writes: Sender<Vec<u8>>) -> Self {
-        Self { pending_writes }
+    fn new(pending_writes: Sender<Vec<u8>>, pending_titles: Sender<Option<String>>) -> Self {
+        Self {
+            pending_writes,
+            pending_titles,
+        }
     }
 }
 
 impl EventListener for PtyWriteEventListener {
     fn send_event(&self, event: Event) {
-        let Event::PtyWrite(text) = event else {
-            return;
-        };
-
-        let _ = self.pending_writes.send(text.into_bytes());
+        match event {
+            Event::PtyWrite(text) => {
+                let _ = self.pending_writes.send(text.into_bytes());
+            }
+            Event::Title(title) => {
+                let _ = self.pending_titles.send(Some(title));
+            }
+            Event::ResetTitle => {
+                let _ = self.pending_titles.send(None);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -187,6 +198,7 @@ impl AlacrittyTerminalStore {
                 }
             }
         }
+        state.apply_pending_title_changes();
         state.mark_selection_damage_if_changed(previous_selection);
 
         state.latest_seq = seq;
@@ -609,6 +621,17 @@ impl AlacrittyTerminalStore {
         state.take_pending_writes()
     }
 
+    pub fn take_title_change(&self, render_target_id: RenderTargetId) -> Option<Option<String>> {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.get_mut(&render_target_id)?;
+        if !state.title_changed {
+            return None;
+        }
+
+        state.title_changed = false;
+        Some(state.title.clone())
+    }
+
     pub fn input_modes(&self, render_target_id: RenderTargetId) -> TerminalInputModes {
         let inner = self.inner.borrow();
         let Some(state) = inner.get(&render_target_id) else {
@@ -986,6 +1009,9 @@ pub struct AlacrittyTermState {
     term: Term<PtyWriteEventListener>,
     pending_write_tx: Sender<Vec<u8>>,
     pending_write_rx: Receiver<Vec<u8>>,
+    pending_title_rx: Receiver<Option<String>>,
+    title: Option<String>,
+    title_changed: bool,
     processor: Processor<StdSyncHandler>,
     graphics_decoder: KittyGraphicsStreamDecoder,
     graphics: KittyGraphicsState,
@@ -1000,7 +1026,8 @@ pub struct AlacrittyTermState {
 impl AlacrittyTermState {
     fn new(size: AlacrittyTermSize, scrollback_history: usize) -> Self {
         let (pending_write_tx, pending_write_rx) = mpsc::channel();
-        let event_listener = PtyWriteEventListener::new(pending_write_tx.clone());
+        let (pending_title_tx, pending_title_rx) = mpsc::channel();
+        let event_listener = PtyWriteEventListener::new(pending_write_tx.clone(), pending_title_tx);
         let config = Config {
             scrolling_history: scrollback_history,
             ..Config::default()
@@ -1013,6 +1040,9 @@ impl AlacrittyTermState {
             term,
             pending_write_tx,
             pending_write_rx,
+            pending_title_rx,
+            title: None,
+            title_changed: false,
             processor: Processor::<StdSyncHandler>::new(),
             graphics_decoder: KittyGraphicsStreamDecoder::default(),
             graphics: KittyGraphicsState::default(),
@@ -1044,6 +1074,16 @@ impl AlacrittyTermState {
         writes
     }
 
+    fn apply_pending_title_changes(&mut self) {
+        while let Ok(title) = self.pending_title_rx.try_recv() {
+            let title = title.and_then(normalize_terminal_title);
+            if self.title != title {
+                self.title = title;
+                self.title_changed = true;
+            }
+        }
+    }
+
     fn synchronized_update_pending(&self) -> bool {
         self.processor.sync_timeout().sync_timeout().is_some()
     }
@@ -1069,6 +1109,15 @@ impl AlacrittyTermState {
             self.selection_damage = true;
         }
     }
+}
+
+fn normalize_terminal_title(title: String) -> Option<String> {
+    let title = title
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.chars().take(256).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1669,6 +1718,22 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::*;
+
+    #[test]
+    fn exports_osc_title_changes_and_reset() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(81);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b]2;nvim - germinal\x1b\\");
+        assert_eq!(
+            store.take_title_change(target_id),
+            Some(Some("nvim - germinal".to_string()))
+        );
+        assert_eq!(store.take_title_change(target_id), None);
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b]2;\x1b\\");
+        assert_eq!(store.take_title_change(target_id), Some(None));
+    }
 
     #[test]
     fn extracts_kitty_rgba_image_without_leaking_apc_into_text() {

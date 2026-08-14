@@ -2,23 +2,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::{
     entity::pane_tree::PaneTree,
-    vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection},
+    vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTab {
+    tab_id: TabId,
     focused_pane: PaneId,
     next_pane_id: u64,
     pane_tree: PaneTree,
 }
 
 impl WorkspaceTab {
-    pub fn new(initial_pane: PaneId) -> Self {
+    pub fn new(tab_id: TabId, initial_pane: PaneId) -> Self {
         Self {
+            tab_id,
             focused_pane: initial_pane,
             next_pane_id: initial_pane.value() + 1,
             pane_tree: PaneTree::single(initial_pane),
         }
+    }
+
+    pub const fn tab_id(&self) -> TabId {
+        self.tab_id
     }
 
     pub const fn focused_pane(&self) -> PaneId {

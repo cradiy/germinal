@@ -7,14 +7,26 @@ use std::{
 
 use germinal_ports::{
     pty_host::{
-        cell_size::TerminalCellSize, font_weight::TerminalFontWeight, profile::TerminalProfile,
-        scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
-        window_metrics::TerminalWindowMetrics, window_size::TerminalWindowSize,
+        cell_size::TerminalCellSize,
+        font_weight::TerminalFontWeight,
+        profile::TerminalProfile,
+        scale_factor::TerminalScaleFactor,
+        size_info::TerminalSizeInfo,
+        width::{terminal_char_cell_width, terminal_text_cell_width},
+        window_metrics::TerminalWindowMetrics,
+        window_size::TerminalWindowSize,
     },
     rendering::{
-        render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
-        window_runtime::ITerminalWindowRuntime, workspace_layout::RenderSurfacePlacement,
+        frame_plan_builder::{RgbColorDto, TextStyleDto},
+        render_target_id::RenderTargetId,
+        surface_snapshot::{
+            RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+        },
+        tab_bar::{TabBarPosition, TabBarSnapshot},
+        window_runtime::ITerminalWindowRuntime,
+        workspace_layout::RenderSurfacePlacement,
     },
+    seq::Seq,
 };
 use thiserror::Error;
 use tracing::info;
@@ -89,6 +101,7 @@ pub struct WgpuTerminalWindowRuntime {
 
     surface_snapshots: HashMap<RenderTargetId, RenderSurfaceSnapshot>,
     workspace_layout: Vec<RenderSurfacePlacement>,
+    tab_bar: Option<TabBarSnapshot>,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     needs_redraw: bool,
@@ -233,6 +246,7 @@ impl WgpuTerminalWindowRuntime {
             presenter,
             surface_snapshots: HashMap::new(),
             workspace_layout: Vec::new(),
+            tab_bar: None,
             size_info,
             profile,
             needs_redraw: false,
@@ -333,6 +347,11 @@ impl WgpuTerminalWindowRuntime {
         self.request_redraw();
     }
 
+    pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
+        self.tab_bar = tab_bar;
+        self.request_redraw();
+    }
+
     pub fn resize_surface_size_info(
         &mut self,
         window_size: TerminalWindowSize,
@@ -382,7 +401,7 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
-        let surfaces = self
+        let mut surfaces = self
             .workspace_layout
             .iter()
             .filter_map(|placement| {
@@ -400,6 +419,31 @@ impl WgpuTerminalWindowRuntime {
                 })
             })
             .collect::<Vec<_>>();
+        let tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
+            let terminal_background = tab_bar
+                .render_target_ids
+                .get(tab_bar.active_tab_index)
+                .and_then(|target_id| self.surface_snapshots.get(target_id))
+                .map(|snapshot| snapshot.default_background);
+            build_tab_bar_surface(tab_bar, self.size_info, terminal_background)
+        });
+        if let Some(tab_bar_surface) = tab_bar_surface.as_ref() {
+            let size_info =
+                self.terminal_size_info_for_window_size(tab_bar_surface.placement.window_size());
+            surfaces.push(WgpuTerminalWorkspaceSurface {
+                render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                    tab_bar_surface.placement.width_px,
+                    tab_bar_surface.placement.height_px,
+                )
+                .with_origin(
+                    tab_bar_surface.placement.x_px,
+                    tab_bar_surface.placement.y_px,
+                )
+                .with_load_op(WgpuTerminalLoadOp::Load),
+                surface_snapshot: &tab_bar_surface.snapshot,
+                renderer_config: WgpuRendererConfig::from(size_info),
+            });
+        }
         let row_count = surfaces
             .iter()
             .map(|surface| surface.surface_snapshot.rows.len() as u64)
@@ -447,6 +491,223 @@ impl WgpuTerminalWindowRuntime {
             | WgpuTerminalSurfaceFramePresentError::Validation => {}
         }
     }
+}
+
+const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
+const TAB_BAR_FALLBACK_BACKGROUND: RgbColorDto = RgbColorDto::new(30, 32, 44);
+const TAB_BAR_LEFT_EDGE: &str = "";
+const TAB_BAR_RIGHT_EDGE: &str = "";
+const TAB_BAR_OUTER_MARGIN: u32 = 1;
+const TAB_BAR_TAB_GAP: u32 = 1;
+const TAB_BAR_TITLE_PADDING: u32 = 2;
+
+struct WgpuTabBarSurface {
+    placement: RenderSurfacePlacement,
+    snapshot: RenderSurfaceSnapshot,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabBarPalette {
+    background: RgbColorDto,
+    inactive_foreground: RgbColorDto,
+    active_background: RgbColorDto,
+    active_foreground: RgbColorDto,
+}
+
+fn build_tab_bar_surface(
+    tab_bar: &TabBarSnapshot,
+    window_size_info: TerminalSizeInfo,
+    terminal_background: Option<RgbColorDto>,
+) -> Option<WgpuTabBarSurface> {
+    if tab_bar.titles.len() < 2 || tab_bar.active_tab_index >= tab_bar.titles.len() {
+        return None;
+    }
+
+    let window_size = window_size_info.window_size();
+    let bar_height_px = window_size_info
+        .cell_size()
+        .height_px()
+        .min(window_size.height_px().saturating_sub(1));
+    if bar_height_px == 0 {
+        return None;
+    }
+    let y_px = match tab_bar.position {
+        TabBarPosition::Top => 0,
+        TabBarPosition::Bottom => window_size.height_px().saturating_sub(bar_height_px),
+    };
+    let columns = (window_size.width_px() / window_size_info.cell_size().width_px().max(1)).max(1);
+    let palette = tab_bar_palette(terminal_background.unwrap_or(TAB_BAR_FALLBACK_BACKGROUND));
+    let tab_count = tab_bar.titles.len() as u32;
+    let max_tab_width = columns
+        .saturating_sub(TAB_BAR_OUTER_MARGIN.saturating_mul(2))
+        .checked_div(tab_count)
+        .unwrap_or(0)
+        .max(1);
+    let mut x = TAB_BAR_OUTER_MARGIN.min(columns);
+    let mut runs = tab_bar_texture_runs(columns, palette);
+    runs.reserve(tab_bar.titles.len().saturating_mul(3));
+
+    for (index, title) in tab_bar.titles.iter().enumerate() {
+        let active = index == tab_bar.active_tab_index;
+        let edge_width = u32::from(active).saturating_mul(2);
+        let reserved_width = edge_width
+            .saturating_add(TAB_BAR_TITLE_PADDING.saturating_mul(2))
+            .saturating_add(TAB_BAR_TAB_GAP);
+        let available_width = columns.saturating_sub(x);
+        let title_budget = max_tab_width
+            .min(available_width)
+            .saturating_sub(reserved_width);
+        if title_budget == 0 {
+            continue;
+        }
+
+        let title = truncate_title_to_cells(title, title_budget);
+        let content = format!("  {title}  ");
+        let content_width = terminal_text_cell_width(&content);
+
+        if active {
+            runs.push(RenderSurfaceRunSnapshot {
+                x,
+                text: TAB_BAR_LEFT_EDGE.to_string(),
+                style: tab_bar_style(palette.active_background, palette.background, false),
+            });
+            x = x.saturating_add(1);
+        }
+
+        runs.push(RenderSurfaceRunSnapshot {
+            x,
+            text: content,
+            style: if active {
+                tab_bar_style(palette.active_foreground, palette.active_background, true)
+            } else {
+                tab_bar_style(palette.inactive_foreground, palette.background, false)
+            },
+        });
+        x = x.saturating_add(content_width);
+
+        if active {
+            runs.push(RenderSurfaceRunSnapshot {
+                x,
+                text: TAB_BAR_RIGHT_EDGE.to_string(),
+                style: tab_bar_style(palette.active_background, palette.background, false),
+            });
+            x = x.saturating_add(1);
+        }
+
+        x = x.saturating_add(TAB_BAR_TAB_GAP);
+    }
+
+    Some(WgpuTabBarSurface {
+        placement: RenderSurfacePlacement::new(
+            TAB_BAR_RENDER_TARGET_ID,
+            0,
+            y_px,
+            window_size.width_px(),
+            bar_height_px,
+        ),
+        snapshot: RenderSurfaceSnapshot {
+            target_id: TAB_BAR_RENDER_TARGET_ID,
+            latest_seq: Seq::new(0),
+            default_background: palette.background,
+            rows: vec![RenderSurfaceRowSnapshot { y: 0, runs }],
+            video_surfaces: Vec::new(),
+            image_surfaces: Vec::new(),
+            dirty_rows: Vec::new(),
+            cursor: None,
+            ime_preedit: None,
+        },
+    })
+}
+
+fn tab_bar_style(foreground: RgbColorDto, background: RgbColorDto, bold: bool) -> TextStyleDto {
+    TextStyleDto {
+        foreground: Some(foreground),
+        background: Some(background),
+        bold,
+        italic: false,
+        underline: false,
+    }
+}
+
+fn tab_bar_palette(terminal_background: RgbColorDto) -> TabBarPalette {
+    let contrast = contrasting_color(terminal_background);
+    let background = mix_rgb(terminal_background, contrast, 12, 255);
+    let active_background = mix_rgb(terminal_background, contrast, 48, 255);
+
+    TabBarPalette {
+        background,
+        inactive_foreground: mix_rgb(terminal_background, contrast, 132, 255),
+        active_background,
+        active_foreground: mix_rgb(
+            active_background,
+            contrasting_color(active_background),
+            220,
+            255,
+        ),
+    }
+}
+
+fn tab_bar_texture_runs(columns: u32, palette: TabBarPalette) -> Vec<RenderSurfaceRunSnapshot> {
+    const TEXTURE_WIDTH: u32 = 2;
+    const TEXTURE_STRENGTH: [u16; 12] = [1, 3, 1, 2, 0, 2, 1, 3, 0, 1, 2, 1];
+
+    (0..columns)
+        .step_by(TEXTURE_WIDTH as usize)
+        .map(|x| {
+            let width = TEXTURE_WIDTH.min(columns.saturating_sub(x));
+            let strength = TEXTURE_STRENGTH[(x / TEXTURE_WIDTH) as usize % TEXTURE_STRENGTH.len()];
+            let color = mix_rgb(
+                palette.background,
+                contrasting_color(palette.background),
+                strength,
+                255,
+            );
+            RenderSurfaceRunSnapshot {
+                x,
+                text: " ".repeat(width as usize),
+                style: tab_bar_style(color, color, false),
+            }
+        })
+        .collect()
+}
+
+fn contrasting_color(color: RgbColorDto) -> RgbColorDto {
+    let luminance =
+        u32::from(color.red) * 299 + u32::from(color.green) * 587 + u32::from(color.blue) * 114;
+    if luminance < 140_000 {
+        RgbColorDto::new(255, 255, 255)
+    } else {
+        RgbColorDto::new(0, 0, 0)
+    }
+}
+
+fn mix_rgb(from: RgbColorDto, to: RgbColorDto, amount: u16, total: u16) -> RgbColorDto {
+    fn mix_channel(from: u8, to: u8, amount: u16, total: u16) -> u8 {
+        let inverse = total.saturating_sub(amount);
+        ((u32::from(from) * u32::from(inverse) + u32::from(to) * u32::from(amount))
+            / u32::from(total.max(1))) as u8
+    }
+
+    RgbColorDto::new(
+        mix_channel(from.red, to.red, amount, total),
+        mix_channel(from.green, to.green, amount, total),
+        mix_channel(from.blue, to.blue, amount, total),
+    )
+}
+
+fn truncate_title_to_cells(title: &str, max_width: u32) -> String {
+    let mut width: u32 = 0;
+    title
+        .chars()
+        .take_while(|character| {
+            let character_width = terminal_char_cell_width(*character);
+            if width.saturating_add(character_width) > max_width {
+                return false;
+            }
+            width = width.saturating_add(character_width);
+            true
+        })
+        .collect()
 }
 
 fn build_terminal_frame_builder(
@@ -815,6 +1076,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
         WgpuTerminalWindowRuntime::set_workspace_layout(self, placements);
     }
 
+    fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
+        WgpuTerminalWindowRuntime::set_tab_bar(self, tab_bar);
+    }
+
     fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
         WgpuTerminalWindowRuntime::resize_surface_size_info(self, window_size)
     }
@@ -847,6 +1112,7 @@ mod tests {
         pty_host::{
             cell_size::TerminalCellSize,
             size_info::{TerminalPadding, TerminalSizeInfo},
+            window_size::TerminalWindowSize,
         },
         rendering::{
             frame_plan_builder::RgbColorDto,
@@ -861,7 +1127,11 @@ mod tests {
     };
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
-    use super::{WindowUiStats, ime_cursor_area};
+    use super::{
+        TAB_BAR_FALLBACK_BACKGROUND, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, WindowUiStats,
+        build_tab_bar_surface, ime_cursor_area,
+    };
+    use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
 
     #[test]
     fn ime_cursor_area_tracks_wrapped_preedit_in_a_partial_height_pane() {
@@ -896,6 +1166,102 @@ mod tests {
             ime_cursor_area(placement, size_info, &snapshot),
             Some((PhysicalPosition::new(416, 37), PhysicalSize::new(8, 18)))
         );
+    }
+
+    #[test]
+    fn tab_bar_renders_titles_without_numeric_prefixes() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(800, 100),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let surface = build_tab_bar_surface(
+            &TabBarSnapshot {
+                titles: vec!["shell".to_string(), "nvim".to_string()],
+                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                active_tab_index: 1,
+                position: TabBarPosition::Bottom,
+            },
+            size_info,
+            None,
+        )
+        .expect("multiple tabs should produce a tab bar");
+
+        assert_eq!(surface.placement.y_px, 84);
+        assert_eq!(surface.placement.height_px, 16);
+        let runs = &surface.snapshot.rows[0].runs;
+        let rendered_text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
+        assert!(rendered_text.contains("shell"));
+        assert!(rendered_text.contains("nvim"));
+        assert!(!rendered_text.contains("1:"));
+        assert!(!rendered_text.contains("2:"));
+        let left_edge = runs
+            .iter()
+            .find(|run| run.text == TAB_BAR_LEFT_EDGE)
+            .expect("active tab should have a left edge");
+        let active_title = runs
+            .iter()
+            .find(|run| run.text.trim() == "nvim")
+            .expect("active title should be rendered");
+        let right_edge = runs
+            .iter()
+            .find(|run| run.text == TAB_BAR_RIGHT_EDGE)
+            .expect("active tab should have a right edge");
+        assert_eq!(left_edge.x, 11);
+        assert!(active_title.style.bold);
+        assert!(right_edge.x < 30, "tabs should keep their natural width");
+    }
+
+    #[test]
+    fn top_tab_bar_starts_at_the_window_origin() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(800, 100),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let surface = build_tab_bar_surface(
+            &TabBarSnapshot {
+                titles: vec!["shell".to_string(), "nvim".to_string()],
+                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                active_tab_index: 0,
+                position: TabBarPosition::Top,
+            },
+            size_info,
+            None,
+        )
+        .expect("multiple tabs should produce a tab bar");
+
+        assert_eq!(surface.placement.y_px, 0);
+    }
+
+    #[test]
+    fn tab_bar_palette_is_derived_from_the_active_terminal_background() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(800, 100),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let terminal_background = RgbColorDto::new(18, 30, 42);
+        let surface = build_tab_bar_surface(
+            &TabBarSnapshot {
+                titles: vec!["~/one".to_string(), "nvim".to_string()],
+                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                active_tab_index: 1,
+                position: TabBarPosition::Bottom,
+            },
+            size_info,
+            Some(terminal_background),
+        )
+        .expect("multiple tabs should produce a themed tab bar");
+
+        assert_ne!(
+            surface.snapshot.default_background,
+            TAB_BAR_FALLBACK_BACKGROUND
+        );
+        assert!(surface.snapshot.default_background.red < 40);
+        assert!(surface.snapshot.default_background.green < 50);
+        assert!(surface.snapshot.default_background.blue < 60);
+        assert!(surface.snapshot.rows[0].runs.len() > 10);
     }
 
     #[test]

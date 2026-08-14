@@ -9,6 +9,7 @@ use germinal_ports::pty_host::{
     profile::TerminalProfile,
     size_info::{TerminalPadding, TerminalSizeConfig},
 };
+use germinal_ports::rendering::tab_bar::TabBarPosition;
 use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
@@ -57,6 +58,7 @@ pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
     pub scrolling: ScrollingConfig,
+    pub tabs: TabsConfig,
     pub keyboard: KeyboardConfig,
     pub logging: LoggingConfig,
 }
@@ -83,8 +85,23 @@ impl Default for GerminalConfig {
             window: WindowConfig::default(),
             font: FontConfig::default(),
             scrolling: ScrollingConfig::default(),
+            tabs: TabsConfig::default(),
             keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    pub position: TabBarPosition,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            position: TabBarPosition::Bottom,
         }
     }
 }
@@ -175,19 +192,54 @@ impl Default for KeyboardConfig {
                     action: KeyboardAction::SplitVertical,
                 },
                 KeyboardBinding {
-                    key: "Tab".to_string(),
-                    mods: "Control".to_string(),
-                    action: KeyboardAction::FocusNextPane,
+                    key: "T".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::NewTab,
                 },
                 KeyboardBinding {
-                    key: "Tab".to_string(),
+                    key: "Left".to_string(),
                     mods: "Control|Shift".to_string(),
-                    action: KeyboardAction::FocusPreviousPane,
+                    action: KeyboardAction::PreviousTab,
+                },
+                KeyboardBinding {
+                    key: "Right".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::NextTab,
+                },
+                KeyboardBinding {
+                    key: "H".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::PreviousTab,
+                },
+                KeyboardBinding {
+                    key: "L".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::NextTab,
                 },
                 KeyboardBinding {
                     key: "W".to_string(),
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::ClosePane,
+                },
+                KeyboardBinding {
+                    key: "Left".to_string(),
+                    mods: "Control|Alt".to_string(),
+                    action: KeyboardAction::FocusPaneLeft,
+                },
+                KeyboardBinding {
+                    key: "Right".to_string(),
+                    mods: "Control|Alt".to_string(),
+                    action: KeyboardAction::FocusPaneRight,
+                },
+                KeyboardBinding {
+                    key: "Up".to_string(),
+                    mods: "Control|Alt".to_string(),
+                    action: KeyboardAction::FocusPaneUp,
+                },
+                KeyboardBinding {
+                    key: "Down".to_string(),
+                    mods: "Control|Alt".to_string(),
+                    action: KeyboardAction::FocusPaneDown,
                 },
                 KeyboardBinding {
                     key: "Left".to_string(),
@@ -225,10 +277,17 @@ pub struct KeyboardBinding {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
     ToggleViMode,
+    NewTab,
+    NextTab,
+    PreviousTab,
     SplitHorizontal,
     SplitVertical,
     FocusNextPane,
     FocusPreviousPane,
+    FocusPaneLeft,
+    FocusPaneRight,
+    FocusPaneUp,
+    FocusPaneDown,
     ClosePane,
     SwapPaneLeft,
     SwapPaneRight,
@@ -317,6 +376,7 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use germinal_ports::pty_host::font_family::TerminalFontFamily;
+    use germinal_ports::rendering::tab_bar::TabBarPosition;
 
     use super::{GerminalConfig, KeyboardAction};
 
@@ -331,10 +391,24 @@ mod tests {
             Some(TerminalFontFamily::default().name())
         );
         assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
+        assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
         assert_eq!(
             value["keyboard"]["bindings"][0]["action"].as_str(),
             Some("ToggleViMode")
         );
+    }
+
+    #[test]
+    fn parses_top_tab_bar_position() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [tabs]
+            position = "top"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.tabs.position, TabBarPosition::Top);
     }
 
     #[test]
@@ -363,7 +437,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 10);
+        assert_eq!(config.keyboard.bindings.len(), 17);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode

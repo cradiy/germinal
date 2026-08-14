@@ -1,20 +1,24 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    env,
+    path::Path,
 };
 
 use germinal_domain::{
     gshell::vo::gshell_id::GShellId,
     workspace::{
         entity::{pane_tree::PaneTree, workspace::Workspace},
-        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection},
+        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
     },
 };
 use germinal_ports::{
     pty_host::window_size::TerminalWindowSize,
     rendering::{render_target_id::RenderTargetId, workspace_layout::RenderSurfacePlacement},
     repository::IRepository,
-    service::workspace_service::{IWorkspaceService, WorkspaceServiceError},
+    service::workspace_service::{
+        IWorkspaceService, WorkspaceGShellCloseOutcome, WorkspaceServiceError,
+    },
 };
 
 #[derive(kudi::DepInj)]
@@ -22,7 +26,9 @@ use germinal_ports::{
 pub struct WorkspaceServiceState {
     persistence_workspace_id: Cell<Option<u64>>,
     workspace: RefCell<Workspace>,
-    pane_bindings: RefCell<HashMap<PaneId, GShellId>>,
+    pane_bindings: RefCell<HashMap<(TabId, PaneId), GShellId>>,
+    gshell_titles: RefCell<HashMap<GShellId, String>>,
+    default_tab_title: String,
     next_gshell_id: Cell<u64>,
 }
 
@@ -36,29 +42,33 @@ impl WorkspaceServiceState {
             persistence_workspace_id: Cell::new(None),
             workspace: RefCell::new(workspace),
             pane_bindings: RefCell::new(HashMap::new()),
+            gshell_titles: RefCell::new(HashMap::new()),
+            default_tab_title: default_tab_title(),
             next_gshell_id: Cell::new(0),
         };
-        state.rebind_visible_panes();
+        state.rebind_all_panes();
         state
     }
 
     pub fn focused_gshell(&self) -> GShellId {
-        let focused_pane = self.workspace.borrow().focused_pane();
+        let workspace = self.workspace.borrow();
+        let key = (workspace.active_tab_id(), workspace.focused_pane());
         *self
             .pane_bindings
             .borrow()
-            .get(&focused_pane)
+            .get(&key)
             .expect("focused workspace pane must have a gshell binding")
     }
 
     pub fn focus_gshell(&self, gshell_id: GShellId) -> bool {
-        let pane_id = self
-            .pane_bindings
-            .borrow()
-            .iter()
-            .find_map(|(pane_id, bound_gshell_id)| {
-                (*bound_gshell_id == gshell_id).then_some(*pane_id)
-            });
+        let active_tab_id = self.workspace.borrow().active_tab_id();
+        let pane_id =
+            self.pane_bindings
+                .borrow()
+                .iter()
+                .find_map(|((tab_id, pane_id), bound_gshell_id)| {
+                    (*tab_id == active_tab_id && *bound_gshell_id == gshell_id).then_some(*pane_id)
+                });
         let Some(pane_id) = pane_id else {
             return false;
         };
@@ -67,37 +77,116 @@ impl WorkspaceServiceState {
     }
 
     pub fn focus_next_gshell(&self) -> GShellId {
-        let focused_pane = self.workspace.borrow_mut().focus_next_pane();
+        let mut workspace = self.workspace.borrow_mut();
+        let focused_pane = workspace.focus_next_pane();
+        let key = (workspace.active_tab_id(), focused_pane);
         *self
             .pane_bindings
             .borrow()
-            .get(&focused_pane)
+            .get(&key)
             .expect("focused workspace pane must have a gshell binding")
     }
 
     pub fn focus_previous_gshell(&self) -> GShellId {
-        let focused_pane = self.workspace.borrow_mut().focus_previous_pane();
+        let mut workspace = self.workspace.borrow_mut();
+        let focused_pane = workspace.focus_previous_pane();
+        let key = (workspace.active_tab_id(), focused_pane);
         *self
             .pane_bindings
             .borrow()
-            .get(&focused_pane)
+            .get(&key)
             .expect("focused workspace pane must have a gshell binding")
     }
 
+    pub fn create_tab_gshell(&self) -> GShellId {
+        let mut workspace = self.workspace.borrow_mut();
+        let tab_id = workspace.create_tab();
+        let pane_id = workspace.focused_pane();
+        drop(workspace);
+
+        let gshell_id = self.allocate_gshell_id();
+        self.pane_bindings
+            .borrow_mut()
+            .insert((tab_id, pane_id), gshell_id);
+        gshell_id
+    }
+
+    pub fn activate_next_tab(&self) -> GShellId {
+        self.workspace.borrow_mut().activate_next_tab();
+        self.focused_gshell()
+    }
+
+    pub fn activate_previous_tab(&self) -> GShellId {
+        self.workspace.borrow_mut().activate_previous_tab();
+        self.focused_gshell()
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.workspace.borrow().tab_count()
+    }
+
+    pub fn active_tab_index(&self) -> usize {
+        self.workspace.borrow().active_tab_index()
+    }
+
+    pub fn tab_titles(&self) -> Vec<String> {
+        let titles = self.gshell_titles.borrow();
+        self.tab_gshells()
+            .into_iter()
+            .map(|gshell_id| {
+                titles
+                    .get(&gshell_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.default_tab_title.clone())
+            })
+            .collect()
+    }
+
+    pub fn tab_gshells(&self) -> Vec<GShellId> {
+        let workspace = self.workspace.borrow();
+        let bindings = self.pane_bindings.borrow();
+        workspace
+            .tabs()
+            .iter()
+            .map(|tab| {
+                *bindings
+                    .get(&(tab.tab_id(), tab.focused_pane()))
+                    .expect("workspace tab focused pane must have a gshell binding")
+            })
+            .collect()
+    }
+
+    pub fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>) {
+        let mut titles = self.gshell_titles.borrow_mut();
+        if let Some(title) = title {
+            titles.insert(gshell_id, title);
+        } else {
+            titles.remove(&gshell_id);
+        }
+    }
+
     pub fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
-        let pane_id = self.workspace.borrow_mut().split_focused_pane(direction);
-        let gshell_id = GShellId::new(self.next_gshell_id.get());
-        self.next_gshell_id.set(gshell_id.value() + 1);
-        self.pane_bindings.borrow_mut().insert(pane_id, gshell_id);
+        let mut workspace = self.workspace.borrow_mut();
+        let pane_id = workspace.split_focused_pane(direction);
+        let tab_id = workspace.active_tab_id();
+        drop(workspace);
+
+        let gshell_id = self.allocate_gshell_id();
+        self.pane_bindings
+            .borrow_mut()
+            .insert((tab_id, pane_id), gshell_id);
         gshell_id
     }
 
     pub fn swap_focused_gshell_with(&self, other: GShellId) -> bool {
-        let other_pane = self
-            .pane_bindings
-            .borrow()
-            .iter()
-            .find_map(|(pane_id, gshell_id)| (*gshell_id == other).then_some(*pane_id));
+        let active_tab_id = self.workspace.borrow().active_tab_id();
+        let other_pane =
+            self.pane_bindings
+                .borrow()
+                .iter()
+                .find_map(|((tab_id, pane_id), gshell_id)| {
+                    (*tab_id == active_tab_id && *gshell_id == other).then_some(*pane_id)
+                });
         let Some(other_pane) = other_pane else {
             return false;
         };
@@ -107,21 +196,55 @@ impl WorkspaceServiceState {
             .swap_focused_pane_with(other_pane)
     }
 
-    pub fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
-        let pane_id =
-            self.pane_bindings
-                .borrow()
-                .iter()
-                .find_map(|(pane_id, bound_gshell_id)| {
-                    (*bound_gshell_id == gshell_id).then_some(*pane_id)
-                })?;
+    pub fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome> {
+        let (tab_id, pane_id) = self
+            .pane_bindings
+            .borrow()
+            .iter()
+            .find_map(|(key, bound_gshell_id)| (*bound_gshell_id == gshell_id).then_some(*key))?;
 
-        if !self.workspace.borrow_mut().close_pane(pane_id) {
-            return None;
+        let mut workspace = self.workspace.borrow_mut();
+        let tab = workspace
+            .tab(tab_id)
+            .expect("bound pane must belong to a workspace tab");
+
+        if tab.pane_count() == 1 && workspace.tab_count() == 1 {
+            return Some(WorkspaceGShellCloseOutcome::CloseWorkspace);
         }
 
-        self.pane_bindings.borrow_mut().remove(&pane_id);
-        Some(self.focused_gshell())
+        let closed_keys = if tab.pane_count() == 1 {
+            let removed = workspace
+                .close_tab(tab_id)
+                .expect("a tab can be closed while another tab remains");
+            removed
+                .pane_tree()
+                .pane_ids()
+                .into_iter()
+                .map(|pane_id| (tab_id, pane_id))
+                .collect::<Vec<_>>()
+        } else {
+            let closed = workspace.close_pane_in_tab(tab_id, pane_id);
+            debug_assert!(closed, "bound pane must be removable from its tab");
+            vec![(tab_id, pane_id)]
+        };
+        drop(workspace);
+
+        let mut bindings = self.pane_bindings.borrow_mut();
+        let closed_gshells = closed_keys
+            .into_iter()
+            .filter_map(|key| bindings.remove(&key))
+            .collect::<Vec<_>>();
+        drop(bindings);
+        let mut titles = self.gshell_titles.borrow_mut();
+        for closed_gshell in &closed_gshells {
+            titles.remove(closed_gshell);
+        }
+        drop(titles);
+
+        Some(WorkspaceGShellCloseOutcome::Closed {
+            closed_gshells,
+            focused_gshell: self.focused_gshell(),
+        })
     }
 
     pub fn visible_gshells(&self) -> Vec<GShellId> {
@@ -132,7 +255,7 @@ impl WorkspaceServiceState {
             .pane_tree()
             .pane_ids()
             .into_iter()
-            .filter_map(|pane_id| bindings.get(&pane_id).copied())
+            .filter_map(|pane_id| bindings.get(&(workspace.active_tab_id(), pane_id)).copied())
             .collect()
     }
 
@@ -142,6 +265,7 @@ impl WorkspaceServiceState {
         let mut placements = Vec::with_capacity(workspace.active_tab().pane_count());
         collect_render_placements(
             workspace.active_tab().pane_tree(),
+            workspace.active_tab_id(),
             &bindings,
             PixelRect::new(0, 0, window_size.width_px(), window_size.height_px()),
             &mut placements,
@@ -160,22 +284,58 @@ impl WorkspaceServiceState {
     fn bind_workspace(&self, persistence_id: u64, workspace: Workspace) {
         self.persistence_workspace_id.set(Some(persistence_id));
         *self.workspace.borrow_mut() = workspace;
-        self.rebind_visible_panes();
+        self.rebind_all_panes();
     }
 
-    fn rebind_visible_panes(&self) {
-        let pane_ids = self.workspace.borrow().active_tab().pane_tree().pane_ids();
+    fn rebind_all_panes(&self) {
+        let pane_keys = self
+            .workspace
+            .borrow()
+            .tabs()
+            .iter()
+            .flat_map(|tab| {
+                tab.pane_tree()
+                    .pane_ids()
+                    .into_iter()
+                    .map(|pane_id| (tab.tab_id(), pane_id))
+            })
+            .collect::<Vec<_>>();
         let mut bindings = self.pane_bindings.borrow_mut();
-        bindings.retain(|pane_id, _| pane_ids.contains(pane_id));
+        bindings.retain(|key, _| pane_keys.contains(key));
 
-        for pane_id in pane_ids {
-            bindings.entry(pane_id).or_insert_with(|| {
-                let gshell_id = GShellId::new(self.next_gshell_id.get());
-                self.next_gshell_id.set(gshell_id.value() + 1);
-                gshell_id
-            });
+        for key in pane_keys {
+            bindings
+                .entry(key)
+                .or_insert_with(|| self.allocate_gshell_id());
         }
     }
+
+    fn allocate_gshell_id(&self) -> GShellId {
+        let gshell_id = GShellId::new(self.next_gshell_id.get());
+        self.next_gshell_id.set(gshell_id.value() + 1);
+        gshell_id
+    }
+}
+
+fn default_tab_title() -> String {
+    let Ok(current_dir) = env::current_dir() else {
+        return ".".to_string();
+    };
+    let home_dir = env::var_os("HOME").map(std::path::PathBuf::from);
+    pretty_path(&current_dir, home_dir.as_deref())
+}
+
+fn pretty_path(path: &Path, home_dir: Option<&Path>) -> String {
+    if let Some(home_dir) = home_dir
+        && let Ok(relative) = path.strip_prefix(home_dir)
+    {
+        if relative.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", relative.display());
+    }
+
+    path.display().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,13 +359,14 @@ impl PixelRect {
 
 fn collect_render_placements(
     tree: &PaneTree,
-    bindings: &HashMap<PaneId, GShellId>,
+    tab_id: TabId,
+    bindings: &HashMap<(TabId, PaneId), GShellId>,
     bounds: PixelRect,
     placements: &mut Vec<RenderSurfacePlacement>,
 ) {
     match tree {
         PaneTree::Pane(pane_id) => {
-            let Some(gshell_id) = bindings.get(pane_id).copied() else {
+            let Some(gshell_id) = bindings.get(&(tab_id, *pane_id)).copied() else {
                 return;
             };
             placements.push(RenderSurfacePlacement::new(
@@ -222,8 +383,8 @@ fn collect_render_placements(
             second,
         } => {
             let (first_bounds, second_bounds) = split_bounds(bounds, *direction);
-            collect_render_placements(first, bindings, first_bounds, placements);
-            collect_render_placements(second, bindings, second_bounds, placements);
+            collect_render_placements(first, tab_id, bindings, first_bounds, placements);
+            collect_render_placements(second, tab_id, bindings, second_bounds, placements);
         }
     }
 }
@@ -279,6 +440,39 @@ where
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_previous_gshell()
     }
 
+    fn create_tab_gshell(&self) -> GShellId {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).create_tab_gshell()
+    }
+
+    fn activate_next_tab(&self) -> GShellId {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).activate_next_tab()
+    }
+
+    fn activate_previous_tab(&self) -> GShellId {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).activate_previous_tab()
+    }
+
+    fn tab_count(&self) -> usize {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_count()
+    }
+
+    fn active_tab_index(&self) -> usize {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).active_tab_index()
+    }
+
+    fn tab_titles(&self) -> Vec<String> {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_titles()
+    }
+
+    fn tab_gshells(&self) -> Vec<GShellId> {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_gshells()
+    }
+
+    fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>) {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .update_gshell_title(gshell_id, title)
+    }
+
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
             .split_focused_gshell(direction)
@@ -289,7 +483,7 @@ where
             .swap_focused_gshell_with(other)
     }
 
-    fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
+    fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome> {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).close_gshell(gshell_id)
     }
 
@@ -344,7 +538,10 @@ mod tests {
         gshell::vo::gshell_id::GShellId,
         workspace::{entity::workspace::Workspace, vo::pane_split_direction::PaneSplitDirection},
     };
-    use germinal_ports::pty_host::window_size::TerminalWindowSize;
+    use germinal_ports::{
+        pty_host::window_size::TerminalWindowSize,
+        service::workspace_service::WorkspaceGShellCloseOutcome,
+    };
 
     use super::WorkspaceServiceState;
 
@@ -414,7 +611,13 @@ mod tests {
         let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
-        assert_eq!(state.close_gshell(gshells[1]), Some(gshells[0]));
+        assert_eq!(
+            state.close_gshell(gshells[1]),
+            Some(WorkspaceGShellCloseOutcome::Closed {
+                closed_gshells: vec![gshells[1]],
+                focused_gshell: gshells[0],
+            })
+        );
         assert_eq!(state.visible_gshells(), vec![gshells[0]]);
         assert_eq!(state.focused_gshell(), gshells[0]);
     }
@@ -424,18 +627,93 @@ mod tests {
         let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
-        assert_eq!(state.close_gshell(gshells[0]), Some(gshells[1]));
+        assert_eq!(
+            state.close_gshell(gshells[0]),
+            Some(WorkspaceGShellCloseOutcome::Closed {
+                closed_gshells: vec![gshells[0]],
+                focused_gshell: gshells[1],
+            })
+        );
         assert_eq!(state.visible_gshells(), vec![gshells[1]]);
     }
 
     #[test]
-    fn state_rejects_closing_the_last_or_an_unknown_gshell() {
+    fn state_requests_workspace_close_for_the_last_gshell() {
         let state = WorkspaceServiceState::new();
         let only = state.focused_gshell();
 
-        assert_eq!(state.close_gshell(only), None);
+        assert_eq!(
+            state.close_gshell(only),
+            Some(WorkspaceGShellCloseOutcome::CloseWorkspace)
+        );
         assert_eq!(state.close_gshell(GShellId::new(99)), None);
         assert_eq!(state.visible_gshells(), vec![only]);
+    }
+
+    #[test]
+    fn tabs_keep_distinct_gshell_bindings_for_equal_local_pane_ids() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        let second = state.create_tab_gshell();
+
+        assert_ne!(first, second);
+        assert_eq!(state.tab_count(), 2);
+        assert_eq!(state.visible_gshells(), vec![second]);
+        assert_eq!(state.activate_previous_tab(), first);
+        assert_eq!(state.visible_gshells(), vec![first]);
+        assert_eq!(state.activate_next_tab(), second);
+    }
+
+    #[test]
+    fn tab_titles_follow_the_focused_gshell_and_fall_back_to_the_working_directory() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        let second = state.create_tab_gshell();
+
+        let fallback = state.default_tab_title.clone();
+        assert_eq!(state.tab_titles(), vec![fallback.clone(), fallback.clone()]);
+
+        state.update_gshell_title(first, Some("nvim".to_string()));
+        state.update_gshell_title(second, Some("yazi".to_string()));
+        assert_eq!(state.tab_titles(), vec!["nvim", "yazi"]);
+
+        state.update_gshell_title(second, None);
+        assert_eq!(state.tab_titles(), vec!["nvim", fallback.as_str()]);
+        assert!(!state.tab_titles().iter().any(|title| title == "Shell"));
+    }
+
+    #[test]
+    fn closing_a_tabs_only_gshell_closes_the_tab_and_focuses_its_neighbor() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        let second = state.create_tab_gshell();
+
+        assert_eq!(
+            state.close_gshell(second),
+            Some(WorkspaceGShellCloseOutcome::Closed {
+                closed_gshells: vec![second],
+                focused_gshell: first,
+            })
+        );
+        assert_eq!(state.tab_count(), 1);
+        assert_eq!(state.visible_gshells(), vec![first]);
+    }
+
+    #[test]
+    fn closing_a_hidden_tab_does_not_change_the_active_tab() {
+        let state = WorkspaceServiceState::new();
+        let hidden = state.focused_gshell();
+        let active = state.create_tab_gshell();
+
+        assert_eq!(
+            state.close_gshell(hidden),
+            Some(WorkspaceGShellCloseOutcome::Closed {
+                closed_gshells: vec![hidden],
+                focused_gshell: active,
+            })
+        );
+        assert_eq!(state.tab_count(), 1);
+        assert_eq!(state.visible_gshells(), vec![active]);
     }
 
     #[test]

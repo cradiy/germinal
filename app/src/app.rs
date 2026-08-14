@@ -38,12 +38,16 @@ use germinal_ports::{
     },
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
     rendering::{
-        render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceImePreeditSnapshot,
+        render_target_id::RenderTargetId,
+        surface_snapshot::RenderSurfaceImePreeditSnapshot,
+        tab_bar::{TabBarPosition, TabBarSnapshot},
         workspace_layout::RenderSurfacePlacement,
     },
     service::{
-        gnative_service::IGNativeService, gshell_service::IGShellService,
-        render_service::IRenderService, workspace_service::IWorkspaceService,
+        gnative_service::IGNativeService,
+        gshell_service::IGShellService,
+        render_service::IRenderService,
+        workspace_service::{IWorkspaceService, WorkspaceGShellCloseOutcome},
     },
 };
 pub use logging::init_logging;
@@ -206,10 +210,52 @@ impl App {
         self.render_window_id
     }
 
+    fn current_tab_bar_snapshot(&self) -> Option<TabBarSnapshot> {
+        (self.tab_count() > 1).then(|| TabBarSnapshot {
+            titles: self.tab_titles(),
+            render_target_ids: self
+                .tab_gshells()
+                .into_iter()
+                .map(|gshell_id| RenderTargetId::new(gshell_id.value()))
+                .collect(),
+            active_tab_index: self.active_tab_index(),
+            position: self.config.tabs.position,
+        })
+    }
+
+    fn current_workspace_render_layout(
+        &self,
+        window_size: TerminalWindowSize,
+    ) -> Vec<RenderSurfacePlacement> {
+        let layout = workspace_content_layout(
+            window_size,
+            self.current_terminal_size_info().cell_size().height_px(),
+            self.tab_count() > 1,
+            self.config.tabs.position,
+        );
+        self.workspace_render_layout(layout.content_size)
+            .into_iter()
+            .map(|placement| {
+                RenderSurfacePlacement::new(
+                    placement.target_id,
+                    placement.x_px,
+                    placement.y_px.saturating_add(layout.y_px),
+                    placement.width_px,
+                    placement.height_px,
+                )
+            })
+            .collect()
+    }
+
+    fn set_current_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        self.set_tab_bar(self.current_tab_bar_snapshot());
+        self.set_workspace_render_layout(placements);
+    }
+
     fn ensure_workspace_gshells(&mut self) {
         let window_size = self.current_terminal_size_info().window_size();
-        let placements = self.workspace_render_layout(window_size);
-        self.set_workspace_render_layout(placements.clone());
+        let placements = self.current_workspace_render_layout(window_size);
+        self.set_current_workspace_render_layout(placements.clone());
 
         let surface_snapshot_tx = self.surface_snapshot_sender();
         let snapshot_wake_pending = self.snapshot_wake_pending();
@@ -226,8 +272,8 @@ impl App {
     }
 
     fn resize_workspace_gshells(&mut self, window_size: TerminalWindowSize) {
-        let placements = self.workspace_render_layout(window_size);
-        self.set_workspace_render_layout(placements.clone());
+        let placements = self.current_workspace_render_layout(window_size);
+        self.set_current_workspace_render_layout(placements.clone());
 
         for placement in placements {
             let size_info = self.terminal_size_info_for_surface(placement);
@@ -256,6 +302,68 @@ impl App {
         self.request_redraw();
     }
 
+    fn create_workspace_tab(&mut self) {
+        let previous_gshell = self.focused_gshell();
+        let focused_gshell = self.create_tab_gshell();
+        self.activate_workspace_tab(previous_gshell, focused_gshell);
+    }
+
+    fn activate_next_workspace_tab(&mut self) {
+        if self.tab_count() < 2 {
+            return;
+        }
+        let previous_gshell = self.focused_gshell();
+        let focused_gshell = self.activate_next_tab();
+        self.activate_workspace_tab(previous_gshell, focused_gshell);
+    }
+
+    fn activate_previous_workspace_tab(&mut self) {
+        if self.tab_count() < 2 {
+            return;
+        }
+        let previous_gshell = self.focused_gshell();
+        let focused_gshell = self.activate_previous_tab();
+        self.activate_workspace_tab(previous_gshell, focused_gshell);
+    }
+
+    fn activate_workspace_tab(&mut self, previous_gshell: GShellId, focused_gshell: GShellId) {
+        self.pane_navigation_enabled = self.visible_gshells().len() > 1;
+        if self.render_runtime.is_none() {
+            return;
+        }
+
+        self.clear_ime_preedit(previous_gshell);
+        self.ensure_workspace_gshells();
+        let window_size = self.current_terminal_size_info().window_size();
+        self.resize_workspace_gshells(window_size);
+        self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+        if let Some(position) = self.cursor_position {
+            self.route_pointer_moved(position);
+        }
+        self.request_redraw();
+    }
+
+    fn focus_workspace_pane(&mut self, direction: PaneDirection) {
+        if self.render_runtime.is_none() || !self.pane_navigation_enabled {
+            return;
+        }
+
+        let previous_gshell = self.focused_gshell();
+        let window_size = self.current_terminal_size_info().window_size();
+        let placements = self.current_workspace_render_layout(window_size);
+        let Some(target) = directional_neighbor_target(
+            &placements,
+            RenderTargetId::new(previous_gshell.value()),
+            direction,
+        ) else {
+            return;
+        };
+        let focused_gshell = GShellId::new(target.value());
+        if self.focus_gshell(focused_gshell) {
+            self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+        }
+    }
+
     fn swap_focused_workspace_pane(&mut self, direction: PaneDirection) {
         if self.render_runtime.is_none() {
             return;
@@ -263,7 +371,7 @@ impl App {
 
         let focused_gshell = self.focused_gshell();
         let window_size = self.current_terminal_size_info().window_size();
-        let placements = self.workspace_render_layout(window_size);
+        let placements = self.current_workspace_render_layout(window_size);
         let Some(other_target) = directional_neighbor_target(
             &placements,
             RenderTargetId::new(focused_gshell.value()),
@@ -286,26 +394,28 @@ impl App {
     }
 
     fn close_workspace_gshell(&mut self, event_loop: &ActiveEventLoop, gshell_id: GShellId) {
-        let visible_gshells = self.visible_gshells();
-        if !visible_gshells.contains(&gshell_id) {
+        let previous_gshell = self.focused_gshell();
+        let Some(outcome) = self.close_gshell(gshell_id) else {
             debug!(
                 gshell_id = gshell_id.value(),
-                "ignored close request for a non-visible gshell"
+                "ignored close request for an unknown gshell"
             );
             return;
-        }
-        if visible_gshells.len() == 1 {
+        };
+        let WorkspaceGShellCloseOutcome::Closed {
+            closed_gshells,
+            focused_gshell,
+        } = outcome
+        else {
             self.exit_and_persist(event_loop);
             return;
-        }
-
-        let previous_gshell = self.focused_gshell();
-        let Some(focused_gshell) = self.close_gshell(gshell_id) else {
-            return;
         };
+
         self.apply_gshell_focus_change(previous_gshell, focused_gshell);
-        self.remove_gshell(gshell_id);
-        self.remove_render_target(RenderTargetId::new(gshell_id.value()));
+        for closed_gshell in closed_gshells {
+            self.remove_gshell(closed_gshell);
+            self.remove_render_target(RenderTargetId::new(closed_gshell.value()));
+        }
         self.pane_navigation_enabled = self.visible_gshells().len() > 1;
         let window_size = self.current_terminal_size_info().window_size();
         self.resize_workspace_gshells(window_size);
@@ -317,7 +427,7 @@ impl App {
 
     fn current_gshell_size_info(&self, gshell_id: GShellId) -> Option<TerminalSizeInfo> {
         let window_size = self.current_terminal_size_info().window_size();
-        self.workspace_render_layout(window_size)
+        self.current_workspace_render_layout(window_size)
             .into_iter()
             .find(|placement| placement.target_id.value() == gshell_id.value())
             .map(|placement| self.terminal_size_info_for_surface(placement))
@@ -409,7 +519,12 @@ impl App {
         };
         if matches!(
             action,
-            KeyboardAction::FocusNextPane | KeyboardAction::FocusPreviousPane
+            KeyboardAction::FocusNextPane
+                | KeyboardAction::FocusPreviousPane
+                | KeyboardAction::FocusPaneLeft
+                | KeyboardAction::FocusPaneRight
+                | KeyboardAction::FocusPaneUp
+                | KeyboardAction::FocusPaneDown
         ) && !self.pane_navigation_enabled
         {
             return false;
@@ -425,6 +540,9 @@ impl App {
                         event: GShellInputEvent::ToggleViMode,
                     });
                 }
+                KeyboardAction::NewTab => self.create_workspace_tab(),
+                KeyboardAction::NextTab => self.activate_next_workspace_tab(),
+                KeyboardAction::PreviousTab => self.activate_previous_workspace_tab(),
                 KeyboardAction::SplitHorizontal => {
                     self.split_focused_workspace_pane(PaneSplitDirection::Horizontal);
                 }
@@ -441,6 +559,10 @@ impl App {
                     let focused_gshell = self.focus_previous_gshell();
                     self.apply_gshell_focus_change(previous_gshell, focused_gshell);
                 }
+                KeyboardAction::FocusPaneLeft => self.focus_workspace_pane(PaneDirection::Left),
+                KeyboardAction::FocusPaneRight => self.focus_workspace_pane(PaneDirection::Right),
+                KeyboardAction::FocusPaneUp => self.focus_workspace_pane(PaneDirection::Up),
+                KeyboardAction::FocusPaneDown => self.focus_workspace_pane(PaneDirection::Down),
                 KeyboardAction::ClosePane => {
                     self.close_workspace_gshell(event_loop, self.focused_gshell());
                 }
@@ -476,35 +598,12 @@ impl App {
         }
     }
 
-    fn try_handle_pane_navigation(
-        &mut self,
-        state: WindowInputElementState,
-        logical_key: &WindowInputKey,
-    ) -> bool {
-        if !matches_pane_cycle_shortcut(
-            self.pane_navigation_enabled,
-            self.window_input_modifiers,
-            state,
-            logical_key,
-        ) {
-            return false;
-        }
-
-        if state == WindowInputElementState::Pressed {
-            let previous_gshell = self.focused_gshell();
-            let focused_gshell = self.focus_next_gshell();
-            self.apply_gshell_focus_change(previous_gshell, focused_gshell);
-        }
-
-        true
-    }
-
     fn try_focus_pane_at_cursor(&mut self) -> bool {
         let Some(cursor_position) = self.cursor_position else {
             return false;
         };
         let window_size = self.current_terminal_size_info().window_size();
-        let placements = self.workspace_render_layout(window_size);
+        let placements = self.current_workspace_render_layout(window_size);
         let Some(target_id) = render_target_at_position(&placements, cursor_position) else {
             debug!(
                 x = cursor_position.x,
@@ -572,7 +671,7 @@ impl App {
         position: PhysicalPosition<f64>,
     ) -> Option<(GShellId, WindowPointerPosition)> {
         let window_size = self.current_terminal_size_info().window_size();
-        let placements = self.workspace_render_layout(window_size);
+        let placements = self.current_workspace_render_layout(window_size);
         let placement = *render_surface_at_position(&placements, position)?;
         let size_info = self.terminal_size_info_for_surface(placement);
         let viewport = size_info.render_viewport();
@@ -695,6 +794,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
             RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { .. }) => {
                 self.consume_latest_terminal_snapshot();
                 self.update_ime_cursor_area();
+                self.request_redraw();
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged { gshell_id, title }) => {
+                self.update_gshell_title(gshell_id, title);
+                self.set_tab_bar(self.current_tab_bar_snapshot());
                 self.request_redraw();
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
@@ -830,10 +934,6 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     return;
                 }
 
-                if self.try_handle_pane_navigation(state, &logical_key) {
-                    return;
-                }
-
                 if self.try_handle_copy_shortcut(state, &logical_key, physical_key) {
                     return;
                 }
@@ -884,19 +984,34 @@ impl ApplicationHandler<RuntimeEvent> for App {
     }
 }
 
-fn matches_pane_cycle_shortcut(
-    enabled: bool,
-    modifiers: WindowInputModifiers,
-    state: WindowInputElementState,
-    logical_key: &WindowInputKey,
-) -> bool {
-    enabled
-        && modifiers.control_key()
-        && matches!(
-            state,
-            WindowInputElementState::Pressed | WindowInputElementState::Released
-        )
-        && matches!(logical_key, WindowInputKey::Named(WindowInputNamedKey::Tab))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceContentLayout {
+    y_px: u32,
+    content_size: TerminalWindowSize,
+}
+
+fn workspace_content_layout(
+    window_size: TerminalWindowSize,
+    cell_height_px: u32,
+    show_tab_bar: bool,
+    position: TabBarPosition,
+) -> WorkspaceContentLayout {
+    let bar_height_px = if show_tab_bar {
+        cell_height_px.min(window_size.height_px().saturating_sub(1))
+    } else {
+        0
+    };
+    WorkspaceContentLayout {
+        y_px: if position == TabBarPosition::Top {
+            bar_height_px
+        } else {
+            0
+        },
+        content_size: TerminalWindowSize::new(
+            window_size.width_px(),
+            window_size.height_px().saturating_sub(bar_height_px).max(1),
+        ),
+    }
 }
 
 fn matches_keyboard_binding(
@@ -1161,25 +1276,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ctrl_tab_cycles_panes_only_when_navigation_is_enabled() {
-        let modifiers = WindowInputModifiers::new(true, false, false, false);
-        let tab = WindowInputKey::Named(WindowInputNamedKey::Tab);
-
-        assert!(matches_pane_cycle_shortcut(
-            true,
-            modifiers,
-            WindowInputElementState::Pressed,
-            &tab,
-        ));
-        assert!(!matches_pane_cycle_shortcut(
-            false,
-            modifiers,
-            WindowInputElementState::Pressed,
-            &tab,
-        ));
-    }
-
-    #[test]
     fn keyboard_binding_matches_key_and_exact_modifiers() {
         let binding = KeyboardBinding {
             key: "Space".to_string(),
@@ -1221,6 +1317,75 @@ mod tests {
             &WindowInputKey::Character("D".to_string()),
             winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD),
         ));
+    }
+
+    #[test]
+    fn default_tab_switching_supports_arrows_and_vim_aliases() {
+        let config = GerminalConfig::default();
+        for (key, action) in [
+            ("Left", KeyboardAction::PreviousTab),
+            ("H", KeyboardAction::PreviousTab),
+            ("Right", KeyboardAction::NextTab),
+            ("L", KeyboardAction::NextTab),
+        ] {
+            assert!(config.keyboard.bindings.iter().any(|binding| {
+                binding.key == key && binding.mods == "Control|Shift" && binding.action == action
+            }));
+        }
+    }
+
+    #[test]
+    fn default_directional_pane_focus_uses_ctrl_alt_arrows() {
+        let config = GerminalConfig::default();
+        for (key, action) in [
+            ("Left", KeyboardAction::FocusPaneLeft),
+            ("Right", KeyboardAction::FocusPaneRight),
+            ("Up", KeyboardAction::FocusPaneUp),
+            ("Down", KeyboardAction::FocusPaneDown),
+        ] {
+            assert!(config.keyboard.bindings.iter().any(|binding| {
+                binding.key == key && binding.mods == "Control|Alt" && binding.action == action
+            }));
+        }
+    }
+
+    #[test]
+    fn top_tab_bar_offsets_terminal_content_by_one_cell() {
+        let layout = workspace_content_layout(
+            TerminalWindowSize::new(800, 600),
+            24,
+            true,
+            TabBarPosition::Top,
+        );
+
+        assert_eq!(layout.y_px, 24);
+        assert_eq!(layout.content_size, TerminalWindowSize::new(800, 576));
+    }
+
+    #[test]
+    fn bottom_tab_bar_keeps_terminal_origin_and_reserves_one_cell() {
+        let layout = workspace_content_layout(
+            TerminalWindowSize::new(800, 600),
+            24,
+            true,
+            TabBarPosition::Bottom,
+        );
+
+        assert_eq!(layout.y_px, 0);
+        assert_eq!(layout.content_size, TerminalWindowSize::new(800, 576));
+    }
+
+    #[test]
+    fn single_tab_uses_the_entire_window() {
+        let layout = workspace_content_layout(
+            TerminalWindowSize::new(800, 600),
+            24,
+            false,
+            TabBarPosition::Bottom,
+        );
+
+        assert_eq!(layout.y_px, 0);
+        assert_eq!(layout.content_size, TerminalWindowSize::new(800, 600));
     }
 
     #[test]

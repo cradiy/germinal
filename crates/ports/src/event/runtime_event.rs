@@ -39,6 +39,10 @@ pub enum GShellRuntimeEvent {
         gshell_id: GShellId,
         seq: Seq,
     },
+    TitleChanged {
+        gshell_id: GShellId,
+        title: Option<String>,
+    },
     SelectionText {
         gshell_id: GShellId,
         text: Option<String>,
