@@ -12,5 +12,6 @@ pub struct GShellInput {
 pub enum GShellInputEvent {
     Bytes(Vec<u8>),
     Paste(String),
+    CopySelection,
     Window(WindowInputEvent),
 }

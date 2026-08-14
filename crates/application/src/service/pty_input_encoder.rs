@@ -3,7 +3,11 @@ use germinal_ports::{
         WindowInputElementState, WindowInputKey, WindowInputModifiers, WindowInputNamedKey,
         WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
     },
-    pty_host::{terminal_input_mode::TerminalInputModes, terminal_size::TerminalPtySize},
+    pty_host::{
+        terminal_input_mode::TerminalInputModes,
+        terminal_size::TerminalPtySize,
+        worker_input::{TerminalSelectionPoint, TerminalSelectionSide},
+    },
 };
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -111,6 +115,13 @@ impl PtyMouseEncoder {
         self.pressed_buttons.clear();
     }
 
+    pub(super) fn selection_point(
+        &self,
+        position: WindowPointerPosition,
+    ) -> Option<TerminalSelectionPoint> {
+        terminal_selection_point_at(position, self.size)
+    }
+
     pub(super) fn moved(
         &mut self,
         modes: TerminalInputModes,
@@ -212,11 +223,19 @@ impl PtyMouseEncoder {
     }
 }
 
-fn mouse_reporting_enabled(modes: TerminalInputModes) -> bool {
+pub(super) fn mouse_reporting_enabled(modes: TerminalInputModes) -> bool {
     modes.sgr_mouse() && modes.mouse_tracking()
 }
 
 fn terminal_cell_at(position: WindowPointerPosition, size: TerminalPtySize) -> Option<(u16, u16)> {
+    let point = terminal_selection_point_at(position, size)?;
+    Some((point.column + 1, point.row + 1))
+}
+
+fn terminal_selection_point_at(
+    position: WindowPointerPosition,
+    size: TerminalPtySize,
+) -> Option<TerminalSelectionPoint> {
     if !position.x_px.is_finite()
         || !position.y_px.is_finite()
         || position.x_px < 0.0
@@ -227,15 +246,19 @@ fn terminal_cell_at(position: WindowPointerPosition, size: TerminalPtySize) -> O
         return None;
     }
 
-    let column = ((position.x_px * f64::from(size.columns()) / f64::from(size.pixel_width()))
-        .floor() as u32
-        + 1)
-    .clamp(1, u32::from(size.columns().max(1)));
-    let row = ((position.y_px * f64::from(size.rows()) / f64::from(size.pixel_height())).floor()
-        as u32
-        + 1)
-    .clamp(1, u32::from(size.rows().max(1)));
-    Some((column as u16, row as u16))
+    let columns = size.columns().max(1);
+    let rows = size.rows().max(1);
+    let scaled_x = position.x_px * f64::from(columns) / f64::from(size.pixel_width());
+    let scaled_y = position.y_px * f64::from(rows) / f64::from(size.pixel_height());
+    let column = (scaled_x.floor() as u32).min(u32::from(columns - 1)) as u16;
+    let row = (scaled_y.floor() as u32).min(u32::from(rows - 1)) as u16;
+    let side = if scaled_x >= f64::from(columns) || scaled_x.fract() >= 0.5 {
+        TerminalSelectionSide::Right
+    } else {
+        TerminalSelectionSide::Left
+    };
+
+    Some(TerminalSelectionPoint::new(column, row, side))
 }
 
 fn sgr_mouse_report(code: u8, cell: (u16, u16), released: bool) -> Vec<u8> {

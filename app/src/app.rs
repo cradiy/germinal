@@ -255,6 +255,42 @@ impl App {
         }
     }
 
+    fn try_handle_copy_shortcut(
+        &mut self,
+        state: WindowInputElementState,
+        logical_key: &WindowInputKey,
+        physical_key: winit::keyboard::PhysicalKey,
+    ) -> bool {
+        if !self
+            .paste_controller
+            .handles_copy_shortcut(state, logical_key, physical_key)
+        {
+            return false;
+        }
+
+        if state == WindowInputElementState::Pressed {
+            self.route_input_to_gshell(GShellInput {
+                gshell_id: self.focused_gshell(),
+                event: GShellInputEvent::CopySelection,
+            });
+        }
+        true
+    }
+
+    fn write_selection_to_clipboard(&mut self, gshell_id: GShellId, text: Option<String>) {
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            debug!(
+                gshell_id = gshell_id.value(),
+                "copy shortcut matched without an active selection"
+            );
+            return;
+        };
+
+        if let Err(error) = self.paste_controller.write_clipboard_text(text) {
+            warn!(gshell_id = gshell_id.value(), error = %error, "failed to copy terminal selection");
+        }
+    }
+
     fn try_handle_pane_navigation(
         &mut self,
         state: WindowInputElementState,
@@ -455,6 +491,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.consume_latest_terminal_snapshot();
                 self.request_redraw();
             }
+            RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
+                self.write_selection_to_clipboard(gshell_id, text);
+            }
             RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }) => {
                 let visible_gshells = self.visible_gshells();
                 if !visible_gshells.contains(&gshell_id) {
@@ -595,6 +634,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.paste_controller.observe_key_event(state, physical_key);
 
                 if self.try_handle_pane_navigation(state, &logical_key) {
+                    return;
+                }
+
+                if self.try_handle_copy_shortcut(state, &logical_key, physical_key) {
                     return;
                 }
 

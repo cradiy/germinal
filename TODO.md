@@ -19,8 +19,8 @@ stable platform for GNative applications.
       reporting.
 - [x] Keep alternate-screen applications such as Neovim and Yazi isolated from normal-screen
       scrollback.
-- [ ] Add character, word, and line selection with mouse dragging, double-click, and triple-click.
-- [ ] Add `Ctrl+Shift+C` clipboard copy without interfering with PTY input.
+- [x] Add character, word, and line selection with mouse dragging, double-click, and triple-click.
+- [x] Add `Ctrl+Shift+C` clipboard copy without interfering with PTY input.
 - [ ] Clear or preserve selections consistently when output, resize, focus, or viewport state
       changes.
 

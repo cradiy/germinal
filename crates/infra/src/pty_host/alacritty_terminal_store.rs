@@ -9,7 +9,12 @@ use std::{
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
-    term::{Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport},
+    index::{Column, Point, Side},
+    selection::{Selection, SelectionType},
+    term::{
+        Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport,
+        viewport_to_point,
+    },
     vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_ports::{
@@ -20,6 +25,7 @@ use germinal_ports::{
         },
         terminal_input_mode::TerminalInputModes,
         width::terminal_char_cell_width,
+        worker_input::{TerminalSelectionKind, TerminalSelectionPoint, TerminalSelectionSide},
     },
     rendering::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
@@ -231,12 +237,68 @@ impl AlacrittyTerminalStore {
         true
     }
 
+    pub fn start_selection(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        kind: TerminalSelectionKind,
+        point: TerminalSelectionPoint,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        let point = selection_point(&state.term, point);
+        let side = selection_side(point.1);
+        let kind = match kind {
+            TerminalSelectionKind::Character => SelectionType::Simple,
+            TerminalSelectionKind::Word => SelectionType::Semantic,
+            TerminalSelectionKind::Line => SelectionType::Lines,
+        };
+
+        state.term.selection = Some(Selection::new(kind, point.0, side));
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn update_selection(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        point: TerminalSelectionPoint,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        let point = selection_point(&state.term, point);
+        let side = selection_side(point.1);
+        let Some(selection) = state.term.selection.as_mut() else {
+            return false;
+        };
+        let previous = selection.clone();
+        selection.update(point.0, side);
+        if *selection == previous {
+            return false;
+        }
+
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn selection_text(&self, render_target_id: RenderTargetId) -> Option<String> {
+        let inner = self.inner.borrow();
+        inner.get(&render_target_id)?.term.selection_to_string()
+    }
+
     fn snapshot_from_state(
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
     ) -> TerminalSnapshot {
         let (lines, text_runs) = visible_lines_and_runs(&state.term);
-        let dirty_rows = dirty_rows_of(state.term.damage(), state.size.screen_lines());
+        let dirty_rows = dirty_rows_from_state(state);
 
         TerminalSnapshot {
             render_target_id,
@@ -252,13 +314,13 @@ impl AlacrittyTerminalStore {
         state: &mut AlacrittyTermState,
     ) -> RenderSurfaceSnapshot {
         let rows = visible_surface_rows(&state.term);
-        let dirty_rows = dirty_rows_of(state.term.damage(), state.size.screen_lines());
+        let dirty_rows = dirty_rows_from_state(state);
 
         let placeholder_cells = kitty_placeholder_cells(&state.term);
         let renderable = state.term.renderable_content();
         let default_background = renderable.colors[NamedColor::Background]
             .map(rgb_to_dto)
-            .or_else(|| dominant_background_of(&rows))
+            .or_else(|| dominant_background_of_term(&state.term))
             .unwrap_or(RgbColorDto::new(0, 0, 0));
 
         RenderSurfaceSnapshot {
@@ -453,6 +515,7 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
 
         if state.latest_seq <= presented_seq {
             state.term.reset_damage();
+            state.selection_damage = false;
         }
     }
 }
@@ -468,6 +531,7 @@ pub struct AlacrittyTermState {
     latest_seq: Seq,
     total_bytes: u64,
     chunk_count: u64,
+    selection_damage: bool,
 }
 
 impl AlacrittyTermState {
@@ -493,6 +557,7 @@ impl AlacrittyTermState {
             latest_seq: Seq::ZERO,
             total_bytes: 0,
             chunk_count: 0,
+            selection_damage: false,
         }
     }
 
@@ -555,12 +620,17 @@ fn visible_lines_and_runs(
 ) -> (Vec<TerminalLineSnapshot>, Vec<TerminalTextRunSnapshot>) {
     let renderable = term.renderable_content();
     let display_offset = renderable.display_offset;
+    let selection = renderable.selection;
+    let cursor = renderable.cursor;
+    let colors = renderable.colors;
     let mut cells_by_row: BTreeMap<u32, Vec<StyledCell>> = BTreeMap::new();
 
     for indexed in renderable.display_iter {
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
             continue;
         };
+        let selected = selection
+            .is_some_and(|selection| selection.contains_cell(&indexed, cursor.point, cursor.shape));
         let cell = indexed.cell;
         let row = point.line as u32;
         let col = point.column.0 as u32;
@@ -569,10 +639,15 @@ fn visible_lines_and_runs(
             continue;
         }
 
+        let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
         cells_by_row.entry(row).or_default().push(StyledCell {
             col,
             c: cell.c,
-            style: style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors),
+            style: if selected {
+                selected_style(style)
+            } else {
+                style
+            },
         });
     }
 
@@ -600,6 +675,9 @@ fn visible_lines_and_runs(
 fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurfaceRowSnapshot> {
     let renderable = term.renderable_content();
     let display_offset = renderable.display_offset;
+    let selection = renderable.selection;
+    let cursor = renderable.cursor;
+    let colors = renderable.colors;
     let mut rows = Vec::new();
     let mut current_row = None::<u32>;
     let mut current_runs = Vec::new();
@@ -612,6 +690,8 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
             continue;
         };
+        let selected = selection
+            .is_some_and(|selection| selection.contains_cell(&indexed, cursor.point, cursor.shape));
         let cell = indexed.cell;
         let row = point.line as u32;
         let col = point.column.0 as u32;
@@ -639,7 +719,12 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
             continue;
         }
 
-        let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors);
+        let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
+        let style = if selected {
+            selected_style(style)
+        } else {
+            style
+        };
         if cell.c == ' ' && !style_has_visible_content(style) {
             continue;
         }
@@ -828,18 +913,19 @@ fn style_has_visible_content(style: TextStyleDto) -> bool {
     style.background.is_some() || style.underline || style.bold || style.italic
 }
 
-fn dominant_background_of(rows: &[RenderSurfaceRowSnapshot]) -> Option<RgbColorDto> {
+fn dominant_background_of_term(term: &Term<PtyWriteEventListener>) -> Option<RgbColorDto> {
     let mut weights = Vec::<(RgbColorDto, u64)>::new();
-    for run in rows.iter().flat_map(|row| &row.runs) {
-        let Some(background) = run.style.background else {
+    let renderable = term.renderable_content();
+    for indexed in renderable.display_iter {
+        let cell = indexed.cell;
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == KITTY_IMAGE_PLACEHOLDER {
+            continue;
+        }
+        let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors);
+        let Some(background) = style.background else {
             continue;
         };
-        let cell_width = run
-            .text
-            .chars()
-            .map(terminal_char_cell_width)
-            .map(u64::from)
-            .sum::<u64>();
+        let cell_width = u64::from(terminal_char_cell_width(cell.c).max(1));
         if let Some((_, weight)) = weights.iter_mut().find(|(color, _)| *color == background) {
             *weight += cell_width;
         } else {
@@ -867,6 +953,14 @@ fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextSty
         italic: flags.contains(Flags::ITALIC),
         underline: flags.contains(Flags::UNDERLINE),
     }
+}
+
+fn selected_style(mut style: TextStyleDto) -> TextStyleDto {
+    let foreground = style.foreground.unwrap_or(RgbColorDto::new(229, 229, 229));
+    let background = style.background.unwrap_or(RgbColorDto::new(0, 0, 0));
+    style.foreground = Some(background);
+    style.background = Some(foreground);
+    style
 }
 
 fn color_to_rgb(color: Color, colors: &Colors) -> Option<RgbColorDto> {
@@ -957,6 +1051,35 @@ fn ansi_256_cube_component(level: u8) -> u8 {
         0 => 0,
         1..=5 => 55 + 40 * level,
         _ => unreachable!("ANSI 256-color cube level must be 0..=5"),
+    }
+}
+
+fn selection_point(
+    term: &Term<PtyWriteEventListener>,
+    point: TerminalSelectionPoint,
+) -> (Point, TerminalSelectionSide) {
+    let side = point.side;
+    let column = usize::from(point.column).min(term.columns().saturating_sub(1));
+    let row = usize::from(point.row).min(term.screen_lines().saturating_sub(1));
+    let point = viewport_to_point(
+        term.grid().display_offset(),
+        Point::new(row, Column(column)),
+    );
+    (point, side)
+}
+
+fn selection_side(side: TerminalSelectionSide) -> Side {
+    match side {
+        TerminalSelectionSide::Left => Side::Left,
+        TerminalSelectionSide::Right => Side::Right,
+    }
+}
+
+fn dirty_rows_from_state(state: &mut AlacrittyTermState) -> Vec<u32> {
+    if state.selection_damage {
+        (0..state.size.screen_lines() as u32).collect()
+    } else {
+        dirty_rows_of(state.term.damage(), state.size.screen_lines())
     }
 }
 
@@ -1116,6 +1239,82 @@ mod tests {
         assert!(store.scroll_display(target_id, Seq::new(3), Scroll::Bottom));
         assert!(store.cursor_snapshot(target_id).is_some());
         assert!(!store.scroll_display(target_id, Seq::new(4), Scroll::Bottom));
+    }
+
+    #[test]
+    fn character_selection_tracks_dragged_cell_sides() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(16, 2));
+        let target_id = RenderTargetId::new(50);
+        store.apply_bytes(target_id, Seq::new(1), b"hello world");
+
+        assert!(store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Character,
+            TerminalSelectionPoint::new(0, 0, TerminalSelectionSide::Left),
+        ));
+        assert!(store.update_selection(
+            target_id,
+            Seq::new(3),
+            TerminalSelectionPoint::new(4, 0, TerminalSelectionSide::Right),
+        ));
+
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("hello"));
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.dirty_rows, vec![0, 1]);
+        let selected = snapshot.rows[0]
+            .runs
+            .iter()
+            .find(|run| run.text == "hello")
+            .expect("selected text should have its own styled run");
+        assert_eq!(selected.style.foreground, Some(RgbColorDto::new(0, 0, 0)));
+        assert_eq!(
+            selected.style.background,
+            Some(RgbColorDto::new(229, 229, 229))
+        );
+    }
+
+    #[test]
+    fn word_and_line_selection_expand_with_alacritty_semantics() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(51);
+        store.apply_bytes(target_id, Seq::new(1), b"hello world\r\nsecond line");
+
+        assert!(store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(7, 0, TerminalSelectionSide::Left),
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("world"));
+
+        assert!(store.start_selection(
+            target_id,
+            Seq::new(3),
+            TerminalSelectionKind::Line,
+            TerminalSelectionPoint::new(3, 1, TerminalSelectionSide::Left),
+        ));
+        assert_eq!(
+            store.selection_text(target_id).as_deref(),
+            Some("second line\n")
+        );
+    }
+
+    #[test]
+    fn selection_uses_the_scrollback_viewport_offset() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(52);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
+        assert!(store.scroll_display(target_id, Seq::new(2), Scroll::Top));
+
+        assert!(store.start_selection(
+            target_id,
+            Seq::new(3),
+            TerminalSelectionKind::Word,
+            TerminalSelectionPoint::new(1, 0, TerminalSelectionSide::Left),
+        ));
+
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one"));
     }
 
     #[test]
@@ -1399,6 +1598,18 @@ mod tests {
         let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
 
         assert_eq!(snapshot.default_background, RgbColorDto::new(30, 30, 47));
+
+        store.start_selection(
+            target_id,
+            Seq::new(2),
+            TerminalSelectionKind::Line,
+            TerminalSelectionPoint::new(0, 0, TerminalSelectionSide::Left),
+        );
+        let selected_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(
+            selected_snapshot.default_background,
+            RgbColorDto::new(30, 30, 47)
+        );
     }
 
     #[test]

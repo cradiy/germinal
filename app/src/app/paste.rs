@@ -47,6 +47,14 @@ pub enum PasteError {
     ReadClipboard(#[source] arboard::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum CopyError {
+    #[error("failed to open clipboard: {0}")]
+    OpenClipboard(#[source] arboard::Error),
+    #[error("failed to write clipboard text: {0}")]
+    WriteClipboard(#[source] arboard::Error),
+}
+
 #[derive(Default)]
 pub struct HostPasteController {
     modifiers: HostPasteModifiers,
@@ -76,15 +84,7 @@ impl HostPasteController {
         logical_key: &WindowInputKey,
         physical_key: PhysicalKey,
     ) -> Result<HostPasteAction, PasteError> {
-        if !matches_paste_shortcut(
-            HostPasteModifiers {
-                control: self.modifiers.control || self.pressed.control_key(),
-                shift: self.modifiers.shift || self.pressed.shift_key(),
-            },
-            state,
-            logical_key,
-            physical_key,
-        ) {
+        if !matches_paste_shortcut(self.effective_modifiers(), state, logical_key, physical_key) {
             return Ok(HostPasteAction::NotHandled);
         }
 
@@ -101,6 +101,27 @@ impl HostPasteController {
             gshell_id,
             event: GShellInputEvent::Paste(text),
         }))
+    }
+
+    pub fn handles_copy_shortcut(
+        &self,
+        state: WindowInputElementState,
+        logical_key: &WindowInputKey,
+        physical_key: PhysicalKey,
+    ) -> bool {
+        matches_copy_shortcut(self.effective_modifiers(), state, logical_key, physical_key)
+    }
+
+    pub fn write_clipboard_text(&mut self, text: String) -> Result<(), CopyError> {
+        let mut clipboard = Clipboard::new().map_err(CopyError::OpenClipboard)?;
+        clipboard.set_text(text).map_err(CopyError::WriteClipboard)
+    }
+
+    fn effective_modifiers(&self) -> HostPasteModifiers {
+        HostPasteModifiers {
+            control: self.modifiers.control || self.pressed.control_key(),
+            shift: self.modifiers.shift || self.pressed.shift_key(),
+        }
     }
 
     fn read_clipboard_text(&mut self) -> Result<String, PasteError> {
@@ -130,6 +151,30 @@ fn matches_paste_shortcut(
         || matches!(
             logical_key,
             WindowInputKey::Character(text) if text.eq_ignore_ascii_case("v")
+        )
+}
+
+fn matches_copy_shortcut(
+    modifiers: HostPasteModifiers,
+    state: WindowInputElementState,
+    logical_key: &WindowInputKey,
+    physical_key: PhysicalKey,
+) -> bool {
+    if !modifiers.control || !modifiers.shift {
+        return false;
+    }
+
+    if !matches!(
+        state,
+        WindowInputElementState::Pressed | WindowInputElementState::Released
+    ) {
+        return false;
+    }
+
+    matches!(physical_key, PhysicalKey::Code(KeyCode::KeyC))
+        || matches!(
+            logical_key,
+            WindowInputKey::Character(text) if text.eq_ignore_ascii_case("c")
         )
 }
 
@@ -186,6 +231,40 @@ mod tests {
             WindowInputElementState::Pressed,
             &WindowInputKey::Unidentified,
             PhysicalKey::Code(KeyCode::KeyV),
+        ));
+    }
+
+    #[test]
+    fn ctrl_shift_c_matches_copy_on_press_and_release() {
+        let modifiers = HostPasteModifiers {
+            control: true,
+            shift: true,
+        };
+
+        assert!(matches_copy_shortcut(
+            modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("c".into()),
+            PhysicalKey::Code(KeyCode::KeyC),
+        ));
+        assert!(matches_copy_shortcut(
+            modifiers,
+            WindowInputElementState::Released,
+            &WindowInputKey::Unidentified,
+            PhysicalKey::Code(KeyCode::KeyC),
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_without_shift_does_not_trigger_host_copy() {
+        assert!(!matches_copy_shortcut(
+            HostPasteModifiers {
+                control: true,
+                shift: false,
+            },
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("c".into()),
+            PhysicalKey::Code(KeyCode::KeyC),
         ));
     }
 

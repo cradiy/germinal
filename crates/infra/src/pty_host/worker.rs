@@ -21,7 +21,10 @@ use germinal_ports::{
         snapshot::TerminalSnapshotProvider,
         terminal_input_mode::TerminalInputModeState,
         worker_backend::ITerminalWorkerBackend,
-        worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
+        worker_input::{
+            TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
+            TerminalWorkerInput,
+        },
     },
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
     seq::Seq,
@@ -365,6 +368,22 @@ where
                     self.unpublished_seq = Some(seq);
                 }
             }
+            TerminalWorkerInput::StartSelection { kind, point } => {
+                self.flush_pending_input();
+                if let Some(seq) = self.start_selection(kind, point) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::UpdateSelection(point) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.update_selection(point) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::RequestSelectionText => {
+                self.flush_pending_input();
+                self.dispatch_selection_text();
+            }
             TerminalWorkerInput::SetPtyInput {
                 sender,
                 input_modes,
@@ -482,6 +501,36 @@ where
         self.terminal_store
             .scroll_display(self.target_id, seq, scroll)
             .then_some(seq)
+    }
+
+    fn start_selection(
+        &mut self,
+        kind: TerminalSelectionKind,
+        point: TerminalSelectionPoint,
+    ) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .start_selection(self.target_id, seq, kind, point)
+            .then_some(seq)
+    }
+
+    fn update_selection(&mut self, point: TerminalSelectionPoint) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .update_selection(self.target_id, seq, point)
+            .then_some(seq)
+    }
+
+    fn dispatch_selection_text(&self) {
+        let text = self.terminal_store.selection_text(self.target_id);
+        let _ = self
+            .proxy
+            .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText {
+                gshell_id: self.gshell_id,
+                text,
+            }));
     }
 
     fn publish_unpublished_snapshot(&mut self) -> bool {
@@ -852,7 +901,10 @@ mod tests {
             pty_input::pty_input_channel,
             terminal_input_mode::TerminalInputModeState,
             worker_backend::ITerminalWorkerBackend,
-            worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
+            worker_input::{
+                TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
+                TerminalSelectionSide, TerminalWorkerInput,
+            },
         },
         rendering::surface_snapshot::RenderSurfaceSnapshot,
     };
@@ -1085,6 +1137,73 @@ mod tests {
         assert!(text.contains("one"));
         assert!(!text.contains("three"));
         assert!(snapshot.cursor.is_none());
+    }
+
+    #[test]
+    fn terminal_worker_returns_selected_text_to_the_app() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(7),
+            TerminalGridSize::new(16, 2),
+            snapshot_tx,
+            wake_pending.clone(),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(b"hello world".to_vec()))
+            .expect("terminal output should send");
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("initial snapshot should arrive");
+        event_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("initial frame-ready event should arrive");
+        wake_pending.store(false, Ordering::Release);
+
+        input
+            .send(TerminalWorkerInput::RequestSelectionText)
+            .expect("empty selection text request should send");
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("empty selection text event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText {
+                gshell_id: GShellId::new(7),
+                text: None,
+            })
+        );
+
+        input
+            .send(TerminalWorkerInput::StartSelection {
+                kind: TerminalSelectionKind::Character,
+                point: TerminalSelectionPoint::new(0, 0, TerminalSelectionSide::Left),
+            })
+            .expect("selection start should send");
+        input
+            .send(TerminalWorkerInput::UpdateSelection(
+                TerminalSelectionPoint::new(4, 0, TerminalSelectionSide::Right),
+            ))
+            .expect("selection update should send");
+        input
+            .send(TerminalWorkerInput::RequestSelectionText)
+            .expect("selection text request should send");
+
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("selection text event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText {
+                gshell_id: GShellId::new(7),
+                text: Some("hello".to_string()),
+            })
+        );
     }
 
     #[test]

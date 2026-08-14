@@ -162,6 +162,7 @@ fn gnative_input_event_from(
     match input.event {
         GShellInputEvent::Bytes(bytes) => Some(GNativeInputEvent::Bytes(bytes)),
         GShellInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
+        GShellInputEvent::CopySelection => None,
         GShellInputEvent::Window(window_event) => match window_event {
             WindowInputEvent::ModifiersChanged(modifiers) => Some(
                 GNativeInputEvent::ModifiersChanged(gnative_input_modifiers_from(modifiers)),
@@ -387,6 +388,19 @@ mod tests {
         assert_eq!(
             gnative_input_key_from(&WindowInputKey::Named(WindowInputNamedKey::PageDown)),
             GNativeInputKey::Unidentified,
+        );
+    }
+
+    #[test]
+    fn host_copy_selection_does_not_enter_the_gnative_protocol() {
+        let input = GShellInput {
+            gshell_id: GShellId::new(1),
+            event: GShellInputEvent::CopySelection,
+        };
+
+        assert_eq!(
+            gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false)),
+            None
         );
     }
 

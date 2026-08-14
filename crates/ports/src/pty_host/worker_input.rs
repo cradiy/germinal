@@ -11,10 +11,42 @@ pub enum TerminalDisplayScroll {
     Bottom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSelectionKind {
+    Character,
+    Word,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSelectionSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSelectionPoint {
+    pub column: u16,
+    pub row: u16,
+    pub side: TerminalSelectionSide,
+}
+
+impl TerminalSelectionPoint {
+    pub const fn new(column: u16, row: u16, side: TerminalSelectionSide) -> Self {
+        Self { column, row, side }
+    }
+}
+
 pub enum TerminalWorkerInput {
     Bytes(Vec<u8>),
     Resize(TerminalGridSize),
     ScrollDisplay(TerminalDisplayScroll),
+    StartSelection {
+        kind: TerminalSelectionKind,
+        point: TerminalSelectionPoint,
+    },
+    UpdateSelection(TerminalSelectionPoint),
+    RequestSelectionText,
     SetPtyInput {
         sender: PtyInputSender,
         input_modes: TerminalInputModeState,
