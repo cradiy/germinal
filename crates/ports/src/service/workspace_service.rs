@@ -1,4 +1,6 @@
-use germinal_domain::gshell::vo::gshell_id::GShellId;
+use germinal_domain::{
+    gshell::vo::gshell_id::GShellId, workspace::vo::pane_split_direction::PaneSplitDirection,
+};
 use thiserror::Error;
 
 use crate::{
@@ -21,6 +23,9 @@ pub trait IWorkspaceService {
     fn focused_gshell(&self) -> GShellId;
     fn focus_gshell(&self, gshell_id: GShellId) -> bool;
     fn focus_next_gshell(&self) -> GShellId;
+    fn focus_previous_gshell(&self) -> GShellId;
+    fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId;
+    fn swap_focused_gshell_with(&self, other: GShellId) -> bool;
     fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId>;
     fn visible_gshells(&self) -> Vec<GShellId>;
     fn workspace_render_layout(

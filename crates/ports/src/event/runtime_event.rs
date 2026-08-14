@@ -1,4 +1,5 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
+use germinal_domain::workspace::vo::pane_split_direction::PaneSplitDirection;
 use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::Seq};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub enum AppRuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceRuntimeEvent {
     RedrawRequested,
+    SplitFocusedPane { direction: PaneSplitDirection },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

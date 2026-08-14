@@ -14,7 +14,10 @@ use germinal_application::service::{
     render_service::RenderServiceState, worker_service::WorkerServiceState,
     workspace_service::WorkspaceServiceState,
 };
-use germinal_domain::{gshell::vo::gshell_id::GShellId, workspace::entity::workspace::Workspace};
+use germinal_domain::{
+    gshell::vo::gshell_id::GShellId,
+    workspace::{entity::workspace::Workspace, vo::pane_split_direction::PaneSplitDirection},
+};
 use germinal_infra::{
     gnative::gst_video_player_bridge::GstVideoPlayerBridge,
     pty::PlatformPtyBackend,
@@ -26,7 +29,7 @@ use germinal_infra::{
 use germinal_ports::{
     event::{
         gshell_input::{GShellInput, GShellInputEvent},
-        runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+        runtime_event::{GShellRuntimeEvent, RuntimeEvent, WorkspaceRuntimeEvent},
         runtime_event_dispatcher::IRuntimeEventDispatcher,
         window_input_event::{
             WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
@@ -83,6 +86,14 @@ pub struct App {
     pointer_gshell: Option<GShellId>,
     pane_navigation_enabled: bool,
     config: GerminalConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 impl App {
@@ -224,6 +235,86 @@ impl App {
         }
     }
 
+    fn split_focused_workspace_pane(&mut self, direction: PaneSplitDirection) {
+        let previous_gshell = self.focused_gshell();
+        let focused_gshell = self.split_focused_gshell(direction);
+        self.pane_navigation_enabled = true;
+
+        if self.render_runtime.is_none() {
+            return;
+        }
+
+        self.clear_ime_preedit(previous_gshell);
+        self.ensure_workspace_gshells();
+        let window_size = self.current_terminal_size_info().window_size();
+        self.resize_workspace_gshells(window_size);
+        self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+
+        if let Some(position) = self.cursor_position {
+            self.route_pointer_moved(position);
+        }
+        self.request_redraw();
+    }
+
+    fn swap_focused_workspace_pane(&mut self, direction: PaneDirection) {
+        if self.render_runtime.is_none() {
+            return;
+        }
+
+        let focused_gshell = self.focused_gshell();
+        let window_size = self.current_terminal_size_info().window_size();
+        let placements = self.workspace_render_layout(window_size);
+        let Some(other_target) = directional_neighbor_target(
+            &placements,
+            RenderTargetId::new(focused_gshell.value()),
+            direction,
+        ) else {
+            return;
+        };
+
+        self.clear_ime_preedit(focused_gshell);
+        if !self.swap_focused_gshell_with(GShellId::new(other_target.value())) {
+            return;
+        }
+
+        self.resize_workspace_gshells(window_size);
+        self.update_ime_cursor_area();
+        if let Some(position) = self.cursor_position {
+            self.route_pointer_moved(position);
+        }
+        self.request_redraw();
+    }
+
+    fn close_workspace_gshell(&mut self, event_loop: &ActiveEventLoop, gshell_id: GShellId) {
+        let visible_gshells = self.visible_gshells();
+        if !visible_gshells.contains(&gshell_id) {
+            debug!(
+                gshell_id = gshell_id.value(),
+                "ignored close request for a non-visible gshell"
+            );
+            return;
+        }
+        if visible_gshells.len() == 1 {
+            self.exit_and_persist(event_loop);
+            return;
+        }
+
+        let previous_gshell = self.focused_gshell();
+        let Some(focused_gshell) = self.close_gshell(gshell_id) else {
+            return;
+        };
+        self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+        self.remove_gshell(gshell_id);
+        self.remove_render_target(RenderTargetId::new(gshell_id.value()));
+        self.pane_navigation_enabled = self.visible_gshells().len() > 1;
+        let window_size = self.current_terminal_size_info().window_size();
+        self.resize_workspace_gshells(window_size);
+        if let Some(position) = self.cursor_position {
+            self.route_pointer_moved(position);
+        }
+        self.request_redraw();
+    }
+
     fn current_gshell_size_info(&self, gshell_id: GShellId) -> Option<TerminalSizeInfo> {
         let window_size = self.current_terminal_size_info().window_size();
         self.workspace_render_layout(window_size)
@@ -285,6 +376,7 @@ impl App {
 
     fn try_handle_keyboard_binding(
         &mut self,
+        event_loop: &ActiveEventLoop,
         state: WindowInputElementState,
         logical_key: &WindowInputKey,
         physical_key: winit::keyboard::PhysicalKey,
@@ -315,6 +407,13 @@ impl App {
         let Some(action) = action else {
             return false;
         };
+        if matches!(
+            action,
+            KeyboardAction::FocusNextPane | KeyboardAction::FocusPreviousPane
+        ) && !self.pane_navigation_enabled
+        {
+            return false;
+        }
 
         if state == WindowInputElementState::Pressed {
             match action {
@@ -325,6 +424,37 @@ impl App {
                         gshell_id,
                         event: GShellInputEvent::ToggleViMode,
                     });
+                }
+                KeyboardAction::SplitHorizontal => {
+                    self.split_focused_workspace_pane(PaneSplitDirection::Horizontal);
+                }
+                KeyboardAction::SplitVertical => {
+                    self.split_focused_workspace_pane(PaneSplitDirection::Vertical);
+                }
+                KeyboardAction::FocusNextPane => {
+                    let previous_gshell = self.focused_gshell();
+                    let focused_gshell = self.focus_next_gshell();
+                    self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+                }
+                KeyboardAction::FocusPreviousPane => {
+                    let previous_gshell = self.focused_gshell();
+                    let focused_gshell = self.focus_previous_gshell();
+                    self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+                }
+                KeyboardAction::ClosePane => {
+                    self.close_workspace_gshell(event_loop, self.focused_gshell());
+                }
+                KeyboardAction::SwapPaneLeft => {
+                    self.swap_focused_workspace_pane(PaneDirection::Left);
+                }
+                KeyboardAction::SwapPaneRight => {
+                    self.swap_focused_workspace_pane(PaneDirection::Right);
+                }
+                KeyboardAction::SwapPaneUp => {
+                    self.swap_focused_workspace_pane(PaneDirection::Up);
+                }
+                KeyboardAction::SwapPaneDown => {
+                    self.swap_focused_workspace_pane(PaneDirection::Down);
                 }
             }
         }
@@ -571,33 +701,17 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.write_selection_to_clipboard(gshell_id, text);
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }) => {
-                let visible_gshells = self.visible_gshells();
-                if !visible_gshells.contains(&gshell_id) {
-                    debug!(
-                        gshell_id = gshell_id.value(),
-                        "ignored close event for a non-visible gshell"
-                    );
-                } else if visible_gshells.len() == 1 {
-                    self.exit_and_persist(event_loop);
-                } else {
-                    let previous_gshell = self.focused_gshell();
-                    if let Some(focused_gshell) = self.close_gshell(gshell_id) {
-                        self.apply_gshell_focus_change(previous_gshell, focused_gshell);
-                        self.remove_gshell(gshell_id);
-                        self.remove_render_target(RenderTargetId::new(gshell_id.value()));
-                        self.pane_navigation_enabled = self.visible_gshells().len() > 1;
-                        let window_size = self.current_terminal_size_info().window_size();
-                        self.resize_workspace_gshells(window_size);
-                        self.request_redraw();
-                    }
-                }
+                self.close_workspace_gshell(event_loop, gshell_id);
             }
             RuntimeEvent::App(_) => {
                 self.exit_and_persist(event_loop);
             }
-            RuntimeEvent::Workspace(_) => {
+            RuntimeEvent::Workspace(WorkspaceRuntimeEvent::RedrawRequested) => {
                 self.drain_media_bridge_frames();
                 self.request_redraw();
+            }
+            RuntimeEvent::Workspace(WorkspaceRuntimeEvent::SplitFocusedPane { direction }) => {
+                self.split_focused_workspace_pane(direction);
             }
         }
     }
@@ -712,11 +826,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 let text = text.map(|text| text.to_string());
                 self.paste_controller.observe_key_event(state, physical_key);
 
-                if self.try_handle_pane_navigation(state, &logical_key) {
+                if self.try_handle_keyboard_binding(event_loop, state, &logical_key, physical_key) {
                     return;
                 }
 
-                if self.try_handle_keyboard_binding(state, &logical_key, physical_key) {
+                if self.try_handle_pane_navigation(state, &logical_key) {
                     return;
                 }
 
@@ -888,6 +1002,68 @@ fn render_target_at_position(
     render_surface_at_position(placements, position).map(|placement| placement.target_id)
 }
 
+fn directional_neighbor_target(
+    placements: &[RenderSurfacePlacement],
+    focused_target: RenderTargetId,
+    direction: PaneDirection,
+) -> Option<RenderTargetId> {
+    let focused = placements
+        .iter()
+        .find(|placement| placement.target_id == focused_target)?;
+    let focused_left = u64::from(focused.x_px);
+    let focused_top = u64::from(focused.y_px);
+    let focused_right = focused_left + u64::from(focused.width_px);
+    let focused_bottom = focused_top + u64::from(focused.height_px);
+
+    placements
+        .iter()
+        .filter(|candidate| candidate.target_id != focused_target)
+        .filter_map(|candidate| {
+            let left = u64::from(candidate.x_px);
+            let top = u64::from(candidate.y_px);
+            let right = left + u64::from(candidate.width_px);
+            let bottom = top + u64::from(candidate.height_px);
+            let (primary_gap, perpendicular_distance, overlap) = match direction {
+                PaneDirection::Left if right <= focused_left => (
+                    focused_left - right,
+                    (top + bottom).abs_diff(focused_top + focused_bottom),
+                    axis_overlap(top, bottom, focused_top, focused_bottom),
+                ),
+                PaneDirection::Right if left >= focused_right => (
+                    left - focused_right,
+                    (top + bottom).abs_diff(focused_top + focused_bottom),
+                    axis_overlap(top, bottom, focused_top, focused_bottom),
+                ),
+                PaneDirection::Up if bottom <= focused_top => (
+                    focused_top - bottom,
+                    (left + right).abs_diff(focused_left + focused_right),
+                    axis_overlap(left, right, focused_left, focused_right),
+                ),
+                PaneDirection::Down if top >= focused_bottom => (
+                    top - focused_bottom,
+                    (left + right).abs_diff(focused_left + focused_right),
+                    axis_overlap(left, right, focused_left, focused_right),
+                ),
+                _ => return None,
+            };
+            (overlap > 0).then_some((
+                primary_gap,
+                perpendicular_distance,
+                u64::MAX - overlap,
+                candidate.target_id.value(),
+                candidate.target_id,
+            ))
+        })
+        .min_by_key(|score| (score.0, score.1, score.2, score.3))
+        .map(|score| score.4)
+}
+
+fn axis_overlap(first_start: u64, first_end: u64, second_start: u64, second_end: u64) -> u64 {
+    first_end
+        .min(second_end)
+        .saturating_sub(first_start.max(second_start))
+}
+
 fn render_surface_at_position(
     placements: &[RenderSurfacePlacement],
     position: PhysicalPosition<f64>,
@@ -1026,6 +1202,51 @@ mod tests {
             &space,
             winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space),
         ));
+    }
+
+    #[test]
+    fn default_ctrl_shift_d_is_consumed_as_horizontal_split() {
+        let config = GerminalConfig::default();
+        let binding = config
+            .keyboard
+            .bindings
+            .iter()
+            .find(|binding| binding.action == KeyboardAction::SplitHorizontal)
+            .expect("horizontal split should have a default binding");
+
+        assert!(matches_keyboard_binding(
+            binding,
+            WindowInputModifiers::new(true, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("D".to_string()),
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD),
+        ));
+    }
+
+    #[test]
+    fn directional_neighbor_uses_visual_adjacency_for_nested_panes() {
+        let placements = vec![
+            RenderSurfacePlacement::new(RenderTargetId::new(1), 0, 0, 50, 100),
+            RenderSurfacePlacement::new(RenderTargetId::new(2), 50, 0, 50, 50),
+            RenderSurfacePlacement::new(RenderTargetId::new(3), 50, 50, 50, 50),
+        ];
+
+        assert_eq!(
+            directional_neighbor_target(&placements, RenderTargetId::new(1), PaneDirection::Right),
+            Some(RenderTargetId::new(2))
+        );
+        assert_eq!(
+            directional_neighbor_target(&placements, RenderTargetId::new(2), PaneDirection::Down),
+            Some(RenderTargetId::new(3))
+        );
+        assert_eq!(
+            directional_neighbor_target(&placements, RenderTargetId::new(3), PaneDirection::Left),
+            Some(RenderTargetId::new(1))
+        );
+        assert_eq!(
+            directional_neighbor_target(&placements, RenderTargetId::new(2), PaneDirection::Up),
+            None
+        );
     }
 
     #[test]

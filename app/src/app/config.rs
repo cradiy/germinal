@@ -158,11 +158,58 @@ pub struct KeyboardConfig {
 impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
-            bindings: vec![KeyboardBinding {
-                key: "Space".to_string(),
-                mods: "Control|Shift".to_string(),
-                action: KeyboardAction::ToggleViMode,
-            }],
+            bindings: vec![
+                KeyboardBinding {
+                    key: "Space".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::ToggleViMode,
+                },
+                KeyboardBinding {
+                    key: "D".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::SplitHorizontal,
+                },
+                KeyboardBinding {
+                    key: "D".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::SplitVertical,
+                },
+                KeyboardBinding {
+                    key: "Tab".to_string(),
+                    mods: "Control".to_string(),
+                    action: KeyboardAction::FocusNextPane,
+                },
+                KeyboardBinding {
+                    key: "Tab".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::FocusPreviousPane,
+                },
+                KeyboardBinding {
+                    key: "W".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::ClosePane,
+                },
+                KeyboardBinding {
+                    key: "Left".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::SwapPaneLeft,
+                },
+                KeyboardBinding {
+                    key: "Right".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::SwapPaneRight,
+                },
+                KeyboardBinding {
+                    key: "Up".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::SwapPaneUp,
+                },
+                KeyboardBinding {
+                    key: "Down".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::SwapPaneDown,
+                },
+            ],
         }
     }
 }
@@ -178,6 +225,15 @@ pub struct KeyboardBinding {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
     ToggleViMode,
+    SplitHorizontal,
+    SplitVertical,
+    FocusNextPane,
+    FocusPreviousPane,
+    ClosePane,
+    SwapPaneLeft,
+    SwapPaneRight,
+    SwapPaneUp,
+    SwapPaneDown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,11 +363,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 1);
+        assert_eq!(config.keyboard.bindings.len(), 10);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode
         );
+        assert_eq!(
+            config.keyboard.bindings[1].action,
+            KeyboardAction::SplitHorizontal
+        );
+        assert_eq!(config.keyboard.bindings[1].key, "D");
+        assert_eq!(config.keyboard.bindings[1].mods, "Control|Shift");
     }
 
     #[test]
@@ -330,5 +392,33 @@ mod tests {
         assert_eq!(binding.key, "V");
         assert_eq!(binding.mods, "Control|Shift");
         assert_eq!(binding.action, KeyboardAction::ToggleViMode);
+    }
+
+    #[test]
+    fn parses_workspace_keyboard_actions() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [[keyboard.bindings]]
+            key = "D"
+            mods = "Control|Shift"
+            action = "SplitHorizontal"
+
+            [[keyboard.bindings]]
+            key = "W"
+            mods = "Control|Shift"
+            action = "ClosePane"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.keyboard.bindings.len(), 2);
+        assert_eq!(
+            config.keyboard.bindings[0].action,
+            KeyboardAction::SplitHorizontal
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].action,
+            KeyboardAction::ClosePane
+        );
     }
 }

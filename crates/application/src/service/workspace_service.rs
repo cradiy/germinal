@@ -75,6 +75,38 @@ impl WorkspaceServiceState {
             .expect("focused workspace pane must have a gshell binding")
     }
 
+    pub fn focus_previous_gshell(&self) -> GShellId {
+        let focused_pane = self.workspace.borrow_mut().focus_previous_pane();
+        *self
+            .pane_bindings
+            .borrow()
+            .get(&focused_pane)
+            .expect("focused workspace pane must have a gshell binding")
+    }
+
+    pub fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
+        let pane_id = self.workspace.borrow_mut().split_focused_pane(direction);
+        let gshell_id = GShellId::new(self.next_gshell_id.get());
+        self.next_gshell_id.set(gshell_id.value() + 1);
+        self.pane_bindings.borrow_mut().insert(pane_id, gshell_id);
+        gshell_id
+    }
+
+    pub fn swap_focused_gshell_with(&self, other: GShellId) -> bool {
+        let other_pane = self
+            .pane_bindings
+            .borrow()
+            .iter()
+            .find_map(|(pane_id, gshell_id)| (*gshell_id == other).then_some(*pane_id));
+        let Some(other_pane) = other_pane else {
+            return false;
+        };
+
+        self.workspace
+            .borrow_mut()
+            .swap_focused_pane_with(other_pane)
+    }
+
     pub fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
         let pane_id =
             self.pane_bindings
@@ -243,6 +275,20 @@ where
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_next_gshell()
     }
 
+    fn focus_previous_gshell(&self) -> GShellId {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).focus_previous_gshell()
+    }
+
+    fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .split_focused_gshell(direction)
+    }
+
+    fn swap_focused_gshell_with(&self, other: GShellId) -> bool {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .swap_focused_gshell_with(other)
+    }
+
     fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).close_gshell(gshell_id)
     }
@@ -295,7 +341,8 @@ where
 #[cfg(test)]
 mod tests {
     use germinal_domain::{
-        gshell::vo::gshell_id::GShellId, workspace::entity::workspace::Workspace,
+        gshell::vo::gshell_id::GShellId,
+        workspace::{entity::workspace::Workspace, vo::pane_split_direction::PaneSplitDirection},
     };
     use germinal_ports::pty_host::window_size::TerminalWindowSize;
 
@@ -318,6 +365,8 @@ mod tests {
         assert_eq!(state.focused_gshell(), gshells[1]);
         assert_eq!(state.focus_next_gshell(), gshells[0]);
         assert_eq!(state.focus_next_gshell(), gshells[1]);
+        assert_eq!(state.focus_previous_gshell(), gshells[0]);
+        assert_eq!(state.focus_previous_gshell(), gshells[1]);
     }
 
     #[test]
@@ -329,6 +378,35 @@ mod tests {
         assert_eq!(state.focused_gshell(), gshells[0]);
         assert!(!state.focus_gshell(GShellId::new(99)));
         assert_eq!(state.focused_gshell(), gshells[0]);
+    }
+
+    #[test]
+    fn state_splits_the_focused_pane_and_binds_a_new_focused_gshell() {
+        let state = WorkspaceServiceState::new();
+        let original = state.focused_gshell();
+
+        let created = state.split_focused_gshell(PaneSplitDirection::Vertical);
+
+        assert_ne!(created, original);
+        assert_eq!(state.visible_gshells(), vec![original, created]);
+        assert_eq!(state.focused_gshell(), created);
+
+        let placements = state.render_layout(TerminalWindowSize::new(80, 41));
+        assert_eq!(placements.len(), 2);
+        assert_eq!(placements[0].height_px, 20);
+        assert_eq!(placements[1].y_px, 20);
+        assert_eq!(placements[1].height_px, 21);
+    }
+
+    #[test]
+    fn state_swaps_focused_gshell_position_and_keeps_its_focus() {
+        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let gshells = state.visible_gshells();
+
+        assert!(state.swap_focused_gshell_with(gshells[0]));
+        assert_eq!(state.visible_gshells(), vec![gshells[1], gshells[0]]);
+        assert_eq!(state.focused_gshell(), gshells[1]);
+        assert!(!state.swap_focused_gshell_with(GShellId::new(99)));
     }
 
     #[test]

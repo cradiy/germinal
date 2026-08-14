@@ -57,8 +57,16 @@ impl Workspace {
         self.active_tab_mut().focus_next_pane()
     }
 
+    pub fn focus_previous_pane(&mut self) -> PaneId {
+        self.active_tab_mut().focus_previous_pane()
+    }
+
     pub fn split_focused_pane(&mut self, direction: PaneSplitDirection) -> PaneId {
         self.active_tab_mut().split_focused_pane(direction)
+    }
+
+    pub fn swap_focused_pane_with(&mut self, other: PaneId) -> bool {
+        self.active_tab_mut().swap_focused_pane_with(other)
     }
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
@@ -131,6 +139,26 @@ mod tests {
         assert_eq!(workspace.focused_pane(), PaneId::new(1));
         assert_eq!(workspace.focus_next_pane(), PaneId::new(0));
         assert_eq!(workspace.focus_next_pane(), PaneId::new(1));
+    }
+
+    #[test]
+    fn focus_previous_pane_cycles_in_reverse_tree_order() {
+        let mut workspace = Workspace::two_pane();
+
+        assert_eq!(workspace.focus_previous_pane(), PaneId::new(0));
+        assert_eq!(workspace.focus_previous_pane(), PaneId::new(1));
+    }
+
+    #[test]
+    fn swapping_focused_pane_keeps_focus_on_the_moved_pane() {
+        let mut workspace = Workspace::two_pane();
+
+        assert!(workspace.swap_focused_pane_with(PaneId::new(0)));
+        assert_eq!(
+            workspace.active_tab().pane_tree().pane_ids(),
+            vec![PaneId::new(1), PaneId::new(0),]
+        );
+        assert_eq!(workspace.focused_pane(), PaneId::new(1));
     }
 
     #[test]

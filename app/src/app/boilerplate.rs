@@ -426,6 +426,21 @@ impl IWorkspaceService for App {
         WorkspaceService::inj_ref(self).focus_next_gshell()
     }
 
+    fn focus_previous_gshell(&self) -> GShellId {
+        WorkspaceService::inj_ref(self).focus_previous_gshell()
+    }
+
+    fn split_focused_gshell(
+        &self,
+        direction: germinal_domain::workspace::vo::pane_split_direction::PaneSplitDirection,
+    ) -> GShellId {
+        WorkspaceService::inj_ref(self).split_focused_gshell(direction)
+    }
+
+    fn swap_focused_gshell_with(&self, other: GShellId) -> bool {
+        WorkspaceService::inj_ref(self).swap_focused_gshell_with(other)
+    }
+
     fn close_gshell(&self, gshell_id: GShellId) -> Option<GShellId> {
         WorkspaceService::inj_ref(self).close_gshell(gshell_id)
     }

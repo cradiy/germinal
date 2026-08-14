@@ -62,6 +62,15 @@ impl PaneTree {
         }
     }
 
+    pub fn swap_panes(&mut self, first: PaneId, second: PaneId) -> bool {
+        if first == second || !self.contains_pane(first) || !self.contains_pane(second) {
+            return false;
+        }
+
+        self.swap_pane_ids(first, second);
+        true
+    }
+
     pub fn remove_pane(&mut self, target: PaneId) -> bool {
         if self.pane_count() == 1 || !self.contains_pane(target) {
             return false;
@@ -78,6 +87,22 @@ impl PaneTree {
             Self::Split { first, second, .. } => {
                 first.collect_pane_ids(pane_ids);
                 second.collect_pane_ids(pane_ids);
+            }
+        }
+    }
+
+    fn swap_pane_ids(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Pane(pane_id) if *pane_id == first => *pane_id = second,
+            Self::Pane(pane_id) if *pane_id == second => *pane_id = first,
+            Self::Pane(_) => {}
+            Self::Split {
+                first: first_tree,
+                second: second_tree,
+                ..
+            } => {
+                first_tree.swap_pane_ids(first, second);
+                second_tree.swap_pane_ids(first, second);
             }
         }
     }
@@ -135,5 +160,20 @@ mod tests {
         assert!(!tree.remove_pane(only));
         assert!(!tree.remove_pane(PaneId::new(7)));
         assert_eq!(tree, PaneTree::single(only));
+    }
+
+    #[test]
+    fn swapping_panes_changes_leaf_positions_without_changing_the_split_tree() {
+        let first = PaneId::new(0);
+        let second = PaneId::new(1);
+        let third = PaneId::new(2);
+        let mut tree = PaneTree::single(first);
+        assert!(tree.split_pane(first, PaneSplitDirection::Horizontal, second));
+        assert!(tree.split_pane(second, PaneSplitDirection::Vertical, third));
+
+        assert!(tree.swap_panes(first, third));
+        assert_eq!(tree.pane_ids(), vec![third, second, first]);
+        assert!(!tree.swap_panes(first, PaneId::new(99)));
+        assert!(!tree.swap_panes(first, first));
     }
 }
