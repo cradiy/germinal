@@ -148,6 +148,7 @@ impl App {
         let terminal_profile = config.terminal_profile();
         let scrollback_history = config.scrolling.history;
         let terminal_cursor_style = config.terminal_cursor_style();
+        let terminal_color_theme = config.terminal_color_theme();
         let terminal_osc52_mode = config.terminal_osc52_mode();
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
@@ -169,12 +170,14 @@ impl App {
                 runtime_event_dispatcher,
                 scrollback_history,
                 terminal_cursor_style,
+                terminal_color_theme,
                 terminal_osc52_mode,
             ),
             render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(
                 terminal_profile,
                 window_title,
                 cursor_blink_interval,
+                terminal_color_theme,
             ),
             render_runtime: None,
             render_window_id: None,

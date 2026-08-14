@@ -40,6 +40,32 @@ Germinal tracks terminal modes emitted by PTY applications. Application cursor k
 
 PTY keyboard input includes xterm-compatible navigation and editing keys, `F1` through `F12`, `Shift+Tab`, and modifier parameters for cursor, editing, and function keys.
 
+## Kitty color themes
+
+Germinal can load a Kitty color theme directly. Set one path in
+`~/.config/germinal/config.toml` to switch the entire terminal theme:
+
+```toml
+[colors]
+theme = "~/.config/kitty/current-theme.conf"
+```
+
+The theme uses Kitty's plain-text color syntax, including `foreground`, `background`,
+`cursor`, selection colors, tab and border colors, and `color0` through `color255`.
+Paths beginning with `~` are expanded; relative paths are resolved from
+`~/.config/germinal`. Individual Kitty keys can override the selected file without
+copying the theme:
+
+```toml
+[colors]
+theme = "themes/Tokyo Night.conf"
+cursor = "#ffffff"
+active_tab_background = "#7aa2f7"
+```
+
+Built-in colors are applied first, followed by the theme file and then the inline
+overrides. Theme colors currently accept Kitty's `#RGB` and `#RRGGBB` forms.
+
 ## Shell and working directory
 
 The default shell command and initial working directory can be configured in

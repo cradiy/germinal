@@ -1,4 +1,5 @@
 pub mod cell_size;
+pub mod color_theme;
 pub mod content_size;
 pub mod cursor_style;
 pub mod font_config;

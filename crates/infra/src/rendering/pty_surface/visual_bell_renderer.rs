@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use germinal_ports::rendering::frame_plan_builder::RgbColorDto;
+
 const VISUAL_BELL_BORDER_PX: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +25,15 @@ pub struct WgpuVisualBellRenderer {
 }
 
 impl WgpuVisualBellRenderer {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        color: RgbColorDto,
+    ) -> Self {
+        let shader_source = solid_color_shader(VISUAL_BELL_SHADER, color);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("germinal.visual_bell.shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(VISUAL_BELL_SHADER)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shader_source)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("germinal.visual_bell.pipeline_layout"),
@@ -164,6 +171,16 @@ fn visual_bell_border_rects(frame: WgpuVisualBellFrame) -> Vec<VisualBellRect> {
     .collect()
 }
 
+fn solid_color_shader(template: &str, color: RgbColorDto) -> String {
+    let color = format!(
+        "vec4<f32>({:.8}, {:.8}, {:.8}, 1.0)",
+        f32::from(color.red) / 255.0,
+        f32::from(color.green) / 255.0,
+        f32::from(color.blue) / 255.0,
+    );
+    template.replace("BELL_COLOR", &color)
+}
+
 const VISUAL_BELL_SHADER: &str = r#"
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -177,7 +194,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.62, 0.18, 1.0);
+    return BELL_COLOR;
 }
 "#;
 

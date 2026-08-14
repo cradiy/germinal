@@ -1,9 +1,11 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Component, Path, PathBuf},
 };
 
 use germinal_ports::pty_host::{
+    color_theme::TerminalColorTheme,
     cursor_style::{TerminalCursorShape, TerminalCursorStyle},
     font_family::TerminalFontFamily,
     font_size::TerminalFontSize,
@@ -16,6 +18,8 @@ use germinal_ports::rendering::tab_bar::TabBarPosition;
 use serde::{Deserialize, Serialize};
 
 use crate::app::error::{AppError, AppResult};
+
+mod kitty_colors;
 
 pub const APP_NAME: &str = "germinal";
 
@@ -61,6 +65,7 @@ pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
     pub cursor: CursorConfig,
+    pub colors: ColorsConfig,
     pub terminal: TerminalConfig,
     pub scrolling: ScrollingConfig,
     pub bell: BellConfig,
@@ -90,6 +95,10 @@ impl GerminalConfig {
 
     pub fn terminal_osc52_mode(&self) -> TerminalOsc52Mode {
         self.terminal.osc52.into()
+    }
+
+    pub fn terminal_color_theme(&self) -> TerminalColorTheme {
+        self.colors.resolved
     }
 
     pub fn pty_shell_command(&self) -> Option<PtyShellCommand> {
@@ -149,12 +158,41 @@ impl Default for GerminalConfig {
             window: WindowConfig::default(),
             font: FontConfig::default(),
             cursor: CursorConfig::default(),
+            colors: ColorsConfig::default(),
             terminal: TerminalConfig::default(),
             scrolling: ScrollingConfig::default(),
             bell: BellConfig::default(),
             tabs: TabsConfig::default(),
             keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<PathBuf>,
+    #[serde(flatten)]
+    pub overrides: BTreeMap<String, String>,
+    #[serde(skip)]
+    resolved: TerminalColorTheme,
+}
+
+impl ColorsConfig {
+    fn resolve(&mut self, config_dir: &Path) -> Result<(), String> {
+        self.resolved = kitty_colors::resolve_color_theme(self, config_dir)?;
+        Ok(())
+    }
+}
+
+impl Default for ColorsConfig {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            overrides: BTreeMap::new(),
+            resolved: TerminalColorTheme::default(),
         }
     }
 }
@@ -557,13 +595,20 @@ pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
             path: paths.config_file().to_path_buf(),
             source,
         })?;
-    let config: GerminalConfig =
+    let mut config: GerminalConfig =
         toml::from_str(&contents).map_err(|source| AppError::ParseConfig {
             path: paths.config_file().to_path_buf(),
             source,
         })?;
     config
         .validate()
+        .map_err(|message| AppError::InvalidConfig {
+            path: paths.config_file().to_path_buf(),
+            message,
+        })?;
+    config
+        .colors
+        .resolve(paths.config_dir())
         .map_err(|message| AppError::InvalidConfig {
             path: paths.config_file().to_path_buf(),
             message,

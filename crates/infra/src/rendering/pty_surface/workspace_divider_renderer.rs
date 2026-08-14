@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use germinal_ports::rendering::frame_plan_builder::RgbColorDto;
+
 use crate::rendering::pty_surface::render_target_plan::WgpuTerminalRenderTargetPlan;
 
 #[derive(Clone)]
@@ -8,10 +10,15 @@ pub struct WgpuWorkspaceDividerRenderer {
 }
 
 impl WgpuWorkspaceDividerRenderer {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        color: RgbColorDto,
+    ) -> Self {
+        let shader_source = solid_color_shader(WORKSPACE_DIVIDER_SHADER, color);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("germinal.workspace.divider.shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WORKSPACE_DIVIDER_SHADER)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shader_source)),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("germinal.workspace.divider.pipeline_layout"),
@@ -184,6 +191,16 @@ fn horizontal_divider(
     })
 }
 
+fn solid_color_shader(template: &str, color: RgbColorDto) -> String {
+    let color = format!(
+        "vec4<f32>({:.8}, {:.8}, {:.8}, 1.0)",
+        f32::from(color.red) / 255.0,
+        f32::from(color.green) / 255.0,
+        f32::from(color.blue) / 255.0,
+    );
+    template.replace("DIVIDER_COLOR", &color)
+}
+
 const WORKSPACE_DIVIDER_SHADER: &str = r#"
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -197,7 +214,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.24, 0.27, 0.34, 1.0);
+    return DIVIDER_COLOR;
 }
 "#;
 

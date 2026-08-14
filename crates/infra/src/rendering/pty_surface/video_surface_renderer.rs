@@ -740,6 +740,7 @@ mod tests {
                 grid_columns: 18,
                 grid_rows: 5,
                 blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
             },
         )
         .expect("expected fitted rect");
@@ -808,6 +809,7 @@ mod tests {
                 grid_columns: 100,
                 grid_rows: 50,
                 blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
             },
         );
 

@@ -18,6 +18,7 @@ use germinal_ports::{
         runtime_event_dispatcher::IRuntimeEventDispatcher,
     },
     pty_host::{
+        color_theme::TerminalColorTheme,
         cursor_style::TerminalCursorStyle,
         hyperlink::TerminalHyperlink,
         pty_input::{PtyInput, PtyInputSender},
@@ -58,6 +59,7 @@ struct TerminalWorkerRegistration<Dispatch> {
     initial_size: TerminalGridSize,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
+    color_theme: TerminalColorTheme,
     osc52_mode: TerminalOsc52Mode,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
@@ -87,6 +89,7 @@ where
                 to_alacritty_term_size(registration.initial_size),
                 registration.scrollback_history,
                 registration.cursor_style,
+                registration.color_theme,
                 registration.osc52_mode,
                 registration.surface_snapshot_tx,
                 registration.snapshot_wake_pending,
@@ -188,6 +191,7 @@ where
         initial_size: TerminalGridSize,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        color_theme: TerminalColorTheme,
         osc52_mode: TerminalOsc52Mode,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
@@ -201,6 +205,7 @@ where
             initial_size,
             scrollback_history,
             cursor_style,
+            color_theme,
             osc52_mode,
             surface_snapshot_tx,
             snapshot_wake_pending,
@@ -312,17 +317,20 @@ where
         initial_size: AlacrittyTermSize,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        color_theme: TerminalColorTheme,
         osc52_mode: TerminalOsc52Mode,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Self {
         let target_id = RenderTargetId::new(gshell_id.value());
-        let terminal_store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_and_osc52(
-            initial_size,
-            scrollback_history,
-            cursor_style,
-            osc52_mode,
-        );
+        let terminal_store =
+            AlacrittyTerminalStore::with_size_scrollback_cursor_style_osc52_and_colors(
+                initial_size,
+                scrollback_history,
+                cursor_style,
+                osc52_mode,
+                color_theme,
+            );
 
         Self {
             proxy,
@@ -1042,6 +1050,7 @@ pub struct PlatformTerminalWorkerBackend<Dispatch> {
     proxy: Dispatch,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
+    color_theme: TerminalColorTheme,
     osc52_mode: TerminalOsc52Mode,
     pool: OnceLock<TerminalWorkerPool<Dispatch>>,
 }
@@ -1054,12 +1063,14 @@ where
         proxy: Dispatch,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        color_theme: TerminalColorTheme,
         osc52_mode: TerminalOsc52Mode,
     ) -> Self {
         Self {
             proxy,
             scrollback_history,
             cursor_style,
+            color_theme,
             osc52_mode,
             pool: OnceLock::new(),
         }
@@ -1073,6 +1084,7 @@ where
             proxy,
             scrollback_history,
             cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
             osc52_mode: TerminalOsc52Mode::default(),
             pool,
         }
@@ -1105,6 +1117,7 @@ where
             initial_size,
             self.scrollback_history,
             self.cursor_style,
+            self.color_theme,
             self.osc52_mode,
             surface_snapshot_tx,
             snapshot_wake_pending,
@@ -1143,7 +1156,7 @@ mod tests {
     };
 
     use super::{
-        PlatformTerminalWorkerBackend, TerminalCursorStyle, TerminalOsc52Mode,
+        PlatformTerminalWorkerBackend, TerminalColorTheme, TerminalCursorStyle, TerminalOsc52Mode,
         TerminalWorkerRuntime,
     };
 
@@ -1543,6 +1556,7 @@ mod tests {
             super::AlacrittyTermSize::new(20, 4),
             TEST_SCROLLBACK_HISTORY,
             TerminalCursorStyle::default(),
+            TerminalColorTheme::default(),
             TerminalOsc52Mode::default(),
             snapshot_tx,
             wake_pending.clone(),
@@ -1591,6 +1605,7 @@ mod tests {
             super::AlacrittyTermSize::new(20, 4),
             TEST_SCROLLBACK_HISTORY,
             TerminalCursorStyle::default(),
+            TerminalColorTheme::default(),
             TerminalOsc52Mode::CopyPaste,
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),

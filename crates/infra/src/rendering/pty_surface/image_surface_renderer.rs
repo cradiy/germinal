@@ -607,6 +607,7 @@ mod tests {
                 grid_columns: 10,
                 grid_rows: 10,
                 blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
             },
         )
         .unwrap();
@@ -636,6 +637,7 @@ mod tests {
                 grid_columns: 10,
                 grid_rows: 10,
                 blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
             },
         )
         .unwrap();

@@ -8,6 +8,7 @@ use std::{
 use germinal_ports::{
     pty_host::{
         cell_size::TerminalCellSize,
+        color_theme::TerminalColorTheme,
         font_weight::TerminalFontWeight,
         profile::TerminalProfile,
         scale_factor::TerminalScaleFactor,
@@ -106,6 +107,7 @@ pub struct WgpuTerminalWindowRuntime {
     tab_bar: Option<TabBarSnapshot>,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
+    color_theme: TerminalColorTheme,
     needs_redraw: bool,
     visual_bell_until: Option<Instant>,
     cursor_blink_interval: Duration,
@@ -167,6 +169,7 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     profile: TerminalProfile,
     base_title: String,
     cursor_blink_interval: Duration,
+    color_theme: TerminalColorTheme,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
@@ -174,11 +177,13 @@ impl WgpuTerminalWindowRuntimeFactory {
         profile: TerminalProfile,
         base_title: String,
         cursor_blink_interval: Duration,
+        color_theme: TerminalColorTheme,
     ) -> Self {
         Self {
             profile,
             base_title,
             cursor_blink_interval,
+            color_theme,
         }
     }
 
@@ -191,6 +196,7 @@ impl WgpuTerminalWindowRuntimeFactory {
             self.profile.clone(),
             self.base_title.clone(),
             self.cursor_blink_interval,
+            self.color_theme,
         ))
     }
 }
@@ -201,6 +207,7 @@ impl WgpuTerminalWindowRuntime {
         profile: TerminalProfile,
         base_title: String,
         cursor_blink_interval: Duration,
+        color_theme: TerminalColorTheme,
     ) -> Result<Self, WindowRuntimeError> {
         let instance = wgpu::Instance::default();
 
@@ -252,10 +259,16 @@ impl WgpuTerminalWindowRuntime {
             size_info,
             window.scale_factor(),
             device.limits().max_texture_dimension_2d,
+            color_theme,
         )?;
         let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);
-        let divider_renderer = WgpuWorkspaceDividerRenderer::new(&device, surface_config.format);
-        let visual_bell_renderer = WgpuVisualBellRenderer::new(&device, surface_config.format);
+        let divider_renderer = WgpuWorkspaceDividerRenderer::new(
+            &device,
+            surface_config.format,
+            color_theme.inactive_border,
+        );
+        let visual_bell_renderer =
+            WgpuVisualBellRenderer::new(&device, surface_config.format, color_theme.bell_border);
         let presenter = WgpuTerminalSurfaceFramePresenter::new(
             frame_renderer,
             divider_renderer,
@@ -277,6 +290,7 @@ impl WgpuTerminalWindowRuntime {
             tab_bar: None,
             size_info,
             profile,
+            color_theme,
             needs_redraw: false,
             visual_bell_until: None,
             cursor_blink_interval: cursor_blink_interval.max(Duration::from_millis(1)),
@@ -477,18 +491,15 @@ impl WgpuTerminalWindowRuntime {
                     .with_load_op(WgpuTerminalLoadOp::Load),
                     surface_snapshot,
                     renderer_config: WgpuRendererConfig::from(size_info)
+                        .with_color_theme(self.color_theme)
                         .with_blinking_cursor_visible(blinking_cursor_visible),
                 })
             })
             .collect::<Vec<_>>();
-        let tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
-            let terminal_background = tab_bar
-                .render_target_ids
-                .get(tab_bar.active_tab_index)
-                .and_then(|target_id| self.surface_snapshots.get(target_id))
-                .map(|snapshot| snapshot.default_background);
-            build_tab_bar_surface(tab_bar, self.size_info, terminal_background)
-        });
+        let tab_bar_surface = self
+            .tab_bar
+            .as_ref()
+            .and_then(|tab_bar| build_tab_bar_surface(tab_bar, self.size_info, self.color_theme));
         if let Some(tab_bar_surface) = tab_bar_surface.as_ref() {
             let size_info =
                 self.terminal_size_info_for_window_size(tab_bar_surface.placement.window_size());
@@ -504,6 +515,7 @@ impl WgpuTerminalWindowRuntime {
                 .with_load_op(WgpuTerminalLoadOp::Load),
                 surface_snapshot: &tab_bar_surface.snapshot,
                 renderer_config: WgpuRendererConfig::from(size_info)
+                    .with_color_theme(self.color_theme)
                     .with_blinking_cursor_visible(blinking_cursor_visible),
             });
         }
@@ -611,7 +623,6 @@ fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool
 }
 
 const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
-const TAB_BAR_FALLBACK_BACKGROUND: RgbColorDto = RgbColorDto::new(30, 32, 44);
 const TAB_BAR_LEFT_EDGE: &str = "";
 const TAB_BAR_RIGHT_EDGE: &str = "";
 const TAB_BAR_OUTER_MARGIN: u32 = 1;
@@ -627,6 +638,7 @@ struct WgpuTabBarSurface {
 struct TabBarPalette {
     background: RgbColorDto,
     inactive_foreground: RgbColorDto,
+    inactive_background: RgbColorDto,
     active_background: RgbColorDto,
     active_foreground: RgbColorDto,
 }
@@ -634,7 +646,7 @@ struct TabBarPalette {
 fn build_tab_bar_surface(
     tab_bar: &TabBarSnapshot,
     window_size_info: TerminalSizeInfo,
-    terminal_background: Option<RgbColorDto>,
+    color_theme: TerminalColorTheme,
 ) -> Option<WgpuTabBarSurface> {
     if tab_bar.titles.len() < 2 || tab_bar.active_tab_index >= tab_bar.titles.len() {
         return None;
@@ -653,7 +665,7 @@ fn build_tab_bar_surface(
         TabBarPosition::Bottom => window_size.height_px().saturating_sub(bar_height_px),
     };
     let columns = (window_size.width_px() / window_size_info.cell_size().width_px().max(1)).max(1);
-    let palette = tab_bar_palette(terminal_background.unwrap_or(TAB_BAR_FALLBACK_BACKGROUND));
+    let palette = tab_bar_palette(color_theme);
     let tab_count = tab_bar.titles.len() as u32;
     let max_tab_width = columns
         .saturating_sub(TAB_BAR_OUTER_MARGIN.saturating_mul(2))
@@ -697,7 +709,11 @@ fn build_tab_bar_surface(
             style: if active {
                 tab_bar_style(palette.active_foreground, palette.active_background, true)
             } else {
-                tab_bar_style(palette.inactive_foreground, palette.background, false)
+                tab_bar_style(
+                    palette.inactive_foreground,
+                    palette.inactive_background,
+                    false,
+                )
             },
         });
         x = x.saturating_add(content_width);
@@ -746,21 +762,13 @@ fn tab_bar_style(foreground: RgbColorDto, background: RgbColorDto, bold: bool) -
     }
 }
 
-fn tab_bar_palette(terminal_background: RgbColorDto) -> TabBarPalette {
-    let contrast = contrasting_color(terminal_background);
-    let background = mix_rgb(terminal_background, contrast, 12, 255);
-    let active_background = mix_rgb(terminal_background, contrast, 48, 255);
-
+fn tab_bar_palette(color_theme: TerminalColorTheme) -> TabBarPalette {
     TabBarPalette {
-        background,
-        inactive_foreground: mix_rgb(terminal_background, contrast, 132, 255),
-        active_background,
-        active_foreground: mix_rgb(
-            active_background,
-            contrasting_color(active_background),
-            220,
-            255,
-        ),
+        background: color_theme.tab_bar_background,
+        inactive_foreground: color_theme.inactive_tab_foreground,
+        inactive_background: color_theme.inactive_tab_background,
+        active_background: color_theme.active_tab_background,
+        active_foreground: color_theme.active_tab_foreground,
     }
 }
 
@@ -832,8 +840,11 @@ fn build_terminal_frame_builder(
     size_info: TerminalSizeInfo,
     scale_factor: f64,
     max_texture_dimension_2d: u32,
+    color_theme: TerminalColorTheme,
 ) -> Result<WgpuTerminalFrameBuilder, WindowRuntimeError> {
-    let base = WgpuTerminalFrameBuilder::new(WgpuRendererConfig::from(size_info));
+    let base = WgpuTerminalFrameBuilder::new(
+        WgpuRendererConfig::from(size_info).with_color_theme(color_theme),
+    );
 
     let glyph_config =
         profile.glyph_render_config(size_info, TerminalScaleFactor::new(scale_factor));
@@ -1210,9 +1221,10 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        TAB_BAR_FALLBACK_BACKGROUND, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface,
-        cursor_blink_phase, ime_cursor_area,
+        TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
+        ime_cursor_area,
     };
+    use germinal_ports::pty_host::color_theme::TerminalColorTheme;
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
 
     #[test]
@@ -1285,7 +1297,7 @@ mod tests {
                 position: TabBarPosition::Bottom,
             },
             size_info,
-            None,
+            TerminalColorTheme::default(),
         )
         .expect("multiple tabs should produce a tab bar");
 
@@ -1329,7 +1341,7 @@ mod tests {
                 position: TabBarPosition::Top,
             },
             size_info,
-            None,
+            TerminalColorTheme::default(),
         )
         .expect("multiple tabs should produce a tab bar");
 
@@ -1337,13 +1349,19 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_palette_is_derived_from_the_active_terminal_background() {
+    fn tab_bar_uses_kitty_theme_colors() {
         let size_info = TerminalSizeInfo::new(
             TerminalWindowSize::new(800, 100),
             TerminalCellSize::new(8, 16),
             TerminalPadding::ZERO,
         );
-        let terminal_background = RgbColorDto::new(18, 30, 42);
+        let color_theme = TerminalColorTheme {
+            tab_bar_background: RgbColorDto::new(18, 30, 42),
+            active_tab_background: RgbColorDto::new(50, 60, 70),
+            active_tab_foreground: RgbColorDto::new(240, 241, 242),
+            inactive_tab_foreground: RgbColorDto::new(120, 130, 140),
+            ..TerminalColorTheme::default()
+        };
         let surface = build_tab_bar_surface(
             &TabBarSnapshot {
                 titles: vec!["~/one".to_string(), "nvim".to_string()],
@@ -1352,17 +1370,27 @@ mod tests {
                 position: TabBarPosition::Bottom,
             },
             size_info,
-            Some(terminal_background),
+            color_theme,
         )
         .expect("multiple tabs should produce a themed tab bar");
 
-        assert_ne!(
+        assert_eq!(
             surface.snapshot.default_background,
-            TAB_BAR_FALLBACK_BACKGROUND
+            color_theme.tab_bar_background
         );
-        assert!(surface.snapshot.default_background.red < 40);
-        assert!(surface.snapshot.default_background.green < 50);
-        assert!(surface.snapshot.default_background.blue < 60);
+        let active_title = surface.snapshot.rows[0]
+            .runs
+            .iter()
+            .find(|run| run.text.trim() == "nvim")
+            .expect("active title should be rendered");
+        assert_eq!(
+            active_title.style.foreground,
+            Some(color_theme.active_tab_foreground)
+        );
+        assert_eq!(
+            active_title.style.background,
+            Some(color_theme.active_tab_background)
+        );
         assert!(surface.snapshot.rows[0].runs.len() > 10);
     }
 }

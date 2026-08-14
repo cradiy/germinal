@@ -6,9 +6,9 @@ use std::{
 
 use germinal_ports::{
     pty_host::{
-        cell_size::TerminalCellSize, render_viewport::TerminalRenderViewport,
-        size_info::TerminalSizeInfo, terminal_geometric_glyph::TerminalGeometricGlyph,
-        width::terminal_char_cell_width,
+        cell_size::TerminalCellSize, color_theme::TerminalColorTheme,
+        render_viewport::TerminalRenderViewport, size_info::TerminalSizeInfo,
+        terminal_geometric_glyph::TerminalGeometricGlyph, width::terminal_char_cell_width,
     },
     rendering::{
         frame_plan_builder::{
@@ -26,6 +26,7 @@ use germinal_ports::{
 };
 
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
+const CURSOR_TEXT_COLOR: RgbColorDto = RgbColorDto::new(0, 0, 0);
 const PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX: u32 = 8;
 const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
 
@@ -102,6 +103,7 @@ impl RendererBackend for WgpuRendererBackend {
 
         let mut ime_rows = Vec::new();
         let mut cursor_quads = Vec::new();
+        let mut cursor_text_quads = Vec::new();
         if let (Some(cursor), Some(preedit)) = (snapshot.cursor, snapshot.ime_preedit.as_ref()) {
             ime_rows = render_ime_preedit(preedit, cursor, snapshot.default_background, config);
             if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
@@ -120,6 +122,12 @@ impl RendererBackend for WgpuRendererBackend {
             }
         } else if let Some(cursor) = snapshot.cursor {
             append_cursor_quads(&mut cursor_quads, cursor, config);
+            append_cursor_text_quads(
+                &mut cursor_text_quads,
+                inner.rendered_rows.get(&cursor.y),
+                cursor,
+                config,
+            );
         }
 
         let total_row_quads: usize = inner
@@ -136,7 +144,11 @@ impl RendererBackend for WgpuRendererBackend {
             })
             .sum::<usize>();
         let mut quads = Vec::with_capacity(
-            1 + pixel_quads.len() + total_row_quads + ime_quad_count + cursor_quads.len(),
+            1 + pixel_quads.len()
+                + total_row_quads
+                + ime_quad_count
+                + cursor_quads.len()
+                + cursor_text_quads.len(),
         );
         quads.push(WgpuQuadDrawItem::surface_background(
             config,
@@ -162,6 +174,7 @@ impl RendererBackend for WgpuRendererBackend {
             quads.extend(row.underline_quads.iter().copied());
         }
         quads.extend(cursor_quads);
+        quads.extend(cursor_text_quads);
 
         inner.render_count += 1;
         inner.last_target_id = Some(snapshot.target_id);
@@ -208,15 +221,15 @@ fn render_ime_preedit(
             .is_some_and(|(start, end)| start != end && byte_index < end && character_end > start);
         let style = if selected {
             TextStyleDto {
-                foreground: Some(default_background),
-                background: Some(CURSOR_COLOR),
+                foreground: Some(config.cursor_text_color),
+                background: Some(config.cursor_color),
                 bold: false,
                 italic: false,
                 underline: true,
             }
         } else {
             TextStyleDto {
-                foreground: Some(CURSOR_COLOR),
+                foreground: Some(config.cursor_color),
                 background: Some(default_background),
                 bold: false,
                 italic: false,
@@ -388,7 +401,7 @@ fn append_cursor_quads(
     let w = config.cell_width_px.max(1);
     let h = config.row_height_px(cursor.y);
     let style = TextStyleDto {
-        foreground: Some(CURSOR_COLOR),
+        foreground: Some(config.cursor_color),
         background: None,
         bold: false,
         italic: false,
@@ -452,6 +465,45 @@ fn append_cursor_quads(
     }
 }
 
+fn append_cursor_text_quads(
+    quads: &mut Vec<WgpuQuadDrawItem>,
+    row: Option<&WgpuRenderedRow>,
+    cursor: RenderSurfaceCursorSnapshot,
+    config: WgpuRendererConfig,
+) {
+    if !cursor.focused
+        || cursor.shape != RenderSurfaceCursorShape::Block
+        || (cursor.blinking && !config.blinking_cursor_visible)
+    {
+        return;
+    }
+
+    let Some(glyph) = row.and_then(|row| {
+        row.draw_row.glyphs().iter().copied().find(|glyph| {
+            cursor.x >= glyph.x && cursor.x < glyph.x.saturating_add(glyph.cell_width.max(1))
+        })
+    }) else {
+        return;
+    };
+    if glyph.c == ' ' {
+        return;
+    }
+
+    let glyph = WgpuGlyphDrawItem {
+        style: TextStyleDto {
+            foreground: Some(config.cursor_text_color),
+            background: None,
+            ..glyph.style
+        },
+        ..glyph
+    };
+    if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(glyph.c) {
+        append_terminal_geometric_glyph_quads(quads, glyph, config, geometric_glyph);
+    } else {
+        quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WgpuRendererConfig {
     pub cell_width_px: u32,
@@ -463,10 +515,18 @@ pub struct WgpuRendererConfig {
     pub grid_columns: u32,
     pub grid_rows: u32,
     pub blinking_cursor_visible: bool,
+    pub cursor_color: RgbColorDto,
+    pub cursor_text_color: RgbColorDto,
 }
 impl WgpuRendererConfig {
     pub fn with_blinking_cursor_visible(mut self, visible: bool) -> Self {
         self.blinking_cursor_visible = visible;
+        self
+    }
+
+    pub fn with_color_theme(mut self, theme: TerminalColorTheme) -> Self {
+        self.cursor_color = theme.cursor;
+        self.cursor_text_color = theme.cursor_text;
         self
     }
 
@@ -482,6 +542,8 @@ impl WgpuRendererConfig {
             grid_columns: viewport.columns() as u32,
             grid_rows: viewport.rows() as u32,
             blinking_cursor_visible: true,
+            cursor_color: CURSOR_COLOR,
+            cursor_text_color: CURSOR_TEXT_COLOR,
         }
     }
 
@@ -498,6 +560,8 @@ impl WgpuRendererConfig {
             grid_columns: viewport.columns() as u32,
             grid_rows: viewport.rows() as u32,
             blinking_cursor_visible: true,
+            cursor_color: CURSOR_COLOR,
+            cursor_text_color: CURSOR_TEXT_COLOR,
         }
     }
 
@@ -567,6 +631,8 @@ impl Default for WgpuRendererConfig {
             grid_columns: 1,
             grid_rows: 1,
             blinking_cursor_visible: true,
+            cursor_color: CURSOR_COLOR,
+            cursor_text_color: CURSOR_TEXT_COLOR,
         }
     }
 }
@@ -830,6 +896,7 @@ mod tests {
     use germinal_ports::{
         pty_host::{
             cell_size::TerminalCellSize,
+            color_theme::TerminalColorTheme,
             size_info::{TerminalPadding, TerminalSizeInfo},
             window_size::TerminalWindowSize,
         },
@@ -1024,6 +1091,58 @@ mod tests {
     }
 
     #[test]
+    fn block_cursor_uses_theme_colors_and_repaints_covered_text() {
+        let color_theme = TerminalColorTheme {
+            cursor: RgbColorDto::new(12, 34, 56),
+            cursor_text: RgbColorDto::new(210, 220, 230),
+            ..TerminalColorTheme::default()
+        };
+        let backend =
+            WgpuRendererBackend::new(WgpuRendererConfig::default().with_color_theme(color_theme));
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: color_theme.background,
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "x".to_string(),
+                    style: TextStyleDto::plain(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 0,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: None,
+        });
+
+        let state = backend.state();
+        let cursor = state
+            .geometric_quads()
+            .into_iter()
+            .find(|quad| quad.width_px == 8 && quad.height_px == 16)
+            .expect("block cursor should render");
+        assert_eq!(cursor.style.foreground, Some(color_theme.cursor));
+        assert_eq!(
+            state
+                .glyph_quads()
+                .last()
+                .expect("cursor text should render")
+                .style
+                .foreground,
+            Some(color_theme.cursor_text)
+        );
+    }
+
+    #[test]
     fn renders_beam_underline_hollow_and_hidden_cursor_shapes() {
         let render = |shape| {
             let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
@@ -1124,6 +1243,7 @@ mod tests {
             grid_columns: 4,
             grid_rows: 2,
             blinking_cursor_visible: true,
+            ..WgpuRendererConfig::default()
         });
         let default_background = RgbColorDto::new(0, 0, 0);
 
@@ -1198,6 +1318,7 @@ mod tests {
             grid_columns: 1,
             grid_rows: 1,
             blinking_cursor_visible: true,
+            ..WgpuRendererConfig::default()
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {
@@ -1242,6 +1363,7 @@ mod tests {
             grid_columns: 1,
             grid_rows: 1,
             blinking_cursor_visible: true,
+            ..WgpuRendererConfig::default()
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {
@@ -1285,6 +1407,7 @@ mod tests {
             grid_columns: 1,
             grid_rows: 1,
             blinking_cursor_visible: true,
+            ..WgpuRendererConfig::default()
         });
 
         backend.render_surface(&RenderSurfaceSnapshot {

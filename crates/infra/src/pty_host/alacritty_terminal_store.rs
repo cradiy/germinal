@@ -22,6 +22,7 @@ use alacritty_terminal::{
 };
 use germinal_ports::{
     pty_host::{
+        color_theme::TerminalColorTheme,
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
         hyperlink::TerminalHyperlink,
         snapshot::{
@@ -172,6 +173,7 @@ pub struct AlacrittyTerminalStore {
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
     osc52_mode: TerminalOsc52Mode,
+    color_theme: TerminalColorTheme,
 }
 
 impl AlacrittyTerminalStore {
@@ -217,12 +219,29 @@ impl AlacrittyTerminalStore {
         cursor_style: TerminalCursorStyle,
         osc52_mode: TerminalOsc52Mode,
     ) -> Self {
+        Self::with_size_scrollback_cursor_style_osc52_and_colors(
+            size,
+            scrollback_history,
+            cursor_style,
+            osc52_mode,
+            TerminalColorTheme::default(),
+        )
+    }
+
+    pub fn with_size_scrollback_cursor_style_osc52_and_colors(
+        size: AlacrittyTermSize,
+        scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
+        color_theme: TerminalColorTheme,
+    ) -> Self {
         Self {
             inner: Rc::new(RefCell::new(HashMap::new())),
             size,
             scrollback_history,
             cursor_style,
             osc52_mode,
+            color_theme,
         }
     }
 
@@ -671,8 +690,9 @@ impl AlacrittyTerminalStore {
     fn snapshot_from_state(
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
+        color_theme: &TerminalColorTheme,
     ) -> TerminalSnapshot {
-        let (lines, text_runs) = visible_lines_and_runs(&state.term);
+        let (lines, text_runs) = visible_lines_and_runs(&state.term, color_theme);
         let dirty_rows = dirty_rows_from_state(state);
 
         TerminalSnapshot {
@@ -687,8 +707,9 @@ impl AlacrittyTerminalStore {
     fn render_surface_snapshot_from_state(
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
+        color_theme: &TerminalColorTheme,
     ) -> RenderSurfaceSnapshot {
-        let mut rows = visible_surface_rows(&state.term);
+        let mut rows = visible_surface_rows(&state.term, color_theme);
         if state.term.mode().contains(TermMode::VI) {
             if !state.host_search_mode {
                 append_vi_mode_indicator(&mut rows, state.size.columns());
@@ -708,8 +729,8 @@ impl AlacrittyTerminalStore {
         let renderable = state.term.renderable_content();
         let default_background = renderable.colors[NamedColor::Background]
             .map(rgb_to_dto)
-            .or_else(|| dominant_background_of_term(&state.term))
-            .unwrap_or(RgbColorDto::new(0, 0, 0));
+            .or_else(|| dominant_background_of_term(&state.term, color_theme))
+            .unwrap_or(color_theme.background);
 
         RenderSurfaceSnapshot {
             target_id: render_target_id,
@@ -931,7 +952,11 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
 
         let state = inner.get_mut(&render_target_id)?;
 
-        Some(Self::snapshot_from_state(render_target_id, state))
+        Some(Self::snapshot_from_state(
+            render_target_id,
+            state,
+            &self.color_theme,
+        ))
     }
 
     fn render_surface_snapshot_of(
@@ -945,6 +970,7 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
         Some(Self::render_surface_snapshot_from_state(
             render_target_id,
             state,
+            &self.color_theme,
         ))
     }
 
@@ -959,7 +985,11 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
 
         let state = inner.get_mut(&render_target_id)?;
 
-        Some(Self::snapshot_from_state(render_target_id, state))
+        Some(Self::snapshot_from_state(
+            render_target_id,
+            state,
+            &self.color_theme,
+        ))
     }
 
     fn clear_damage_up_to(&self, render_target_id: RenderTargetId, presented_seq: Seq) {
@@ -1346,6 +1376,7 @@ struct StyledCell {
 
 fn visible_lines_and_runs(
     term: &Term<PtyWriteEventListener>,
+    color_theme: &TerminalColorTheme,
 ) -> (Vec<TerminalLineSnapshot>, Vec<TerminalTextRunSnapshot>) {
     let renderable = term.renderable_content();
     let display_offset = renderable.display_offset;
@@ -1368,12 +1399,12 @@ fn visible_lines_and_runs(
             continue;
         }
 
-        let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
+        let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
         cells_by_row.entry(row).or_default().push(StyledCell {
             col,
             c: cell.c,
             style: if selected {
-                selected_style(style)
+                selected_style(style, color_theme)
             } else {
                 style
             },
@@ -1488,7 +1519,10 @@ fn append_vi_search_prompt(
     }
 }
 
-fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurfaceRowSnapshot> {
+fn visible_surface_rows(
+    term: &Term<PtyWriteEventListener>,
+    color_theme: &TerminalColorTheme,
+) -> Vec<RenderSurfaceRowSnapshot> {
     let renderable = term.renderable_content();
     let display_offset = renderable.display_offset;
     let selection = renderable.selection;
@@ -1535,12 +1569,12 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
             continue;
         }
 
-        let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
+        let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
         if cell.hyperlink().is_some() {
             style.underline = true;
         }
         let style = if selected {
-            selected_style(style)
+            selected_style(style, color_theme)
         } else {
             style
         };
@@ -1772,7 +1806,10 @@ fn style_has_visible_content(style: TextStyleDto) -> bool {
     style.background.is_some() || style.underline || style.bold || style.italic
 }
 
-fn dominant_background_of_term(term: &Term<PtyWriteEventListener>) -> Option<RgbColorDto> {
+fn dominant_background_of_term(
+    term: &Term<PtyWriteEventListener>,
+    color_theme: &TerminalColorTheme,
+) -> Option<RgbColorDto> {
     let mut weights = Vec::<(RgbColorDto, u64)>::new();
     let renderable = term.renderable_content();
     for indexed in renderable.display_iter {
@@ -1780,7 +1817,7 @@ fn dominant_background_of_term(term: &Term<PtyWriteEventListener>) -> Option<Rgb
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == KITTY_IMAGE_PLACEHOLDER {
             continue;
         }
-        let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors);
+        let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors, color_theme);
         let Some(background) = style.background else {
             continue;
         };
@@ -1797,9 +1834,15 @@ fn dominant_background_of_term(term: &Term<PtyWriteEventListener>) -> Option<Rgb
         .map(|(color, _)| color)
 }
 
-fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextStyleDto {
-    let mut foreground = color_to_rgb(fg, colors);
-    let mut background = color_to_rgb(bg, colors);
+fn style_of_cell(
+    fg: Color,
+    bg: Color,
+    flags: Flags,
+    colors: &Colors,
+    color_theme: &TerminalColorTheme,
+) -> TextStyleDto {
+    let mut foreground = color_to_rgb(fg, colors, color_theme);
+    let mut background = color_to_rgb(bg, colors, color_theme);
 
     if flags.contains(Flags::INVERSE) {
         std::mem::swap(&mut foreground, &mut background);
@@ -1814,95 +1857,97 @@ fn style_of_cell(fg: Color, bg: Color, flags: Flags, colors: &Colors) -> TextSty
     }
 }
 
-fn selected_style(mut style: TextStyleDto) -> TextStyleDto {
-    let foreground = style.foreground.unwrap_or(RgbColorDto::new(229, 229, 229));
-    let background = style.background.unwrap_or(RgbColorDto::new(0, 0, 0));
-    style.foreground = Some(background);
-    style.background = Some(foreground);
+fn selected_style(mut style: TextStyleDto, color_theme: &TerminalColorTheme) -> TextStyleDto {
+    if color_theme.selection_foreground.is_none() && color_theme.selection_background.is_none() {
+        let foreground = style.foreground.unwrap_or(color_theme.foreground);
+        let background = style.background.unwrap_or(color_theme.background);
+        style.foreground = Some(background);
+        style.background = Some(foreground);
+        return style;
+    }
+
+    if let Some(foreground) = color_theme.selection_foreground {
+        style.foreground = Some(foreground);
+    }
+    if let Some(background) = color_theme.selection_background {
+        style.background = Some(background);
+    }
     style
 }
 
-fn color_to_rgb(color: Color, colors: &Colors) -> Option<RgbColorDto> {
+fn color_to_rgb(
+    color: Color,
+    colors: &Colors,
+    color_theme: &TerminalColorTheme,
+) -> Option<RgbColorDto> {
     match color {
         Color::Spec(rgb) => Some(rgb_to_dto(rgb)),
-        Color::Named(named) => named_color_to_rgb(named, colors),
-        Color::Indexed(index) => indexed_color_to_rgb(index, colors),
+        Color::Named(named) => named_color_to_rgb(named, colors, color_theme),
+        Color::Indexed(index) => indexed_color_to_rgb(index, colors, color_theme),
     }
 }
 
-fn named_color_to_rgb(color: NamedColor, colors: &Colors) -> Option<RgbColorDto> {
+fn named_color_to_rgb(
+    color: NamedColor,
+    colors: &Colors,
+    color_theme: &TerminalColorTheme,
+) -> Option<RgbColorDto> {
     if let Some(rgb) = colors[color] {
         return Some(rgb_to_dto(rgb));
     }
 
     match color {
-        NamedColor::Black => Some(RgbColorDto::new(0, 0, 0)),
-        NamedColor::Red => Some(RgbColorDto::new(205, 49, 49)),
-        NamedColor::Green => Some(RgbColorDto::new(13, 188, 121)),
-        NamedColor::Yellow => Some(RgbColorDto::new(229, 229, 16)),
-        NamedColor::Blue => Some(RgbColorDto::new(36, 114, 200)),
-        NamedColor::Magenta => Some(RgbColorDto::new(188, 63, 188)),
-        NamedColor::Cyan => Some(RgbColorDto::new(17, 168, 205)),
-        NamedColor::White => Some(RgbColorDto::new(229, 229, 229)),
-        NamedColor::BrightBlack => Some(RgbColorDto::new(102, 102, 102)),
-        NamedColor::BrightRed => Some(RgbColorDto::new(241, 76, 76)),
-        NamedColor::BrightGreen => Some(RgbColorDto::new(35, 209, 139)),
-        NamedColor::BrightYellow => Some(RgbColorDto::new(245, 245, 67)),
-        NamedColor::BrightBlue => Some(RgbColorDto::new(59, 142, 234)),
-        NamedColor::BrightMagenta => Some(RgbColorDto::new(214, 112, 214)),
-        NamedColor::BrightCyan => Some(RgbColorDto::new(41, 184, 219)),
-        NamedColor::BrightWhite => Some(RgbColorDto::new(255, 255, 255)),
-        NamedColor::Foreground => Some(RgbColorDto::new(229, 229, 229)),
-        NamedColor::Background => Some(RgbColorDto::new(0, 0, 0)),
-        _ => None,
+        NamedColor::Black => Some(color_theme.palette[0]),
+        NamedColor::Red => Some(color_theme.palette[1]),
+        NamedColor::Green => Some(color_theme.palette[2]),
+        NamedColor::Yellow => Some(color_theme.palette[3]),
+        NamedColor::Blue => Some(color_theme.palette[4]),
+        NamedColor::Magenta => Some(color_theme.palette[5]),
+        NamedColor::Cyan => Some(color_theme.palette[6]),
+        NamedColor::White => Some(color_theme.palette[7]),
+        NamedColor::BrightBlack => Some(color_theme.palette[8]),
+        NamedColor::BrightRed => Some(color_theme.palette[9]),
+        NamedColor::BrightGreen => Some(color_theme.palette[10]),
+        NamedColor::BrightYellow => Some(color_theme.palette[11]),
+        NamedColor::BrightBlue => Some(color_theme.palette[12]),
+        NamedColor::BrightMagenta => Some(color_theme.palette[13]),
+        NamedColor::BrightCyan => Some(color_theme.palette[14]),
+        NamedColor::BrightWhite => Some(color_theme.palette[15]),
+        NamedColor::Foreground => Some(color_theme.foreground),
+        NamedColor::Background => Some(color_theme.background),
+        NamedColor::Cursor => Some(color_theme.cursor),
+        NamedColor::DimBlack => Some(dim_color(color_theme.palette[0])),
+        NamedColor::DimRed => Some(dim_color(color_theme.palette[1])),
+        NamedColor::DimGreen => Some(dim_color(color_theme.palette[2])),
+        NamedColor::DimYellow => Some(dim_color(color_theme.palette[3])),
+        NamedColor::DimBlue => Some(dim_color(color_theme.palette[4])),
+        NamedColor::DimMagenta => Some(dim_color(color_theme.palette[5])),
+        NamedColor::DimCyan => Some(dim_color(color_theme.palette[6])),
+        NamedColor::DimWhite => Some(dim_color(color_theme.palette[7])),
+        NamedColor::BrightForeground => Some(color_theme.palette[15]),
+        NamedColor::DimForeground => Some(dim_color(color_theme.foreground)),
     }
 }
 
-fn indexed_color_to_rgb(index: u8, colors: &Colors) -> Option<RgbColorDto> {
+fn indexed_color_to_rgb(
+    index: u8,
+    colors: &Colors,
+    color_theme: &TerminalColorTheme,
+) -> Option<RgbColorDto> {
     if let Some(rgb) = colors[index as usize] {
         return Some(rgb_to_dto(rgb));
     }
 
-    match index {
-        0 => Some(RgbColorDto::new(0, 0, 0)),
-        1 => Some(RgbColorDto::new(205, 49, 49)),
-        2 => Some(RgbColorDto::new(13, 188, 121)),
-        3 => Some(RgbColorDto::new(229, 229, 16)),
-        4 => Some(RgbColorDto::new(36, 114, 200)),
-        5 => Some(RgbColorDto::new(188, 63, 188)),
-        6 => Some(RgbColorDto::new(17, 168, 205)),
-        7 => Some(RgbColorDto::new(229, 229, 229)),
-        8 => Some(RgbColorDto::new(102, 102, 102)),
-        9 => Some(RgbColorDto::new(241, 76, 76)),
-        10 => Some(RgbColorDto::new(35, 209, 139)),
-        11 => Some(RgbColorDto::new(245, 245, 67)),
-        12 => Some(RgbColorDto::new(59, 142, 234)),
-        13 => Some(RgbColorDto::new(214, 112, 214)),
-        14 => Some(RgbColorDto::new(41, 184, 219)),
-        15 => Some(RgbColorDto::new(255, 255, 255)),
-        16..=231 => {
-            let cube_index = index - 16;
-
-            let red_level = cube_index / 36;
-            let green_level = (cube_index % 36) / 6;
-            let blue_level = cube_index % 6;
-
-            Some(RgbColorDto::new(
-                ansi_256_cube_component(red_level),
-                ansi_256_cube_component(green_level),
-                ansi_256_cube_component(blue_level),
-            ))
-        }
-        232..=255 => {
-            let level = 8 + 10 * (index - 232);
-
-            Some(RgbColorDto::new(level, level, level))
-        }
-    }
+    Some(color_theme.palette[index as usize])
 }
 
 fn rgb_to_dto(rgb: Rgb) -> RgbColorDto {
     RgbColorDto::new(rgb.r, rgb.g, rgb.b)
+}
+
+fn dim_color(color: RgbColorDto) -> RgbColorDto {
+    let dim = |channel: u8| (u16::from(channel) * 2 / 3) as u8;
+    RgbColorDto::new(dim(color.red), dim(color.green), dim(color.blue))
 }
 
 fn terminal_clipboard(clipboard: ClipboardType) -> TerminalClipboard {
@@ -1918,14 +1963,6 @@ fn alacritty_osc52_mode(mode: TerminalOsc52Mode) -> Osc52 {
         TerminalOsc52Mode::OnlyCopy => Osc52::OnlyCopy,
         TerminalOsc52Mode::OnlyPaste => Osc52::OnlyPaste,
         TerminalOsc52Mode::CopyPaste => Osc52::CopyPaste,
-    }
-}
-
-fn ansi_256_cube_component(level: u8) -> u8 {
-    match level {
-        0 => 0,
-        1..=5 => 55 + 40 * level,
-        _ => unreachable!("ANSI 256-color cube level must be 0..=5"),
     }
 }
 
@@ -3043,6 +3080,45 @@ mod tests {
 
         assert_eq!(run.style.foreground, Some(RgbColorDto::new(36, 114, 200)));
         assert!(run.style.bold);
+    }
+
+    #[test]
+    fn applies_configured_kitty_palette_and_default_colors() {
+        let mut color_theme = TerminalColorTheme::default();
+        color_theme.foreground = RgbColorDto::new(210, 211, 212);
+        color_theme.background = RgbColorDto::new(20, 21, 22);
+        color_theme.palette[4] = RgbColorDto::new(40, 80, 160);
+        let store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_osc52_and_colors(
+            AlacrittyTermSize::default(),
+            Config::default().scrolling_history,
+            TerminalCursorStyle::default(),
+            TerminalOsc52Mode::default(),
+            color_theme,
+        );
+        let target_id = RenderTargetId::new(91);
+
+        store.apply_bytes(target_id, Seq::new(1), b"default \x1b[34mblue\x1b[0m");
+        let snapshot = store.snapshot_of(target_id).expect("snapshot should exist");
+        let default_run = snapshot
+            .text_runs
+            .iter()
+            .find(|run| run.text == "default ")
+            .expect("default run should exist");
+        let blue_run = snapshot
+            .text_runs
+            .iter()
+            .find(|run| run.text == "blue")
+            .expect("blue run should exist");
+
+        assert_eq!(default_run.style.foreground, Some(color_theme.foreground));
+        assert_eq!(blue_run.style.foreground, Some(color_theme.palette[4]));
+        assert_eq!(
+            store
+                .render_surface_snapshot_of(target_id)
+                .expect("surface snapshot should exist")
+                .default_background,
+            color_theme.background
+        );
     }
 
     #[test]
