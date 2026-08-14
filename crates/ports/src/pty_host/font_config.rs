@@ -3,7 +3,7 @@ use crate::pty_host::{
     scale_factor::TerminalScaleFactor,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalFontConfig {
     family: TerminalFontFamily,
     size: TerminalFontSize,
@@ -11,13 +11,7 @@ pub struct TerminalFontConfig {
 }
 
 impl TerminalFontConfig {
-    pub const DEFAULT: Self = Self {
-        family: TerminalFontFamily::DEFAULT,
-        size: TerminalFontSize::DEFAULT,
-        bold_weight: TerminalFontWeight::DEFAULT_BOLD,
-    };
-
-    pub const fn new(family: TerminalFontFamily, size: TerminalFontSize) -> Self {
+    pub fn new(family: TerminalFontFamily, size: TerminalFontSize) -> Self {
         Self {
             family,
             size,
@@ -25,26 +19,32 @@ impl TerminalFontConfig {
         }
     }
 
-    pub const fn family(self) -> TerminalFontFamily {
-        self.family
+    pub fn family(&self) -> &TerminalFontFamily {
+        &self.family
     }
 
-    pub const fn size(self) -> TerminalFontSize {
+    pub const fn size(&self) -> TerminalFontSize {
         self.size
     }
 
-    pub const fn bold_weight(self) -> TerminalFontWeight {
+    pub const fn bold_weight(&self) -> TerminalFontWeight {
         self.bold_weight
     }
 
-    pub const fn with_bold_weight(self, bold_weight: TerminalFontWeight) -> Self {
+    pub fn with_bold_weight(self, bold_weight: TerminalFontWeight) -> Self {
         Self {
             bold_weight,
             ..self
         }
     }
 
-    pub fn physical_px(self, scale_factor: TerminalScaleFactor) -> f32 {
+    pub fn physical_px(&self, scale_factor: TerminalScaleFactor) -> f32 {
         self.size.physical_px(scale_factor.value())
+    }
+}
+
+impl Default for TerminalFontConfig {
+    fn default() -> Self {
+        Self::new(TerminalFontFamily::default(), TerminalFontSize::DEFAULT)
     }
 }

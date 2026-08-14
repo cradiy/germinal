@@ -3,7 +3,7 @@ use crate::pty_host::{
     scale_factor::TerminalScaleFactor, size_info::TerminalSizeInfo,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalGlyphRenderConfig {
     font_config: TerminalFontConfig,
     cell_size: TerminalCellSize,
@@ -31,23 +31,23 @@ impl TerminalGlyphRenderConfig {
         Self::new(font_config, size_info.cell_size(), scale_factor)
     }
 
-    pub const fn font_config(self) -> TerminalFontConfig {
-        self.font_config
+    pub fn font_config(&self) -> &TerminalFontConfig {
+        &self.font_config
     }
 
-    pub const fn cell_size(self) -> TerminalCellSize {
+    pub const fn cell_size(&self) -> TerminalCellSize {
         self.cell_size
     }
 
-    pub const fn font_family_name(self) -> &'static str {
+    pub fn font_family_name(&self) -> &str {
         self.font_config.family().name()
     }
 
-    pub fn font_size_px(self) -> f32 {
+    pub fn font_size_px(&self) -> f32 {
         self.font_size_px
     }
 
-    pub const fn bold_font_weight(self) -> TerminalFontWeight {
+    pub const fn bold_font_weight(&self) -> TerminalFontWeight {
         self.font_config.bold_weight()
     }
 }

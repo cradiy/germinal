@@ -29,39 +29,22 @@ impl TerminalPadding {
     pub const fn y_px(self) -> u32 {
         self.y_px
     }
-
-    pub const fn add(self, other: Self) -> Self {
-        Self {
-            x_px: self.x_px.saturating_add(other.x_px),
-            y_px: self.y_px.saturating_add(other.y_px),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSizeConfig {
     cell_size: TerminalCellSize,
     padding: TerminalPadding,
-    dynamic_padding: bool,
 }
 
 impl TerminalSizeConfig {
     pub const DEFAULT: Self = Self {
         cell_size: TerminalCellSize::new(12, 24),
         padding: TerminalPadding::ZERO,
-        dynamic_padding: false,
     };
 
-    pub const fn new(
-        cell_size: TerminalCellSize,
-        padding: TerminalPadding,
-        dynamic_padding: bool,
-    ) -> Self {
-        Self {
-            cell_size,
-            padding,
-            dynamic_padding,
-        }
+    pub const fn new(cell_size: TerminalCellSize, padding: TerminalPadding) -> Self {
+        Self { cell_size, padding }
     }
 
     pub const fn cell_size(self) -> TerminalCellSize {
@@ -75,19 +58,13 @@ impl TerminalSizeConfig {
     pub const fn padding(self) -> TerminalPadding {
         self.padding
     }
-
-    pub const fn dynamic_padding(self) -> bool {
-        self.dynamic_padding
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSizeInfo {
     window_size: TerminalWindowSize,
     cell_size: TerminalCellSize,
-    configured_padding: TerminalPadding,
-    dynamic_padding: TerminalPadding,
-    total_padding: TerminalPadding,
+    padding: TerminalPadding,
     content_size: TerminalContentSize,
     grid_size: TerminalGridSize,
     pty_size: TerminalPtySize,
@@ -99,10 +76,7 @@ impl TerminalSizeInfo {
         cell_size: TerminalCellSize,
         padding: TerminalPadding,
     ) -> Self {
-        Self::from_config(
-            window_size,
-            TerminalSizeConfig::new(cell_size, padding, false),
-        )
+        Self::from_config(window_size, TerminalSizeConfig::new(cell_size, padding))
     }
 
     pub fn from_config(window_size: TerminalWindowSize, config: TerminalSizeConfig) -> Self {
@@ -114,28 +88,12 @@ impl TerminalSizeInfo {
         config: TerminalSizeConfig,
         scale_factor: TerminalScaleFactor,
     ) -> Self {
-        let configured_padding = TerminalPadding::new(
+        let padding = TerminalPadding::new(
             scale_factor.physical_px_from_logical_px(config.padding().x_px()),
             scale_factor.physical_px_from_logical_px(config.padding().y_px()),
         );
-        let initial_content_width_px =
-            content_axis_px(window_size.width_px(), configured_padding.x_px());
-        let initial_content_height_px =
-            content_axis_px(window_size.height_px(), configured_padding.y_px());
-        let initial_content_size =
-            TerminalContentSize::new(initial_content_width_px, initial_content_height_px);
-        let grid_size =
-            terminal_grid_size_from_content_pixels(initial_content_size, config.cell_size());
-
-        let dynamic_padding = if config.dynamic_padding() {
-            dynamic_padding_for_grid(initial_content_size, config.cell_size(), grid_size)
-        } else {
-            TerminalPadding::ZERO
-        };
-
-        let total_padding = configured_padding.add(dynamic_padding);
-        let content_width_px = content_axis_px(window_size.width_px(), total_padding.x_px());
-        let content_height_px = content_axis_px(window_size.height_px(), total_padding.y_px());
+        let content_width_px = content_axis_px(window_size.width_px(), padding.x_px());
+        let content_height_px = content_axis_px(window_size.height_px(), padding.y_px());
         let content_size = TerminalContentSize::new(content_width_px, content_height_px);
         let grid_size = terminal_grid_size_from_content_pixels(content_size, config.cell_size());
 
@@ -147,9 +105,7 @@ impl TerminalSizeInfo {
         let size_info = Self {
             window_size,
             cell_size: config.cell_size(),
-            configured_padding,
-            dynamic_padding,
-            total_padding,
+            padding,
             content_size,
             grid_size,
             pty_size,
@@ -172,15 +128,7 @@ impl TerminalSizeInfo {
     }
 
     pub const fn padding(self) -> TerminalPadding {
-        self.total_padding
-    }
-
-    pub const fn configured_padding(self) -> TerminalPadding {
-        self.configured_padding
-    }
-
-    pub const fn dynamic_padding(self) -> TerminalPadding {
-        self.dynamic_padding
+        self.padding
     }
 
     pub const fn content_size(self) -> TerminalContentSize {
@@ -204,7 +152,7 @@ impl TerminalSizeInfo {
     }
 
     pub fn render_viewport(self) -> TerminalRenderViewport {
-        TerminalRenderViewport::new(self.cell_size, self.total_padding, self.grid_size)
+        TerminalRenderViewport::new(self.cell_size, self.padding, self.grid_size)
     }
 
     pub fn grid_width_px(self) -> u32 {
@@ -238,19 +186,6 @@ impl TerminalSizeInfo {
             "TerminalSizeInfo derived values are inconsistent"
         );
     }
-}
-
-fn dynamic_padding_for_grid(
-    content_size: TerminalContentSize,
-    cell_size: TerminalCellSize,
-    grid_size: TerminalGridSize,
-) -> TerminalPadding {
-    let used_width = (grid_size.columns() as u32).saturating_mul(cell_size.width_px());
-    let used_height = (grid_size.rows() as u32).saturating_mul(cell_size.height_px());
-    let extra_x = content_size.width_px().saturating_sub(used_width) / 2;
-    let extra_y = content_size.height_px().saturating_sub(used_height) / 2;
-
-    TerminalPadding::new(extra_x, extra_y)
 }
 
 fn content_axis_px(axis_px: u32, padding_px: u32) -> u32 {

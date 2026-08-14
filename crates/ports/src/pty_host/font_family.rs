@@ -1,19 +1,21 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalFontFamily {
-    name: &'static str,
+    name: String,
 }
 
 impl TerminalFontFamily {
-    pub const DEFAULT: Self = Self {
-        name: platform_default_terminal_font_family(),
-    };
-
-    pub const fn new(name: &'static str) -> Self {
-        Self { name }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 
-    pub const fn name(self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Default for TerminalFontFamily {
+    fn default() -> Self {
+        Self::new(platform_default_terminal_font_family())
     }
 }
 

@@ -68,7 +68,8 @@ editing mode.
 
 ## P1: Configuration
 
-- [ ] Configure primary font, fallback fonts, font weight, and font features.
+- [x] Configure the primary font family and font size.
+- [ ] Configure fallback fonts, font weight, and font features.
 - [ ] Configure terminal colors, opacity, cursor colors, and selection colors.
 - [ ] Configure the default shell, startup command, and working directory.
 - [ ] Configure scrollback size and host-side shortcuts.

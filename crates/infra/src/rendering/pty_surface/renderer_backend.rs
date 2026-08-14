@@ -253,7 +253,7 @@ fn append_terminal_geometric_glyph_quads(
 ) {
     let glyph_x = glyph.pixel_x(config);
     let glyph_y = glyph.pixel_y(config);
-    for rect in geometric_glyph.pixel_rects(config.cell_size(), glyph.cell_width) {
+    for rect in geometric_glyph.pixel_rects(config.cell_size_for_row(glyph.y), glyph.cell_width) {
         quads.push(WgpuQuadDrawItem::solid_rect(
             glyph_x + rect.x_px(),
             glyph_y + rect.y_px(),
@@ -274,9 +274,9 @@ fn append_cursor_quads(
     }
 
     let x = config.content_origin_x + cursor.x * config.cell_width_px;
-    let y = config.content_origin_y + cursor.y * config.cell_height_px;
+    let y = config.row_top_px(cursor.y);
     let w = config.cell_width_px.max(1);
-    let h = config.cell_height_px.max(1);
+    let h = config.row_height_px(cursor.y);
     let style = TextStyleDto {
         foreground: Some(CURSOR_COLOR),
         background: None,
@@ -395,8 +395,36 @@ impl WgpuRendererConfig {
             .max(1)
     }
 
-    fn cell_size(self) -> TerminalCellSize {
-        TerminalCellSize::new(self.cell_width_px, self.cell_height_px)
+    fn cell_size_for_row(self, row: u32) -> TerminalCellSize {
+        TerminalCellSize::new(self.cell_width_px, self.row_height_px(row))
+    }
+
+    fn row_top_px(self, row: u32) -> u32 {
+        if row >= self.grid_rows.max(1) {
+            return self
+                .content_origin_y
+                .saturating_add(row.saturating_mul(self.cell_height_px));
+        }
+
+        self.content_origin_y
+            .saturating_add(self.row_offset_px(row))
+    }
+
+    fn row_height_px(self, row: u32) -> u32 {
+        if row >= self.grid_rows.max(1) {
+            return self.cell_height_px.max(1);
+        }
+
+        self.row_offset_px(row.saturating_add(1))
+            .saturating_sub(self.row_offset_px(row))
+            .max(1)
+    }
+
+    fn row_offset_px(self, row: u32) -> u32 {
+        let rows = self.grid_rows.max(1);
+        let row = row.min(rows);
+        ((u64::from(row) * u64::from(self.content_height_px)) / u64::from(rows))
+            .min(u64::from(u32::MAX)) as u32
     }
 }
 impl From<TerminalRenderViewport> for WgpuRendererConfig {
@@ -548,7 +576,7 @@ impl WgpuGlyphDrawItem {
     }
 
     pub fn pixel_y(&self, config: WgpuRendererConfig) -> u32 {
-        config.content_origin_y + self.y * config.cell_height_px
+        config.row_top_px(self.y)
     }
 
     pub fn pixel_width(&self, config: WgpuRendererConfig) -> u32 {
@@ -593,7 +621,7 @@ impl WgpuQuadDrawItem {
             x_px: glyph.pixel_x(config),
             y_px: glyph.pixel_y(config),
             width_px: glyph.pixel_width(config),
-            height_px: config.cell_height_px,
+            height_px: config.row_height_px(glyph.y),
             style: glyph.style,
         }
     }
@@ -608,9 +636,9 @@ impl WgpuQuadDrawItem {
         Self {
             kind: WgpuQuadKind::Background,
             x_px: config.content_origin_x + x * config.cell_width_px,
-            y_px: config.content_origin_y + y * config.cell_height_px,
+            y_px: config.row_top_px(y),
             width_px: cell_width.max(1) * config.cell_width_px,
-            height_px: config.cell_height_px,
+            height_px: config.row_height_px(y),
             style,
         }
     }
@@ -625,9 +653,9 @@ impl WgpuQuadDrawItem {
         Self {
             kind: WgpuQuadKind::Underline,
             x_px: config.content_origin_x + x * config.cell_width_px,
-            y_px: config.content_origin_y
-                + y * config.cell_height_px
-                + config.cell_height_px.saturating_sub(2),
+            y_px: config
+                .row_top_px(y)
+                .saturating_add(config.row_height_px(y).saturating_sub(2)),
             width_px: cell_width.max(1) * config.cell_width_px,
             height_px: 1,
             style,
@@ -775,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_background_covers_partial_cell_remainder_without_stretching_last_cell() {
+    fn surface_background_covers_partial_cell_remainder() {
         let size_info = TerminalSizeInfo::new(
             TerminalWindowSize::new(100, 35),
             TerminalCellSize::new(8, 16),
@@ -801,6 +829,47 @@ mod tests {
         assert_eq!(backgrounds[0].width_px, 100);
         assert_eq!(backgrounds[0].height_px, 35);
         assert_eq!(backgrounds[0].style.background, Some(background));
+    }
+
+    #[test]
+    fn rows_distribute_partial_cell_remainder_to_reach_the_viewport_bottom() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(100, 35),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let config = WgpuRendererConfig::from(size_info);
+
+        assert_eq!(config.grid_rows, 2);
+        assert_eq!(config.row_top_px(0), 0);
+        assert_eq!(config.row_height_px(0), 17);
+        assert_eq!(config.row_top_px(1), 17);
+        assert_eq!(config.row_height_px(1), 18);
+        assert_eq!(config.row_top_px(1) + config.row_height_px(1), 35);
+    }
+
+    #[test]
+    fn last_row_background_reaches_the_viewport_bottom() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(100, 35),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let config = WgpuRendererConfig::from(size_info);
+        let quad = WgpuQuadDrawItem::background(
+            0,
+            1,
+            12,
+            config,
+            TextStyleDto {
+                background: Some(RgbColorDto::new(20, 21, 30)),
+                ..TextStyleDto::plain()
+            },
+        );
+
+        assert_eq!(quad.y_px, 17);
+        assert_eq!(quad.height_px, 18);
+        assert_eq!(quad.y_px + quad.height_px, 35);
     }
 
     #[test]

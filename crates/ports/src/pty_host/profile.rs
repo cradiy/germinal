@@ -11,19 +11,14 @@ use crate::pty_host::{
     window_size::TerminalWindowSize,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalProfile {
     font_config: TerminalFontConfig,
     size_config: TerminalSizeConfig,
 }
 
 impl TerminalProfile {
-    pub const DEFAULT: Self = Self {
-        font_config: TerminalFontConfig::DEFAULT,
-        size_config: TerminalSizeConfig::DEFAULT,
-    };
-
-    pub const fn new(
+    pub fn new(
         font_family: TerminalFontFamily,
         font_size: TerminalFontSize,
         size_config: TerminalSizeConfig,
@@ -34,23 +29,23 @@ impl TerminalProfile {
         }
     }
 
-    pub const fn font_config(self) -> TerminalFontConfig {
-        self.font_config
+    pub fn font_config(&self) -> &TerminalFontConfig {
+        &self.font_config
     }
 
-    pub const fn font_family(self) -> TerminalFontFamily {
+    pub fn font_family(&self) -> &TerminalFontFamily {
         self.font_config.family()
     }
 
-    pub const fn font_size(self) -> TerminalFontSize {
+    pub const fn font_size(&self) -> TerminalFontSize {
         self.font_config.size()
     }
 
-    pub const fn bold_font_weight(self) -> TerminalFontWeight {
+    pub const fn bold_font_weight(&self) -> TerminalFontWeight {
         self.font_config.bold_weight()
     }
 
-    pub const fn size_config(self) -> TerminalSizeConfig {
+    pub const fn size_config(&self) -> TerminalSizeConfig {
         self.size_config
     }
 
@@ -69,14 +64,14 @@ impl TerminalProfile {
     }
 
     pub fn size_info(
-        self,
+        &self,
         window_size: TerminalWindowSize,
         scale_factor: TerminalScaleFactor,
     ) -> TerminalSizeInfo {
         self.size_info_for_window_metrics(TerminalWindowMetrics::new(window_size, scale_factor))
     }
 
-    pub fn size_info_for_window_metrics(self, metrics: TerminalWindowMetrics) -> TerminalSizeInfo {
+    pub fn size_info_for_window_metrics(&self, metrics: TerminalWindowMetrics) -> TerminalSizeInfo {
         TerminalSizeInfo::from_scaled_config(
             metrics.window_size(),
             self.size_config,
@@ -85,14 +80,23 @@ impl TerminalProfile {
     }
 
     pub fn glyph_render_config(
-        self,
+        &self,
         size_info: TerminalSizeInfo,
         scale_factor: TerminalScaleFactor,
     ) -> TerminalGlyphRenderConfig {
-        TerminalGlyphRenderConfig::from_size_info(self.font_config, size_info, scale_factor)
+        TerminalGlyphRenderConfig::from_size_info(self.font_config.clone(), size_info, scale_factor)
     }
 
-    pub fn font_physical_px(self, scale_factor: TerminalScaleFactor) -> f32 {
+    pub fn font_physical_px(&self, scale_factor: TerminalScaleFactor) -> f32 {
         self.font_config.physical_px(scale_factor)
+    }
+}
+
+impl Default for TerminalProfile {
+    fn default() -> Self {
+        Self {
+            font_config: TerminalFontConfig::default(),
+            size_config: TerminalSizeConfig::DEFAULT,
+        }
     }
 }

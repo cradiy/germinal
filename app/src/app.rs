@@ -112,7 +112,7 @@ impl App {
             gshell_service_state: GShellServiceState::new(),
             worker_service_state: WorkerServiceState::new(),
             render_service_state: RenderServiceState::new(),
-            layout_service_state: LayoutServiceState::new(terminal_profile),
+            layout_service_state: LayoutServiceState::new(terminal_profile.clone()),
             workspace_repository: RefCell::new(None),
             runtime_event_dispatcher: runtime_event_dispatcher.clone(),
             pty_backend: PlatformPtyBackend::new(),

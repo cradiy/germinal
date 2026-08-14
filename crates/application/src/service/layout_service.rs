@@ -20,7 +20,7 @@ impl LayoutServiceState {
 
 impl Default for LayoutServiceState {
     fn default() -> Self {
-        Self::new(TerminalProfile::DEFAULT)
+        Self::new(TerminalProfile::default())
     }
 }
 

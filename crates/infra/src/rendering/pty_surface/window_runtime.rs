@@ -113,7 +113,7 @@ impl WgpuTerminalWindowRuntimeFactory {
     ) -> Result<WgpuTerminalWindowRuntime, WindowRuntimeError> {
         pollster::block_on(WgpuTerminalWindowRuntime::new(
             window,
-            self.profile,
+            self.profile.clone(),
             self.base_title.clone(),
         ))
     }
@@ -168,10 +168,10 @@ impl WgpuTerminalWindowRuntime {
 
         let profile =
             terminal_profile_from_alacritty_crossfont_metrics(profile, window.scale_factor())?;
-        let size_info = terminal_size_info(profile, width, height, window.scale_factor());
+        let size_info = terminal_size_info(&profile, width, height, window.scale_factor());
 
         let frame_builder = build_terminal_frame_builder(
-            profile,
+            &profile,
             size_info,
             window.scale_factor(),
             device.limits().max_texture_dimension_2d,
@@ -388,7 +388,7 @@ impl WgpuTerminalWindowRuntime {
 }
 
 fn build_terminal_frame_builder(
-    profile: TerminalProfile,
+    profile: &TerminalProfile,
     size_info: TerminalSizeInfo,
     scale_factor: f64,
     max_texture_dimension_2d: u32,
@@ -443,7 +443,7 @@ fn terminal_profile_from_alacritty_crossfont_metrics(
 }
 
 fn terminal_size_info(
-    profile: TerminalProfile,
+    profile: &TerminalProfile,
     width: u32,
     height: u32,
     scale_factor: f64,

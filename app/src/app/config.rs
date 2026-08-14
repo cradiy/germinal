@@ -61,16 +61,15 @@ pub struct GerminalConfig {
 
 impl GerminalConfig {
     pub fn terminal_profile(&self) -> TerminalProfile {
-        let default_profile = TerminalProfile::DEFAULT;
+        let default_profile = TerminalProfile::default();
         let size_config = TerminalSizeConfig::new(
             default_profile.size_config().cell_size(),
-            TerminalPadding::new(self.terminal.padding_x_px, self.terminal.padding_y_px),
-            self.terminal.dynamic_padding,
+            TerminalPadding::ZERO,
         );
 
         TerminalProfile::new(
-            TerminalFontFamily::DEFAULT,
-            TerminalFontSize::from_points(self.terminal.font_size_points),
+            TerminalFontFamily::new(self.terminal.font_family.clone()),
+            TerminalFontSize::new(self.terminal.font_size),
             size_config,
         )
     }
@@ -107,19 +106,15 @@ impl Default for WindowConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
-    pub font_size_points: f32,
-    pub padding_x_px: u32,
-    pub padding_y_px: u32,
-    pub dynamic_padding: bool,
+    pub font_family: String,
+    pub font_size: f32,
 }
 
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            font_size_points: 16.0,
-            padding_x_px: 0,
-            padding_y_px: 0,
-            dynamic_padding: false,
+            font_family: TerminalFontFamily::default().name().to_owned(),
+            font_size: 16.0,
         }
     }
 }
@@ -200,4 +195,38 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use germinal_ports::pty_host::font_family::TerminalFontFamily;
+
+    use super::GerminalConfig;
+
+    #[test]
+    fn default_config_serializes_public_font_fields() {
+        let contents = toml::to_string_pretty(&GerminalConfig::default()).unwrap();
+
+        assert!(contents.contains(&format!(
+            "font_family = {:?}",
+            TerminalFontFamily::default().name()
+        )));
+        assert!(contents.contains("font_size = 16.0"));
+    }
+
+    #[test]
+    fn terminal_profile_uses_configured_font() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [terminal]
+            font_family = "JetBrains Mono"
+            font_size = 18.5
+            "#,
+        )
+        .unwrap();
+        let profile = config.terminal_profile();
+
+        assert_eq!(profile.font_family().name(), "JetBrains Mono");
+        assert_eq!(profile.font_size().logical_px(), 18.5);
+    }
 }
