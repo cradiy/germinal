@@ -381,6 +381,10 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).set_tab_bar(tab_bar)
     }
 
+    fn set_window_title(&mut self, title: &str) {
+        RenderService::inj_ref_mut(self).set_window_title(title)
+    }
+
     fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
         RenderService::inj_ref_mut(self).resize_window_size_info(window_size)
     }

@@ -17,6 +17,7 @@ use germinal_ports::{
         runtime_event_dispatcher::IRuntimeEventDispatcher,
     },
     pty_host::{
+        hyperlink::TerminalHyperlink,
         pty_input::{PtyInput, PtyInputSender},
         snapshot::TerminalSnapshotProvider,
         terminal_input_mode::TerminalInputModeState,
@@ -277,6 +278,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     pending_bytes_len: usize,
 
     unpublished_seq: Option<Seq>,
+    last_hyperlinks: Vec<TerminalHyperlink>,
 
     perf: TerminalWorkerPerf,
 
@@ -319,6 +321,7 @@ where
             pending_bytes_len: 0,
 
             unpublished_seq: None,
+            last_hyperlinks: Vec::new(),
 
             perf: TerminalWorkerPerf::new(),
 
@@ -693,6 +696,17 @@ where
             return true;
         }
 
+        let hyperlinks = self.terminal_store.visible_hyperlinks(self.target_id);
+        if hyperlinks != self.last_hyperlinks {
+            self.last_hyperlinks.clone_from(&hyperlinks);
+            let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                GShellRuntimeEvent::HyperlinksChanged {
+                    gshell_id: self.gshell_id,
+                    hyperlinks,
+                },
+            ));
+        }
+
         if wake_already_pending {
             self.perf.coalesced_wakeups += 1;
             self.unpublished_seq = Some(seq);
@@ -991,6 +1005,7 @@ mod tests {
             runtime_event_dispatcher::IRuntimeEventDispatcher,
         },
         pty_host::{
+            hyperlink::TerminalHyperlink,
             pty_input::pty_input_channel,
             terminal_input_mode::TerminalInputModeState,
             worker_backend::ITerminalWorkerBackend,
@@ -1183,6 +1198,54 @@ mod tests {
         assert!(modes.focus_in_out());
         assert!(modes.sgr_mouse());
         assert!(modes.mouse_report_click());
+    }
+
+    #[test]
+    fn terminal_worker_publishes_visible_hyperlinks() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(5),
+            TerminalGridSize::new(80, 24),
+            snapshot_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(
+                b"\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\".to_vec(),
+            ))
+            .expect("terminal hyperlink output should send");
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("surface snapshot should arrive");
+
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("hyperlink event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::HyperlinksChanged {
+                gshell_id: GShellId::new(5),
+                hyperlinks: vec![TerminalHyperlink {
+                    uri: "https://example.com/docs".to_string(),
+                    x: 0,
+                    y: 0,
+                    columns: 4,
+                }],
+            })
+        );
+        assert!(matches!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("frame-ready event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, .. })
+                if gshell_id == GShellId::new(5)
+        ));
     }
 
     #[test]

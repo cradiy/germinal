@@ -217,6 +217,13 @@ where
         self.prj_ref_mut().as_mut().redraw_pending = true;
     }
 
+    fn set_window_title(&mut self, title: &str) {
+        self.prj_ref_mut()
+            .window_runtime_mut()
+            .expect("window runtime must be initialized before use")
+            .set_window_title(title);
+    }
+
     fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
         let size_info = self
             .prj_ref_mut()

@@ -2,6 +2,8 @@ use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_domain::workspace::vo::pane_split_direction::PaneSplitDirection;
 use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::Seq};
 
+use crate::pty_host::hyperlink::TerminalHyperlink;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     App(AppRuntimeEvent),
@@ -42,6 +44,10 @@ pub enum GShellRuntimeEvent {
     TitleChanged {
         gshell_id: GShellId,
         title: Option<String>,
+    },
+    HyperlinksChanged {
+        gshell_id: GShellId,
+        hyperlinks: Vec<TerminalHyperlink>,
     },
     SelectionText {
         gshell_id: GShellId,

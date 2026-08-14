@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     env,
     sync::Arc,
     time::{Duration, Instant},
@@ -105,7 +105,6 @@ pub struct WgpuTerminalWindowRuntime {
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     needs_redraw: bool,
-    ui_stats: WindowUiStats,
     perf: WgpuTerminalRenderPerf,
 }
 
@@ -250,7 +249,6 @@ impl WgpuTerminalWindowRuntime {
             size_info,
             profile,
             needs_redraw: false,
-            ui_stats: WindowUiStats::new(),
             perf: WgpuTerminalRenderPerf::new(),
         })
     }
@@ -350,6 +348,16 @@ impl WgpuTerminalWindowRuntime {
     pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
         self.tab_bar = tab_bar;
         self.request_redraw();
+    }
+
+    pub fn set_window_title(&mut self, title: &str) {
+        if self.base_title == title {
+            return;
+        }
+
+        self.base_title.clear();
+        self.base_title.push_str(title);
+        self.window.set_title(title);
     }
 
     pub fn resize_surface_size_info(
@@ -464,12 +472,6 @@ impl WgpuTerminalWindowRuntime {
                 surfaces: &surfaces,
             }) {
             Ok(result) => {
-                if let Some(title) = self
-                    .ui_stats
-                    .record_presented_frame(Instant::now(), &self.base_title)
-                {
-                    self.window.set_title(&title);
-                }
                 self.perf.record_frame(row_count, run_count, &result);
             }
             Err(error) => {
@@ -780,49 +782,6 @@ fn terminal_size_info(
 
 const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const RENDER_PERF_LOG_ENV: &str = "GERMINAL_RENDER_PERF_LOG";
-const UI_FPS_WINDOW: Duration = Duration::from_secs(1);
-const UI_TITLE_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
-
-#[derive(Debug)]
-struct WindowUiStats {
-    frame_count: u64,
-    presented_frames: VecDeque<Instant>,
-    last_title_update: Option<Instant>,
-}
-
-impl WindowUiStats {
-    fn new() -> Self {
-        Self {
-            frame_count: 0,
-            presented_frames: VecDeque::new(),
-            last_title_update: None,
-        }
-    }
-
-    fn record_presented_frame(&mut self, now: Instant, base_title: &str) -> Option<String> {
-        self.frame_count += 1;
-        self.presented_frames.push_back(now);
-        while let Some(oldest) = self.presented_frames.front().copied() {
-            if now.saturating_duration_since(oldest) <= UI_FPS_WINDOW {
-                break;
-            }
-            self.presented_frames.pop_front();
-        }
-
-        if self.last_title_update.is_some_and(|updated_at| {
-            now.saturating_duration_since(updated_at) < UI_TITLE_UPDATE_INTERVAL
-        }) {
-            return None;
-        }
-
-        self.last_title_update = Some(now);
-        Some(format!(
-            "{base_title} | ui_frame={} ui_fps={:.1}",
-            self.frame_count,
-            self.presented_frames.len() as f32 / UI_FPS_WINDOW.as_secs_f32()
-        ))
-    }
-}
 
 struct WgpuTerminalRenderPerf {
     logging_enabled: bool,
@@ -1080,6 +1039,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
         WgpuTerminalWindowRuntime::set_tab_bar(self, tab_bar);
     }
 
+    fn set_window_title(&mut self, title: &str) {
+        WgpuTerminalWindowRuntime::set_window_title(self, title);
+    }
+
     fn resize_surface_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo {
         WgpuTerminalWindowRuntime::resize_surface_size_info(self, window_size)
     }
@@ -1106,8 +1069,6 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use germinal_ports::{
         pty_host::{
             cell_size::TerminalCellSize,
@@ -1128,8 +1089,8 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        TAB_BAR_FALLBACK_BACKGROUND, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, WindowUiStats,
-        build_tab_bar_surface, ime_cursor_area,
+        TAB_BAR_FALLBACK_BACKGROUND, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface,
+        ime_cursor_area,
     };
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
 
@@ -1262,39 +1223,5 @@ mod tests {
         assert!(surface.snapshot.default_background.green < 50);
         assert!(surface.snapshot.default_background.blue < 60);
         assert!(surface.snapshot.rows[0].runs.len() > 10);
-    }
-
-    #[test]
-    fn window_ui_stats_formats_presented_frame_fps() {
-        let mut stats = WindowUiStats::new();
-        let start = Instant::now();
-
-        let title = stats
-            .record_presented_frame(start, "germinal")
-            .expect("first frame should update title");
-        assert_eq!(title, "germinal | ui_frame=1 ui_fps=1.0");
-
-        assert!(
-            stats
-                .record_presented_frame(start + Duration::from_millis(100), "germinal")
-                .is_none()
-        );
-
-        let title = stats
-            .record_presented_frame(start + Duration::from_millis(300), "germinal")
-            .expect("title should refresh after throttle interval");
-        assert_eq!(title, "germinal | ui_frame=3 ui_fps=3.0");
-    }
-
-    #[test]
-    fn window_ui_stats_drops_frames_outside_fps_window() {
-        let mut stats = WindowUiStats::new();
-        let start = Instant::now();
-
-        stats.record_presented_frame(start, "germinal");
-        let title = stats
-            .record_presented_frame(start + Duration::from_millis(1250), "germinal")
-            .expect("title should refresh after throttle interval");
-        assert_eq!(title, "germinal | ui_frame=2 ui_fps=1.0");
     }
 }

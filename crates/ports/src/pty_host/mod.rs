@@ -5,6 +5,7 @@ pub mod font_family;
 pub mod font_size;
 pub mod font_weight;
 pub mod glyph_render_config;
+pub mod hyperlink;
 pub mod output_applier;
 pub mod profile;
 pub mod pty_backend;

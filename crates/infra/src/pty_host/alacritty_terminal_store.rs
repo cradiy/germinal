@@ -19,6 +19,7 @@ use alacritty_terminal::{
 };
 use germinal_ports::{
     pty_host::{
+        hyperlink::TerminalHyperlink,
         snapshot::{
             TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider,
             TerminalTextRunSnapshot,
@@ -609,6 +610,14 @@ impl AlacrittyTerminalStore {
             total_bytes: state.total_bytes,
             chunk_count: state.chunk_count,
         })
+    }
+
+    pub fn visible_hyperlinks(&self, render_target_id: RenderTargetId) -> Vec<TerminalHyperlink> {
+        let inner = self.inner.borrow();
+        inner
+            .get(&render_target_id)
+            .map(|state| visible_hyperlinks(&state.term))
+            .unwrap_or_default()
     }
 
     pub fn take_pending_pty_writes(&self, render_target_id: RenderTargetId) -> Vec<Vec<u8>> {
@@ -1325,7 +1334,10 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
             continue;
         }
 
-        let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
+        let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors);
+        if cell.hyperlink().is_some() {
+            style.underline = true;
+        }
         let style = if selected {
             selected_style(style)
         } else {
@@ -1380,6 +1392,46 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
     }
 
     rows
+}
+
+fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperlink> {
+    let renderable = term.renderable_content();
+    let display_offset = renderable.display_offset;
+    let mut hyperlinks = Vec::<TerminalHyperlink>::new();
+
+    for indexed in renderable.display_iter {
+        let Some(point) = point_to_viewport(display_offset, indexed.point) else {
+            continue;
+        };
+        let cell = indexed.cell;
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let Some(hyperlink) = cell.hyperlink() else {
+            continue;
+        };
+
+        let x = point.column.0 as u32;
+        let y = point.line as u32;
+        let columns = terminal_char_cell_width(cell.c).max(1);
+        if let Some(previous) = hyperlinks.last_mut()
+            && previous.uri == hyperlink.uri()
+            && previous.y == y
+            && previous.x.saturating_add(previous.columns) == x
+        {
+            previous.columns = previous.columns.saturating_add(columns);
+            continue;
+        }
+
+        hyperlinks.push(TerminalHyperlink {
+            uri: hyperlink.uri().to_string(),
+            x,
+            y,
+            columns,
+        });
+    }
+
+    hyperlinks
 }
 
 fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlaceholderCell> {
@@ -1733,6 +1785,30 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(2), b"\x1b]2;\x1b\\");
         assert_eq!(store.take_title_change(target_id), Some(None));
+    }
+
+    #[test]
+    fn exports_and_underlines_osc_8_hyperlinks() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(82);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\",
+        );
+
+        assert_eq!(
+            store.visible_hyperlinks(target_id),
+            vec![TerminalHyperlink {
+                uri: "https://example.com/docs".to_string(),
+                x: 0,
+                y: 0,
+                columns: 4,
+            }]
+        );
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.rows[0].runs[0].text, "docs");
+        assert!(snapshot.rows[0].runs[0].style.underline);
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub(super) fn encode_key_event(
 
     if modifiers.control_key() {
         return ctrl_bytes_from_key(logical_key)
+            .or_else(|| control_text_bytes(text))
             .map(|bytes| prefix_escape_if(bytes, modifiers.alt_key()));
     }
 
@@ -466,6 +467,11 @@ fn ctrl_bytes_from_key(key: &WindowInputKey) -> Option<Vec<u8>> {
     Some(vec![byte])
 }
 
+fn control_text_bytes(text: Option<&str>) -> Option<Vec<u8>> {
+    let bytes = text?.as_bytes();
+    (bytes.len() == 1 && (bytes[0] <= 0x1F || bytes[0] == 0x7F)).then(|| bytes.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use germinal_ports::event::window_input_event::{
@@ -631,6 +637,33 @@ mod tests {
                 None,
             ),
             Some(vec![0x1B, 0x01]),
+        );
+    }
+
+    #[test]
+    fn ctrl_c_encodes_terminal_interrupt_even_without_a_logical_character() {
+        let terminal_modes = modes(false, false, false, false, false, false);
+        let control = WindowInputModifiers::new(true, false, false, false);
+
+        assert_eq!(
+            encode_key_event(
+                terminal_modes,
+                control,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Character("c".to_string()),
+                None,
+            ),
+            Some(vec![0x03]),
+        );
+        assert_eq!(
+            encode_key_event(
+                terminal_modes,
+                control,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Unidentified,
+                Some("\x03"),
+            ),
+            Some(vec![0x03]),
         );
     }
 

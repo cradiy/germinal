@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashMap, process::Command};
 
 mod boilerplate;
 mod config;
@@ -36,7 +36,9 @@ use germinal_ports::{
             WindowInputNamedKey, WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
         },
     },
-    pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
+    pty_host::{
+        hyperlink::TerminalHyperlink, size_info::TerminalSizeInfo, window_size::TerminalWindowSize,
+    },
     rendering::{
         render_target_id::RenderTargetId,
         surface_snapshot::RenderSurfaceImePreeditSnapshot,
@@ -84,10 +86,13 @@ pub struct App {
     render_window_id: Option<WindowId>,
     paste_controller: HostPasteController,
     window_input_modifiers: WindowInputModifiers,
+    routed_input_modifiers: WindowInputModifiers,
     window_focused: bool,
     ime_enabled: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     pointer_gshell: Option<GShellId>,
+    terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
+    hyperlink_pointer_consumed: bool,
     pane_navigation_enabled: bool,
     config: GerminalConfig,
 }
@@ -152,10 +157,13 @@ impl App {
             render_window_id: None,
             paste_controller: HostPasteController::default(),
             window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
+            routed_input_modifiers: WindowInputModifiers::new(false, false, false, false),
             window_focused: true,
             ime_enabled: false,
             cursor_position: None,
             pointer_gshell: None,
+            terminal_hyperlinks: HashMap::new(),
+            hyperlink_pointer_consumed: false,
             pane_navigation_enabled,
             config,
         };
@@ -223,6 +231,18 @@ impl App {
         })
     }
 
+    fn current_terminal_window_title(&self) -> String {
+        self.tab_titles()
+            .get(self.active_tab_index())
+            .cloned()
+            .unwrap_or_else(|| self.config.window.title.clone())
+    }
+
+    fn sync_current_terminal_window_title(&mut self) {
+        let title = self.current_terminal_window_title();
+        self.set_window_title(&title);
+    }
+
     fn current_workspace_render_layout(
         &self,
         window_size: TerminalWindowSize,
@@ -248,6 +268,7 @@ impl App {
     }
 
     fn set_current_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        self.sync_current_terminal_window_title();
         self.set_tab_bar(self.current_tab_bar_snapshot());
         self.set_workspace_render_layout(placements);
     }
@@ -413,6 +434,7 @@ impl App {
 
         self.apply_gshell_focus_change(previous_gshell, focused_gshell);
         for closed_gshell in closed_gshells {
+            self.terminal_hyperlinks.remove(&closed_gshell);
             self.remove_gshell(closed_gshell);
             self.remove_render_target(RenderTargetId::new(closed_gshell.value()));
         }
@@ -491,13 +513,7 @@ impl App {
         logical_key: &WindowInputKey,
         physical_key: winit::keyboard::PhysicalKey,
     ) -> bool {
-        let physical_modifiers = self.paste_controller.effective_modifiers();
-        let effective_modifiers = WindowInputModifiers::new(
-            self.window_input_modifiers.control_key() || physical_modifiers.control,
-            self.window_input_modifiers.alt_key(),
-            self.window_input_modifiers.shift_key() || physical_modifiers.shift,
-            self.window_input_modifiers.super_key(),
-        );
+        let effective_modifiers = self.effective_input_modifiers();
         let action = self
             .config
             .keyboard
@@ -584,6 +600,29 @@ impl App {
         true
     }
 
+    fn effective_input_modifiers(&self) -> WindowInputModifiers {
+        let physical_modifiers = self.paste_controller.effective_modifiers();
+        WindowInputModifiers::new(
+            self.window_input_modifiers.control_key() || physical_modifiers.control,
+            self.window_input_modifiers.alt_key(),
+            self.window_input_modifiers.shift_key() || physical_modifiers.shift,
+            self.window_input_modifiers.super_key(),
+        )
+    }
+
+    fn route_effective_input_modifiers(&mut self) {
+        let modifiers = self.effective_input_modifiers();
+        if modifiers == self.routed_input_modifiers {
+            return;
+        }
+
+        self.routed_input_modifiers = modifiers;
+        self.route_input_to_gshell(GShellInput {
+            gshell_id: self.focused_gshell(),
+            event: GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(modifiers)),
+        });
+    }
+
     fn write_selection_to_clipboard(&mut self, gshell_id: GShellId, text: Option<String>) {
         let Some(text) = text.filter(|text| !text.is_empty()) else {
             debug!(
@@ -642,6 +681,8 @@ impl App {
             self.route_focus_changed(focused, true);
         }
         self.set_focused_render_target(RenderTargetId::new(focused.value()));
+        self.sync_current_terminal_window_title();
+        self.set_tab_bar(self.current_tab_bar_snapshot());
         self.update_ime_cursor_area();
     }
 
@@ -684,6 +725,40 @@ impl App {
                 position,
             ),
         ))
+    }
+
+    fn try_open_hyperlink_at_cursor(&self) -> bool {
+        let Some(position) = self.cursor_position else {
+            return false;
+        };
+        let Some((gshell_id, local_position)) = self.pointer_input_at(position) else {
+            return false;
+        };
+        if local_position.x_px < 0.0 || local_position.y_px < 0.0 {
+            return false;
+        }
+        let Some(size_info) = self.current_gshell_size_info(gshell_id) else {
+            return false;
+        };
+        let cell_size = size_info.cell_size();
+        let x = (local_position.x_px / f64::from(cell_size.width_px().max(1))) as u32;
+        let y = (local_position.y_px / f64::from(cell_size.height_px().max(1))) as u32;
+        let Some(uri) = self
+            .terminal_hyperlinks
+            .get(&gshell_id)
+            .and_then(|hyperlinks| hyperlinks.iter().find(|link| link.contains(x, y)))
+            .map(|link| link.uri.clone())
+        else {
+            return false;
+        };
+
+        match open_terminal_hyperlink(&uri) {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(%uri, %error, "failed to open terminal hyperlink");
+                false
+            }
+        }
     }
 
     fn route_pointer_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -798,8 +873,19 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged { gshell_id, title }) => {
                 self.update_gshell_title(gshell_id, title);
+                self.sync_current_terminal_window_title();
                 self.set_tab_bar(self.current_tab_bar_snapshot());
                 self.request_redraw();
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::HyperlinksChanged {
+                gshell_id,
+                hyperlinks,
+            }) => {
+                if hyperlinks.is_empty() {
+                    self.terminal_hyperlinks.remove(&gshell_id);
+                } else {
+                    self.terminal_hyperlinks.insert(gshell_id, hyperlinks);
+                }
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
                 self.write_selection_to_clipboard(gshell_id, text);
@@ -870,12 +956,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     control: modifiers.state().control_key(),
                     shift: modifiers.state().shift_key(),
                 });
-                self.route_input_to_gshell(GShellInput {
-                    gshell_id: self.focused_gshell(),
-                    event: GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(
-                        self.window_input_modifiers,
-                    )),
-                });
+                self.route_effective_input_modifiers();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
@@ -886,6 +967,19 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.route_pointer_left();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left {
+                    if state == ElementState::Pressed
+                        && self.window_input_modifiers.control_key()
+                        && self.try_open_hyperlink_at_cursor()
+                    {
+                        self.hyperlink_pointer_consumed = true;
+                        return;
+                    }
+                    if state == ElementState::Released && self.hyperlink_pointer_consumed {
+                        self.hyperlink_pointer_consumed = false;
+                        return;
+                    }
+                }
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     self.try_focus_pane_at_cursor();
                 }
@@ -929,6 +1023,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 let state = winit_element_state_to_port(state);
                 let text = text.map(|text| text.to_string());
                 self.paste_controller.observe_key_event(state, physical_key);
+                self.route_effective_input_modifiers();
 
                 if self.try_handle_keyboard_binding(event_loop, state, &logical_key, physical_key) {
                     return;
@@ -1207,6 +1302,42 @@ fn surface_local_pointer_position(
     )
 }
 
+fn open_terminal_hyperlink(uri: &str) -> Result<(), String> {
+    if !is_supported_terminal_hyperlink(uri) {
+        return Err("unsupported or unsafe URI scheme".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+
+    command
+        .arg(uri)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn is_supported_terminal_hyperlink(uri: &str) -> bool {
+    if uri.is_empty() || uri.chars().any(char::is_control) {
+        return false;
+    }
+    let Some((scheme, _)) = uri.split_once(':') else {
+        return false;
+    };
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "mailto" | "file"
+    )
+}
+
 fn winit_mouse_button_to_port(button: MouseButton) -> WindowPointerButton {
     match button {
         MouseButton::Left => WindowPointerButton::Primary,
@@ -1480,5 +1611,17 @@ mod tests {
             surface_local_pointer_position(placement, 8, 12, PhysicalPosition::new(540.5, 70.25)),
             WindowPointerPosition::new(32.5, 38.25)
         );
+    }
+
+    #[test]
+    fn terminal_hyperlink_activation_allows_only_explicit_safe_schemes() {
+        assert!(is_supported_terminal_hyperlink("https://example.com/docs"));
+        assert!(is_supported_terminal_hyperlink("mailto:user@example.com"));
+        assert!(is_supported_terminal_hyperlink("file:///tmp/readme.txt"));
+        assert!(!is_supported_terminal_hyperlink("javascript:alert(1)"));
+        assert!(!is_supported_terminal_hyperlink(
+            "https://example.com\ncommand"
+        ));
+        assert!(!is_supported_terminal_hyperlink("example.com"));
     }
 }

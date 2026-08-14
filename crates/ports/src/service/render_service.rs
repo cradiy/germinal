@@ -19,6 +19,7 @@ pub trait IRenderService {
     -> TerminalSizeInfo;
     fn set_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>);
     fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>);
+    fn set_window_title(&mut self, title: &str);
     fn resize_window_size_info(&mut self, window_size: TerminalWindowSize) -> TerminalSizeInfo;
     fn set_window_focused(&mut self, focused: bool);
     fn set_focused_render_target(&mut self, target_id: RenderTargetId);
