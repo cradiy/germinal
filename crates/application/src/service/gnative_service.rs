@@ -163,6 +163,7 @@ fn gnative_input_event_from(
         GShellInputEvent::Bytes(bytes) => Some(GNativeInputEvent::Bytes(bytes)),
         GShellInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
         GShellInputEvent::CopySelection => None,
+        GShellInputEvent::Osc52ClipboardLoadResponse { .. } => None,
         GShellInputEvent::ToggleViMode => None,
         GShellInputEvent::Window(window_event) => match window_event {
             WindowInputEvent::ModifiersChanged(modifiers) => Some(
@@ -356,6 +357,7 @@ mod tests {
         pty_host::{
             cell_size::TerminalCellSize,
             size_info::{TerminalPadding, TerminalSizeInfo},
+            terminal_clipboard::TerminalClipboard,
             window_size::TerminalWindowSize,
         },
     };
@@ -410,6 +412,23 @@ mod tests {
         let input = GShellInput {
             gshell_id: GShellId::new(1),
             event: GShellInputEvent::ToggleViMode,
+        };
+
+        assert_eq!(
+            gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn osc52_clipboard_response_does_not_enter_the_gnative_protocol() {
+        let input = GShellInput {
+            gshell_id: GShellId::new(1),
+            event: GShellInputEvent::Osc52ClipboardLoadResponse {
+                clipboard: TerminalClipboard::Clipboard,
+                request_id: 7,
+                text: Some("secret".to_string()),
+            },
         };
 
         assert_eq!(

@@ -2,7 +2,10 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     time::Instant,
 };
 
@@ -12,8 +15,8 @@ use alacritty_terminal::{
     index::{Boundary, Column, Direction, Point, Side},
     selection::{Selection, SelectionType},
     term::{
-        Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport,
-        search::RegexSearch, viewport_to_point,
+        ClipboardType, Config, Osc52, Term, TermDamage, TermMode, cell::Flags, color::Colors,
+        point_to_viewport, search::RegexSearch, viewport_to_point,
     },
     vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler},
 };
@@ -25,6 +28,7 @@ use germinal_ports::{
             TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider,
             TerminalTextRunSnapshot,
         },
+        terminal_clipboard::{TerminalClipboard, TerminalOsc52Mode},
         terminal_input_mode::TerminalInputModes,
         width::terminal_char_cell_width,
         worker_input::{
@@ -101,6 +105,15 @@ struct PtyWriteEventListener {
     pending_writes: Sender<Vec<u8>>,
     pending_titles: Sender<Option<String>>,
     pending_bells: Sender<()>,
+    pending_clipboard_stores: Sender<(TerminalClipboard, String)>,
+    pending_clipboard_loads: Sender<TerminalClipboardLoad>,
+}
+
+pub(crate) type TerminalClipboardFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
+
+pub(crate) struct TerminalClipboardLoad {
+    pub clipboard: TerminalClipboard,
+    pub formatter: TerminalClipboardFormatter,
 }
 
 impl PtyWriteEventListener {
@@ -108,11 +121,15 @@ impl PtyWriteEventListener {
         pending_writes: Sender<Vec<u8>>,
         pending_titles: Sender<Option<String>>,
         pending_bells: Sender<()>,
+        pending_clipboard_stores: Sender<(TerminalClipboard, String)>,
+        pending_clipboard_loads: Sender<TerminalClipboardLoad>,
     ) -> Self {
         Self {
             pending_writes,
             pending_titles,
             pending_bells,
+            pending_clipboard_stores,
+            pending_clipboard_loads,
         }
     }
 }
@@ -132,6 +149,17 @@ impl EventListener for PtyWriteEventListener {
             Event::Bell => {
                 let _ = self.pending_bells.send(());
             }
+            Event::ClipboardStore(clipboard, text) => {
+                let _ = self
+                    .pending_clipboard_stores
+                    .send((terminal_clipboard(clipboard), text));
+            }
+            Event::ClipboardLoad(clipboard, formatter) => {
+                let _ = self.pending_clipboard_loads.send(TerminalClipboardLoad {
+                    clipboard: terminal_clipboard(clipboard),
+                    formatter,
+                });
+            }
             _ => {}
         }
     }
@@ -143,6 +171,7 @@ pub struct AlacrittyTerminalStore {
     size: AlacrittyTermSize,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
+    osc52_mode: TerminalOsc52Mode,
 }
 
 impl AlacrittyTerminalStore {
@@ -174,11 +203,26 @@ impl AlacrittyTerminalStore {
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
     ) -> Self {
+        Self::with_size_scrollback_cursor_style_and_osc52(
+            size,
+            scrollback_history,
+            cursor_style,
+            TerminalOsc52Mode::default(),
+        )
+    }
+
+    pub fn with_size_scrollback_cursor_style_and_osc52(
+        size: AlacrittyTermSize,
+        scrollback_history: usize,
+        cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
+    ) -> Self {
         Self {
             inner: Rc::new(RefCell::new(HashMap::new())),
             size,
             scrollback_history,
             cursor_style,
+            osc52_mode,
         }
     }
 
@@ -195,7 +239,12 @@ impl AlacrittyTerminalStore {
         let mut inner = self.inner.borrow_mut();
 
         let state = inner.entry(render_target_id).or_insert_with(|| {
-            AlacrittyTermState::new(self.size, self.scrollback_history, self.cursor_style)
+            AlacrittyTermState::new(
+                self.size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
         });
         let previous_selection = state.term.selection.clone();
 
@@ -250,7 +299,12 @@ impl AlacrittyTerminalStore {
         let mut inner = self.inner.borrow_mut();
 
         let state = inner.entry(render_target_id).or_insert_with(|| {
-            AlacrittyTermState::new(size, self.scrollback_history, self.cursor_style)
+            AlacrittyTermState::new(
+                size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
         });
 
         let previous_selection = state.term.selection.clone();
@@ -345,7 +399,12 @@ impl AlacrittyTerminalStore {
     pub fn set_vi_mode(&self, render_target_id: RenderTargetId, seq: Seq, enabled: bool) -> bool {
         let mut inner = self.inner.borrow_mut();
         let state = inner.entry(render_target_id).or_insert_with(|| {
-            AlacrittyTermState::new(self.size, self.scrollback_history, self.cursor_style)
+            AlacrittyTermState::new(
+                self.size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
         });
         if state.term.mode().contains(TermMode::VI) == enabled {
             return false;
@@ -680,6 +739,30 @@ impl AlacrittyTerminalStore {
             rang = true;
         }
         rang
+    }
+
+    pub(crate) fn take_clipboard_stores(
+        &self,
+        render_target_id: RenderTargetId,
+    ) -> Vec<(TerminalClipboard, String)> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return Vec::new();
+        };
+
+        state.pending_clipboard_store_rx.try_iter().collect()
+    }
+
+    pub(crate) fn take_clipboard_loads(
+        &self,
+        render_target_id: RenderTargetId,
+    ) -> Vec<TerminalClipboardLoad> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return Vec::new();
+        };
+
+        state.pending_clipboard_load_rx.try_iter().collect()
     }
 
     pub fn input_modes(&self, render_target_id: RenderTargetId) -> TerminalInputModes {
@@ -1062,6 +1145,8 @@ pub struct AlacrittyTermState {
     pending_write_rx: Receiver<Vec<u8>>,
     pending_title_rx: Receiver<Option<String>>,
     pending_bell_rx: Receiver<()>,
+    pending_clipboard_store_rx: Receiver<(TerminalClipboard, String)>,
+    pending_clipboard_load_rx: Receiver<TerminalClipboardLoad>,
     title: Option<String>,
     title_changed: bool,
     processor: Processor<StdSyncHandler>,
@@ -1080,12 +1165,20 @@ impl AlacrittyTermState {
         size: AlacrittyTermSize,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
     ) -> Self {
         let (pending_write_tx, pending_write_rx) = mpsc::channel();
         let (pending_title_tx, pending_title_rx) = mpsc::channel();
         let (pending_bell_tx, pending_bell_rx) = mpsc::channel();
-        let event_listener =
-            PtyWriteEventListener::new(pending_write_tx.clone(), pending_title_tx, pending_bell_tx);
+        let (pending_clipboard_store_tx, pending_clipboard_store_rx) = mpsc::channel();
+        let (pending_clipboard_load_tx, pending_clipboard_load_rx) = mpsc::channel();
+        let event_listener = PtyWriteEventListener::new(
+            pending_write_tx.clone(),
+            pending_title_tx,
+            pending_bell_tx,
+            pending_clipboard_store_tx,
+            pending_clipboard_load_tx,
+        );
         let config = Config {
             scrolling_history: scrollback_history,
             default_cursor_style: CursorStyle {
@@ -1096,6 +1189,7 @@ impl AlacrittyTermState {
                 },
                 blinking: cursor_style.blinking,
             },
+            osc52: alacritty_osc52_mode(osc52_mode),
             ..Config::default()
         };
         let mut term = Term::new(config, &size, event_listener.clone());
@@ -1108,6 +1202,8 @@ impl AlacrittyTermState {
             pending_write_rx,
             pending_title_rx,
             pending_bell_rx,
+            pending_clipboard_store_rx,
+            pending_clipboard_load_rx,
             title: None,
             title_changed: false,
             processor: Processor::<StdSyncHandler>::new(),
@@ -1762,6 +1858,22 @@ fn rgb_to_dto(rgb: Rgb) -> RgbColorDto {
     RgbColorDto::new(rgb.r, rgb.g, rgb.b)
 }
 
+fn terminal_clipboard(clipboard: ClipboardType) -> TerminalClipboard {
+    match clipboard {
+        ClipboardType::Clipboard => TerminalClipboard::Clipboard,
+        ClipboardType::Selection => TerminalClipboard::Selection,
+    }
+}
+
+fn alacritty_osc52_mode(mode: TerminalOsc52Mode) -> Osc52 {
+    match mode {
+        TerminalOsc52Mode::Disabled => Osc52::Disabled,
+        TerminalOsc52Mode::OnlyCopy => Osc52::OnlyCopy,
+        TerminalOsc52Mode::OnlyPaste => Osc52::OnlyPaste,
+        TerminalOsc52Mode::CopyPaste => Osc52::CopyPaste,
+    }
+}
+
 fn ansi_256_cube_component(level: u8) -> u8 {
     match level {
         0 => 0,
@@ -1854,6 +1966,53 @@ mod tests {
 
         assert!(store.take_bell(target_id));
         assert!(!store.take_bell(target_id));
+    }
+
+    #[test]
+    fn osc52_only_copy_exports_clipboard_store_and_denies_load() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(86);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(
+            store.take_clipboard_stores(target_id),
+            vec![(TerminalClipboard::Clipboard, "hello".to_string())]
+        );
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b]52;c;?\x07");
+        assert!(store.take_clipboard_loads(target_id).is_empty());
+    }
+
+    #[test]
+    fn osc52_copy_paste_formats_clipboard_load_response() {
+        let store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_and_osc52(
+            AlacrittyTermSize::default(),
+            Config::default().scrolling_history,
+            TerminalCursorStyle::default(),
+            TerminalOsc52Mode::CopyPaste,
+        );
+        let target_id = RenderTargetId::new(87);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b]52;p;?\x1b\\");
+        let loads = store.take_clipboard_loads(target_id);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].clipboard, TerminalClipboard::Selection);
+        assert_eq!((loads[0].formatter)("secret"), "\x1b]52;p;c2VjcmV0\x1b\\");
+    }
+
+    #[test]
+    fn osc52_disabled_rejects_clipboard_store() {
+        let store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_and_osc52(
+            AlacrittyTermSize::default(),
+            Config::default().scrolling_history,
+            TerminalCursorStyle::default(),
+            TerminalOsc52Mode::Disabled,
+        );
+        let target_id = RenderTargetId::new(88);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b]52;c;aGVsbG8=\x07");
+
+        assert!(store.take_clipboard_stores(target_id).is_empty());
     }
 
     #[test]

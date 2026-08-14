@@ -137,6 +137,7 @@ impl App {
         let terminal_profile = config.terminal_profile();
         let scrollback_history = config.scrolling.history;
         let terminal_cursor_style = config.terminal_cursor_style();
+        let terminal_osc52_mode = config.terminal_osc52_mode();
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
 
@@ -156,6 +157,7 @@ impl App {
                 runtime_event_dispatcher,
                 scrollback_history,
                 terminal_cursor_style,
+                terminal_osc52_mode,
             ),
             render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(
                 terminal_profile,
@@ -646,6 +648,17 @@ impl App {
         }
     }
 
+    fn osc52_clipboard_access_allowed(&self, gshell_id: GShellId) -> bool {
+        let allowed = self.window_focused && self.focused_gshell() == gshell_id;
+        if !allowed {
+            debug!(
+                gshell_id = gshell_id.value(),
+                "ignored OSC 52 clipboard access from an unfocused terminal"
+            );
+        }
+        allowed
+    }
+
     fn try_focus_pane_at_cursor(&mut self) -> bool {
         let Some(cursor_position) = self.cursor_position else {
             return false;
@@ -896,6 +909,47 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     Duration::from_millis(self.config.bell.duration_ms),
                     self.config.bell.urgent_on_unfocused && !self.window_focused,
                 );
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::Osc52ClipboardStore {
+                gshell_id,
+                clipboard,
+                text,
+            }) => {
+                if self.osc52_clipboard_access_allowed(gshell_id)
+                    && let Err(error) = self
+                        .paste_controller
+                        .write_terminal_clipboard_text(clipboard, text)
+                {
+                    warn!(gshell_id = gshell_id.value(), error = %error, "failed to handle OSC 52 clipboard store");
+                }
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::Osc52ClipboardLoad {
+                gshell_id,
+                clipboard,
+                request_id,
+            }) => {
+                let text = if self.osc52_clipboard_access_allowed(gshell_id) {
+                    match self
+                        .paste_controller
+                        .read_terminal_clipboard_text(clipboard)
+                    {
+                        Ok(text) => Some(text),
+                        Err(error) => {
+                            warn!(gshell_id = gshell_id.value(), error = %error, "failed to handle OSC 52 clipboard load");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id,
+                    event: GShellInputEvent::Osc52ClipboardLoadResponse {
+                        clipboard,
+                        request_id,
+                        text,
+                    },
+                });
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged { gshell_id, title }) => {
                 self.update_gshell_title(gshell_id, title);

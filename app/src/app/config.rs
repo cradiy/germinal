@@ -9,6 +9,7 @@ use germinal_ports::pty_host::{
     font_size::TerminalFontSize,
     profile::TerminalProfile,
     size_info::{TerminalPadding, TerminalSizeConfig},
+    terminal_clipboard::TerminalOsc52Mode,
 };
 use germinal_ports::rendering::tab_bar::TabBarPosition;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,7 @@ pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
     pub cursor: CursorConfig,
+    pub terminal: TerminalConfig,
     pub scrolling: ScrollingConfig,
     pub bell: BellConfig,
     pub tabs: TabsConfig,
@@ -84,6 +86,10 @@ impl GerminalConfig {
     pub fn terminal_cursor_style(&self) -> TerminalCursorStyle {
         TerminalCursorStyle::new(self.cursor.shape.into(), self.cursor.blinking)
     }
+
+    pub fn terminal_osc52_mode(&self) -> TerminalOsc52Mode {
+        self.terminal.osc52.into()
+    }
 }
 
 impl Default for GerminalConfig {
@@ -92,11 +98,46 @@ impl Default for GerminalConfig {
             window: WindowConfig::default(),
             font: FontConfig::default(),
             cursor: CursorConfig::default(),
+            terminal: TerminalConfig::default(),
             scrolling: ScrollingConfig::default(),
             bell: BellConfig::default(),
             tabs: TabsConfig::default(),
             keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    pub osc52: Osc52Policy,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            osc52: Osc52Policy::OnlyCopy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Osc52Policy {
+    Disabled,
+    #[default]
+    OnlyCopy,
+    OnlyPaste,
+    CopyPaste,
+}
+
+impl From<Osc52Policy> for TerminalOsc52Mode {
+    fn from(policy: Osc52Policy) -> Self {
+        match policy {
+            Osc52Policy::Disabled => Self::Disabled,
+            Osc52Policy::OnlyCopy => Self::OnlyCopy,
+            Osc52Policy::OnlyPaste => Self::OnlyPaste,
+            Osc52Policy::CopyPaste => Self::CopyPaste,
         }
     }
 }
@@ -440,6 +481,7 @@ mod tests {
     use germinal_ports::pty_host::{
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
         font_family::TerminalFontFamily,
+        terminal_clipboard::TerminalOsc52Mode,
     };
     use germinal_ports::rendering::tab_bar::TabBarPosition;
 
@@ -459,6 +501,7 @@ mod tests {
         assert_eq!(value["cursor"]["shape"].as_str(), Some("block"));
         assert_eq!(value["cursor"]["blinking"].as_bool(), Some(false));
         assert_eq!(value["cursor"]["blink_interval_ms"].as_integer(), Some(750));
+        assert_eq!(value["terminal"]["osc52"].as_str(), Some("OnlyCopy"));
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
@@ -513,6 +556,19 @@ mod tests {
 
         assert_eq!(config.bell.duration_ms, 240);
         assert!(!config.bell.urgent_on_unfocused);
+    }
+
+    #[test]
+    fn parses_osc52_security_policy() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [terminal]
+            osc52 = "CopyPaste"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.terminal_osc52_mode(), TerminalOsc52Mode::CopyPaste);
     }
 
     #[test]

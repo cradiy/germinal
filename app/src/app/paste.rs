@@ -4,6 +4,7 @@ use germinal_ports::event::{
     gshell_input::{GShellInput, GShellInputEvent},
     window_input_event::{WindowInputElementState, WindowInputKey},
 };
+use germinal_ports::pty_host::terminal_clipboard::TerminalClipboard;
 use thiserror::Error;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -113,8 +114,24 @@ impl HostPasteController {
     }
 
     pub fn write_clipboard_text(&mut self, text: String) -> Result<(), CopyError> {
+        self.write_terminal_clipboard_text(TerminalClipboard::Clipboard, text)
+    }
+
+    pub fn write_terminal_clipboard_text(
+        &mut self,
+        target: TerminalClipboard,
+        text: String,
+    ) -> Result<(), CopyError> {
         let mut clipboard = Clipboard::new().map_err(CopyError::OpenClipboard)?;
-        clipboard.set_text(text).map_err(CopyError::WriteClipboard)
+        write_clipboard_text(&mut clipboard, target, text).map_err(CopyError::WriteClipboard)
+    }
+
+    pub fn read_terminal_clipboard_text(
+        &mut self,
+        target: TerminalClipboard,
+    ) -> Result<String, PasteError> {
+        let mut clipboard = Clipboard::new().map_err(PasteError::OpenClipboard)?;
+        read_clipboard_text(&mut clipboard, target).map_err(PasteError::ReadClipboard)
     }
 
     pub fn effective_modifiers(&self) -> HostPasteModifiers {
@@ -128,6 +145,52 @@ impl HostPasteController {
         let mut clipboard = Clipboard::new().map_err(PasteError::OpenClipboard)?;
         clipboard.get_text().map_err(PasteError::ReadClipboard)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn write_clipboard_text(
+    clipboard: &mut Clipboard,
+    target: TerminalClipboard,
+    text: String,
+) -> Result<(), arboard::Error> {
+    use arboard::{LinuxClipboardKind, SetExtLinux};
+
+    let target = match target {
+        TerminalClipboard::Clipboard => LinuxClipboardKind::Clipboard,
+        TerminalClipboard::Selection => LinuxClipboardKind::Primary,
+    };
+    clipboard.set().clipboard(target).text(text)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_clipboard_text(
+    clipboard: &mut Clipboard,
+    _target: TerminalClipboard,
+    text: String,
+) -> Result<(), arboard::Error> {
+    clipboard.set_text(text)
+}
+
+#[cfg(target_os = "linux")]
+fn read_clipboard_text(
+    clipboard: &mut Clipboard,
+    target: TerminalClipboard,
+) -> Result<String, arboard::Error> {
+    use arboard::{GetExtLinux, LinuxClipboardKind};
+
+    let target = match target {
+        TerminalClipboard::Clipboard => LinuxClipboardKind::Clipboard,
+        TerminalClipboard::Selection => LinuxClipboardKind::Primary,
+    };
+    clipboard.get().clipboard(target).text()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_clipboard_text(
+    clipboard: &mut Clipboard,
+    _target: TerminalClipboard,
+) -> Result<String, arboard::Error> {
+    clipboard.get_text()
 }
 
 fn matches_paste_shortcut(

@@ -1,5 +1,6 @@
 use germinal_domain::pty_host::terminal_size::TerminalGridSize;
 
+use crate::pty_host::terminal_clipboard::TerminalClipboard;
 use crate::pty_host::{pty_input::PtyInputSender, terminal_input_mode::TerminalInputModeState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,11 @@ pub enum TerminalWorkerInput {
     },
     UpdateSelection(TerminalSelectionPoint),
     RequestSelectionText,
+    Osc52ClipboardLoadResponse {
+        clipboard: TerminalClipboard,
+        request_id: u64,
+        text: Option<String>,
+    },
     SetViMode(bool),
     ViMotion(TerminalViMotion),
     SetViSelection(Option<TerminalViSelectionKind>),

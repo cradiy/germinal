@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     num::NonZeroUsize,
     sync::{
@@ -21,6 +22,7 @@ use germinal_ports::{
         hyperlink::TerminalHyperlink,
         pty_input::{PtyInput, PtyInputSender},
         snapshot::TerminalSnapshotProvider,
+        terminal_clipboard::{TerminalClipboard, TerminalOsc52Mode},
         terminal_input_mode::TerminalInputModeState,
         worker_backend::ITerminalWorkerBackend,
         worker_input::{
@@ -35,6 +37,7 @@ use germinal_ports::{
 use rayon::ThreadPool;
 use tracing::{debug, error, info};
 
+use crate::pty_host::alacritty_terminal_store::TerminalClipboardFormatter;
 use crate::{
     gnative::control_sequence::GNativeEnterControlSequenceDecoder,
     pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
@@ -43,6 +46,7 @@ use crate::{
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
 const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
+const MAX_PENDING_OSC52_LOADS: usize = 64;
 const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(2);
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
@@ -54,6 +58,7 @@ struct TerminalWorkerRegistration<Dispatch> {
     initial_size: TerminalGridSize,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
+    osc52_mode: TerminalOsc52Mode,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
     input_rx: Receiver<TerminalWorkerInput>,
@@ -82,6 +87,7 @@ where
                 to_alacritty_term_size(registration.initial_size),
                 registration.scrollback_history,
                 registration.cursor_style,
+                registration.osc52_mode,
                 registration.surface_snapshot_tx,
                 registration.snapshot_wake_pending,
             ),
@@ -182,6 +188,7 @@ where
         initial_size: TerminalGridSize,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
@@ -194,6 +201,7 @@ where
             initial_size,
             scrollback_history,
             cursor_style,
+            osc52_mode,
             surface_snapshot_tx,
             snapshot_wake_pending,
             input_rx: rx,
@@ -284,6 +292,8 @@ struct TerminalWorkerRuntime<Dispatch> {
 
     unpublished_seq: Option<Seq>,
     last_hyperlinks: Vec<TerminalHyperlink>,
+    next_clipboard_request_id: u64,
+    pending_clipboard_loads: HashMap<u64, (TerminalClipboard, TerminalClipboardFormatter)>,
 
     perf: TerminalWorkerPerf,
 
@@ -302,14 +312,16 @@ where
         initial_size: AlacrittyTermSize,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Self {
         let target_id = RenderTargetId::new(gshell_id.value());
-        let terminal_store = AlacrittyTerminalStore::with_size_scrollback_and_cursor_style(
+        let terminal_store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_and_osc52(
             initial_size,
             scrollback_history,
             cursor_style,
+            osc52_mode,
         );
 
         Self {
@@ -329,6 +341,8 @@ where
 
             unpublished_seq: None,
             last_hyperlinks: Vec::new(),
+            next_clipboard_request_id: 1,
+            pending_clipboard_loads: HashMap::new(),
 
             perf: TerminalWorkerPerf::new(),
 
@@ -394,6 +408,13 @@ where
             TerminalWorkerInput::RequestSelectionText => {
                 self.flush_pending_input();
                 self.dispatch_selection_text();
+            }
+            TerminalWorkerInput::Osc52ClipboardLoadResponse {
+                clipboard,
+                request_id,
+                text,
+            } => {
+                self.answer_clipboard_load(clipboard, request_id, text);
             }
             TerminalWorkerInput::SetViMode(enabled) => {
                 self.flush_pending_input();
@@ -512,6 +533,7 @@ where
                     gshell_id: self.gshell_id,
                 }));
         }
+        self.dispatch_clipboard_events();
 
         if enter_gnative {
             let _ = self
@@ -593,6 +615,67 @@ where
                 gshell_id: self.gshell_id,
                 text,
             }));
+    }
+
+    fn dispatch_clipboard_events(&mut self) {
+        for (clipboard, text) in self.terminal_store.take_clipboard_stores(self.target_id) {
+            let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                GShellRuntimeEvent::Osc52ClipboardStore {
+                    gshell_id: self.gshell_id,
+                    clipboard,
+                    text,
+                },
+            ));
+        }
+
+        for load in self.terminal_store.take_clipboard_loads(self.target_id) {
+            if self.pending_clipboard_loads.len() >= MAX_PENDING_OSC52_LOADS {
+                debug!(
+                    gshell_id = self.gshell_id.value(),
+                    "dropping OSC 52 clipboard load because too many requests are pending"
+                );
+                continue;
+            }
+
+            let request_id = self.next_clipboard_request_id;
+            self.next_clipboard_request_id = self.next_clipboard_request_id.wrapping_add(1).max(1);
+            self.pending_clipboard_loads
+                .insert(request_id, (load.clipboard, load.formatter));
+            if self
+                .proxy
+                .dispatch(RuntimeEvent::GShell(
+                    GShellRuntimeEvent::Osc52ClipboardLoad {
+                        gshell_id: self.gshell_id,
+                        clipboard: load.clipboard,
+                        request_id,
+                    },
+                ))
+                .is_err()
+            {
+                self.pending_clipboard_loads.remove(&request_id);
+            }
+        }
+    }
+
+    fn answer_clipboard_load(
+        &mut self,
+        clipboard: TerminalClipboard,
+        request_id: u64,
+        text: Option<String>,
+    ) {
+        let Some((expected_clipboard, formatter)) =
+            self.pending_clipboard_loads.remove(&request_id)
+        else {
+            return;
+        };
+        if clipboard != expected_clipboard {
+            return;
+        }
+        let Some(text) = text else {
+            return;
+        };
+
+        self.forward_pty_writes(vec![formatter(&text).into_bytes()]);
     }
 
     fn set_vi_mode(&mut self, enabled: bool) -> Option<Seq> {
@@ -945,6 +1028,7 @@ pub struct PlatformTerminalWorkerBackend<Dispatch> {
     proxy: Dispatch,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
+    osc52_mode: TerminalOsc52Mode,
     pool: OnceLock<TerminalWorkerPool<Dispatch>>,
 }
 
@@ -956,11 +1040,13 @@ where
         proxy: Dispatch,
         scrollback_history: usize,
         cursor_style: TerminalCursorStyle,
+        osc52_mode: TerminalOsc52Mode,
     ) -> Self {
         Self {
             proxy,
             scrollback_history,
             cursor_style,
+            osc52_mode,
             pool: OnceLock::new(),
         }
     }
@@ -973,6 +1059,7 @@ where
             proxy,
             scrollback_history,
             cursor_style: TerminalCursorStyle::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
             pool,
         }
     }
@@ -1004,6 +1091,7 @@ where
             initial_size,
             self.scrollback_history,
             self.cursor_style,
+            self.osc52_mode,
             surface_snapshot_tx,
             snapshot_wake_pending,
         )
@@ -1028,7 +1116,8 @@ mod tests {
         },
         pty_host::{
             hyperlink::TerminalHyperlink,
-            pty_input::pty_input_channel,
+            pty_input::{PtyInput, pty_input_channel},
+            terminal_clipboard::TerminalClipboard,
             terminal_input_mode::TerminalInputModeState,
             worker_backend::ITerminalWorkerBackend,
             worker_input::{
@@ -1039,7 +1128,10 @@ mod tests {
         rendering::surface_snapshot::RenderSurfaceSnapshot,
     };
 
-    use super::{PlatformTerminalWorkerBackend, TerminalCursorStyle, TerminalWorkerRuntime};
+    use super::{
+        PlatformTerminalWorkerBackend, TerminalCursorStyle, TerminalOsc52Mode,
+        TerminalWorkerRuntime,
+    };
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
 
@@ -1435,6 +1527,7 @@ mod tests {
             super::AlacrittyTermSize::new(20, 4),
             TEST_SCROLLBACK_HISTORY,
             TerminalCursorStyle::default(),
+            TerminalOsc52Mode::default(),
             snapshot_tx,
             wake_pending.clone(),
         );
@@ -1469,6 +1562,57 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert!(text.contains("replacement"));
+    }
+
+    #[test]
+    fn terminal_worker_round_trips_osc52_clipboard_requests() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (pty_tx, pty_rx) = pty_input_channel();
+        let mut runtime = TerminalWorkerRuntime::new(
+            TestDispatcher { tx: event_tx },
+            GShellId::new(9),
+            super::AlacrittyTermSize::new(20, 4),
+            TEST_SCROLLBACK_HISTORY,
+            TerminalCursorStyle::default(),
+            TerminalOsc52Mode::CopyPaste,
+            snapshot_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        runtime.pty_input_tx = Some(pty_tx);
+
+        runtime.apply_byte_chunks(&[b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07".to_vec()]);
+
+        assert_eq!(
+            event_rx.try_recv().unwrap(),
+            RuntimeEvent::GShell(GShellRuntimeEvent::Osc52ClipboardStore {
+                gshell_id: GShellId::new(9),
+                clipboard: TerminalClipboard::Clipboard,
+                text: "hello".to_string(),
+            })
+        );
+        let request_id = match event_rx.try_recv().unwrap() {
+            RuntimeEvent::GShell(GShellRuntimeEvent::Osc52ClipboardLoad {
+                gshell_id,
+                clipboard,
+                request_id,
+            }) => {
+                assert_eq!(gshell_id, GShellId::new(9));
+                assert_eq!(clipboard, TerminalClipboard::Clipboard);
+                request_id
+            }
+            other => panic!("unexpected event: {other:?}"),
+        };
+
+        runtime.answer_clipboard_load(
+            TerminalClipboard::Clipboard,
+            request_id,
+            Some("secret".to_string()),
+        );
+        assert!(matches!(
+            pollster::block_on(pty_rx.recv()),
+            Some(PtyInput::Bytes(bytes)) if bytes == b"\x1b]52;c;c2VjcmV0\x07"
+        ));
     }
 
     fn gshell_id_of(event: RuntimeEvent) -> u64 {

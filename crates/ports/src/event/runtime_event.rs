@@ -3,6 +3,7 @@ use germinal_domain::workspace::vo::pane_split_direction::PaneSplitDirection;
 use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::Seq};
 
 use crate::pty_host::hyperlink::TerminalHyperlink;
+use crate::pty_host::terminal_clipboard::TerminalClipboard;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -51,6 +52,16 @@ pub enum GShellRuntimeEvent {
     },
     Bell {
         gshell_id: GShellId,
+    },
+    Osc52ClipboardStore {
+        gshell_id: GShellId,
+        clipboard: TerminalClipboard,
+        text: String,
+    },
+    Osc52ClipboardLoad {
+        gshell_id: GShellId,
+        clipboard: TerminalClipboard,
+        request_id: u64,
     },
     SelectionText {
         gshell_id: GShellId,

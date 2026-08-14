@@ -227,6 +227,22 @@ where
             GShellInputEvent::Bytes(bytes) => send_pty_host_bytes(state, pty_host_id, bytes),
             GShellInputEvent::Paste(text) => send_pty_host_paste(state, pty_host_id, &text),
             GShellInputEvent::CopySelection => request_pty_host_selection(state, pty_host_id),
+            GShellInputEvent::Osc52ClipboardLoadResponse {
+                clipboard,
+                request_id,
+                text,
+            } => {
+                let runtimes = state.pty_host_runtimes.borrow();
+                if let Some(runtime) = runtimes.get(&pty_host_id) {
+                    let _ = runtime.terminal_worker_sender.send(
+                        TerminalWorkerInput::Osc52ClipboardLoadResponse {
+                            clipboard,
+                            request_id,
+                            text,
+                        },
+                    );
+                }
+            }
             GShellInputEvent::ToggleViMode => toggle_pty_host_vi_mode(state, pty_host_id),
             GShellInputEvent::Window(window_input) => match window_input {
                 WindowInputEvent::ModifiersChanged(modifiers) => {
