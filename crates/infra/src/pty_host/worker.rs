@@ -22,8 +22,8 @@ use germinal_ports::{
         terminal_input_mode::TerminalInputModeState,
         worker_backend::ITerminalWorkerBackend,
         worker_input::{
-            TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
-            TerminalWorkerInput,
+            TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
+            TerminalViSelectionKind, TerminalViTextObject, TerminalWorkerInput,
         },
     },
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
@@ -384,6 +384,30 @@ where
                 self.flush_pending_input();
                 self.dispatch_selection_text();
             }
+            TerminalWorkerInput::SetViMode(enabled) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.set_vi_mode(enabled) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::ViMotion(motion) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.vi_motion(motion) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::SetViSelection(kind) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.set_vi_selection(kind) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
+            TerminalWorkerInput::SelectViTextObject(text_object) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.select_vi_text_object(text_object) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
             TerminalWorkerInput::SetPtyInput {
                 sender,
                 input_modes,
@@ -531,6 +555,38 @@ where
                 gshell_id: self.gshell_id,
                 text,
             }));
+    }
+
+    fn set_vi_mode(&mut self, enabled: bool) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .set_vi_mode(self.target_id, seq, enabled)
+            .then_some(seq)
+    }
+
+    fn vi_motion(&mut self, motion: TerminalViMotion) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .vi_motion(self.target_id, seq, motion)
+            .then_some(seq)
+    }
+
+    fn set_vi_selection(&mut self, kind: Option<TerminalViSelectionKind>) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .set_vi_selection(self.target_id, seq, kind)
+            .then_some(seq)
+    }
+
+    fn select_vi_text_object(&mut self, text_object: TerminalViTextObject) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .select_vi_text_object(self.target_id, seq, text_object)
+            .then_some(seq)
     }
 
     fn publish_unpublished_snapshot(&mut self) -> bool {

@@ -57,6 +57,7 @@ pub struct GerminalConfig {
     pub window: WindowConfig,
     pub font: FontConfig,
     pub scrolling: ScrollingConfig,
+    pub keyboard: KeyboardConfig,
     pub logging: LoggingConfig,
 }
 
@@ -82,6 +83,7 @@ impl Default for GerminalConfig {
             window: WindowConfig::default(),
             font: FontConfig::default(),
             scrolling: ScrollingConfig::default(),
+            keyboard: KeyboardConfig::default(),
             logging: LoggingConfig::default(),
         }
     }
@@ -145,6 +147,37 @@ impl Default for ScrollingConfig {
     fn default() -> Self {
         Self { history: 10_000 }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyboardConfig {
+    pub bindings: Vec<KeyboardBinding>,
+}
+
+impl Default for KeyboardConfig {
+    fn default() -> Self {
+        Self {
+            bindings: vec![KeyboardBinding {
+                key: "Space".to_string(),
+                mods: "Control|Shift".to_string(),
+                action: KeyboardAction::ToggleViMode,
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyboardBinding {
+    pub key: String,
+    #[serde(default)]
+    pub mods: String,
+    pub action: KeyboardAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KeyboardAction {
+    ToggleViMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,7 +262,7 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
 mod tests {
     use germinal_ports::pty_host::font_family::TerminalFontFamily;
 
-    use super::GerminalConfig;
+    use super::{GerminalConfig, KeyboardAction};
 
     #[test]
     fn default_config_serializes_alacritty_style_fields() {
@@ -242,6 +275,10 @@ mod tests {
             Some(TerminalFontFamily::default().name())
         );
         assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
+        assert_eq!(
+            value["keyboard"]["bindings"][0]["action"].as_str(),
+            Some("ToggleViMode")
+        );
     }
 
     #[test]
@@ -270,5 +307,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
+        assert_eq!(config.keyboard.bindings.len(), 1);
+        assert_eq!(
+            config.keyboard.bindings[0].action,
+            KeyboardAction::ToggleViMode
+        );
+    }
+
+    #[test]
+    fn parses_alacritty_style_keyboard_binding() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [[keyboard.bindings]]
+            key = "V"
+            mods = "Control|Shift"
+            action = "ToggleViMode"
+            "#,
+        )
+        .unwrap();
+
+        let binding = &config.keyboard.bindings[0];
+        assert_eq!(binding.key, "V");
+        assert_eq!(binding.mods, "Control|Shift");
+        assert_eq!(binding.action, KeyboardAction::ToggleViMode);
     }
 }

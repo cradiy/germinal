@@ -117,7 +117,7 @@ impl HostPasteController {
         clipboard.set_text(text).map_err(CopyError::WriteClipboard)
     }
 
-    fn effective_modifiers(&self) -> HostPasteModifiers {
+    pub fn effective_modifiers(&self) -> HostPasteModifiers {
         HostPasteModifiers {
             control: self.modifiers.control || self.pressed.control_key(),
             shift: self.modifiers.shift || self.pressed.shift_key(),

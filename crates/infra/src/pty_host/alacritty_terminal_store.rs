@@ -25,7 +25,10 @@ use germinal_ports::{
         },
         terminal_input_mode::TerminalInputModes,
         width::terminal_char_cell_width,
-        worker_input::{TerminalSelectionKind, TerminalSelectionPoint, TerminalSelectionSide},
+        worker_input::{
+            TerminalSelectionKind, TerminalSelectionPoint, TerminalSelectionSide, TerminalViMotion,
+            TerminalViSelectionKind, TerminalViTextObject,
+        },
     },
     rendering::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
@@ -297,6 +300,140 @@ impl AlacrittyTerminalStore {
         inner.get(&render_target_id)?.term.selection_to_string()
     }
 
+    pub fn set_vi_mode(&self, render_target_id: RenderTargetId, seq: Seq, enabled: bool) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner
+            .entry(render_target_id)
+            .or_insert_with(|| AlacrittyTermState::new(self.size, self.scrollback_history));
+        if state.term.mode().contains(TermMode::VI) == enabled {
+            return false;
+        }
+
+        state.term.toggle_vi_mode();
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn vi_motion(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        motion: TerminalViMotion,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.term.mode().contains(TermMode::VI) {
+            return false;
+        }
+
+        let motion = match motion {
+            TerminalViMotion::Up => alacritty_terminal::vi_mode::ViMotion::Up,
+            TerminalViMotion::Down => alacritty_terminal::vi_mode::ViMotion::Down,
+            TerminalViMotion::Left => alacritty_terminal::vi_mode::ViMotion::Left,
+            TerminalViMotion::Right => alacritty_terminal::vi_mode::ViMotion::Right,
+            TerminalViMotion::First => alacritty_terminal::vi_mode::ViMotion::First,
+            TerminalViMotion::FirstOccupied => alacritty_terminal::vi_mode::ViMotion::FirstOccupied,
+            TerminalViMotion::Last => alacritty_terminal::vi_mode::ViMotion::Last,
+            TerminalViMotion::WordLeft => {
+                vim_word_left(&mut state.term);
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::WordRight => {
+                vim_word_right(&mut state.term);
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::WordRightEnd => {
+                vim_word_right_end(&mut state.term);
+                state.latest_seq = seq;
+                state.selection_damage = true;
+                return true;
+            }
+            TerminalViMotion::Top => {
+                state.term.scroll_display(Scroll::Top);
+                alacritty_terminal::vi_mode::ViMotion::High
+            }
+            TerminalViMotion::Bottom => {
+                state.term.scroll_display(Scroll::Bottom);
+                alacritty_terminal::vi_mode::ViMotion::Low
+            }
+        };
+        state.term.vi_motion(motion);
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn set_vi_selection(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        kind: Option<TerminalViSelectionKind>,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.term.mode().contains(TermMode::VI) {
+            return false;
+        }
+
+        if let Some(kind) = kind {
+            let selection_type = match kind {
+                TerminalViSelectionKind::Character => SelectionType::Simple,
+                TerminalViSelectionKind::Line => SelectionType::Lines,
+            };
+            let mut selection =
+                Selection::new(selection_type, state.term.vi_mode_cursor.point, Side::Left);
+            selection.include_all();
+            state.term.selection = Some(selection);
+        } else {
+            state.term.selection = None;
+        }
+
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn select_vi_text_object(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        text_object: TerminalViTextObject,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.term.mode().contains(TermMode::VI) {
+            return false;
+        }
+
+        match text_object {
+            TerminalViTextObject::InnerWord => {
+                let _ = select_inner_vim_word(&mut state.term);
+            }
+            TerminalViTextObject::AroundWord => select_around_vim_word(&mut state.term),
+        }
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn vi_mode_enabled(&self, render_target_id: RenderTargetId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .get(&render_target_id)
+            .is_some_and(|state| state.term.mode().contains(TermMode::VI))
+    }
+
     fn snapshot_from_state(
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
@@ -317,7 +454,10 @@ impl AlacrittyTerminalStore {
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
     ) -> RenderSurfaceSnapshot {
-        let rows = visible_surface_rows(&state.term);
+        let mut rows = visible_surface_rows(&state.term);
+        if state.term.mode().contains(TermMode::VI) {
+            append_vi_mode_indicator(&mut rows, state.size.columns());
+        }
         let dirty_rows = dirty_rows_from_state(state);
 
         let placeholder_cells = kitty_placeholder_cells(&state.term);
@@ -444,23 +584,26 @@ impl AlacrittyTerminalStore {
     ) -> Option<RenderSurfaceCursorSnapshot> {
         let inner = self.inner.borrow();
         let state = inner.get(&render_target_id)?;
-        if state.term.grid().display_offset() != 0
-            || !state.term.mode().contains(TermMode::SHOW_CURSOR)
+        let vi_mode = state.term.mode().contains(TermMode::VI);
+        if !vi_mode
+            && (state.term.grid().display_offset() != 0
+                || !state.term.mode().contains(TermMode::SHOW_CURSOR))
         {
             return None;
         }
-
-        let shape = match state.term.cursor_style().shape {
+        let renderable = state.term.renderable_content();
+        let cursor = renderable.cursor;
+        let shape = match cursor.shape {
             CursorShape::Block => RenderSurfaceCursorShape::Block,
             CursorShape::Underline => RenderSurfaceCursorShape::Underline,
             CursorShape::Beam => RenderSurfaceCursorShape::Beam,
             CursorShape::HollowBlock => RenderSurfaceCursorShape::HollowBlock,
             CursorShape::Hidden => RenderSurfaceCursorShape::Hidden,
         };
-        let point = state.term.grid().cursor.point;
+        let point = point_to_viewport(renderable.display_offset, cursor.point)?;
         Some(RenderSurfaceCursorSnapshot {
             x: u32::try_from(point.column.0).ok()?,
-            y: u32::try_from(point.line.0).ok()?,
+            y: u32::try_from(point.line).ok()?,
             focused: true,
             shape,
         })
@@ -522,6 +665,213 @@ impl TerminalSnapshotProvider for AlacrittyTerminalStore {
             state.selection_damage = false;
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VimWordClass {
+    Whitespace,
+    Keyword,
+    Punctuation,
+}
+
+fn vim_word_class(c: char) -> VimWordClass {
+    if c.is_whitespace() {
+        VimWordClass::Whitespace
+    } else if c == '_' || c.is_alphanumeric() {
+        VimWordClass::Keyword
+    } else {
+        VimWordClass::Punctuation
+    }
+}
+
+fn current_vim_word_class<T>(term: &Term<T>) -> VimWordClass {
+    vim_word_class(term.grid()[term.vi_mode_cursor.point].c)
+}
+
+fn set_vi_cursor_point<T: EventListener>(term: &mut Term<T>, point: Point) {
+    term.vi_mode_cursor.point = point;
+    term.scroll_to_point(point);
+    if let Some(selection) = term
+        .selection
+        .as_mut()
+        .filter(|selection| !selection.is_empty())
+    {
+        selection.update(point, Side::Left);
+        selection.include_all();
+    }
+}
+
+fn vim_step_right<T: EventListener>(term: &mut Term<T>) -> bool {
+    let previous = term.vi_mode_cursor.point;
+    term.vi_motion(alacritty_terminal::vi_mode::ViMotion::Right);
+    if term.vi_mode_cursor.point != previous {
+        return true;
+    }
+
+    let bottommost_line = term.grid().bottommost_line();
+    if previous.line >= bottommost_line {
+        return false;
+    }
+    set_vi_cursor_point(term, Point::new(previous.line + 1, Column(0)));
+    true
+}
+
+fn vim_step_left<T: EventListener>(term: &mut Term<T>) -> bool {
+    let previous = term.vi_mode_cursor.point;
+    term.vi_motion(alacritty_terminal::vi_mode::ViMotion::Left);
+    if term.vi_mode_cursor.point != previous {
+        return true;
+    }
+
+    let topmost_line = term.grid().topmost_line();
+    if previous.line <= topmost_line {
+        return false;
+    }
+    set_vi_cursor_point(
+        term,
+        Point::new(previous.line - 1, term.grid().last_column()),
+    );
+    true
+}
+
+fn vim_step_right_in_logical_line<T: EventListener>(term: &mut Term<T>) -> bool {
+    let previous = term.vi_mode_cursor.point;
+    term.vi_motion(alacritty_terminal::vi_mode::ViMotion::Right);
+    term.vi_mode_cursor.point != previous
+}
+
+fn vim_step_left_in_logical_line<T: EventListener>(term: &mut Term<T>) -> bool {
+    let previous = term.vi_mode_cursor.point;
+    term.vi_motion(alacritty_terminal::vi_mode::ViMotion::Left);
+    term.vi_mode_cursor.point != previous
+}
+
+fn vim_word_right<T: EventListener>(term: &mut Term<T>) {
+    let initial_class = current_vim_word_class(term);
+    if !vim_step_right(term) {
+        return;
+    }
+
+    if initial_class != VimWordClass::Whitespace {
+        while current_vim_word_class(term) == initial_class {
+            if !vim_step_right(term) {
+                return;
+            }
+        }
+    }
+    while current_vim_word_class(term) == VimWordClass::Whitespace {
+        if !vim_step_right(term) {
+            return;
+        }
+    }
+}
+
+fn vim_word_left<T: EventListener>(term: &mut Term<T>) {
+    if !vim_step_left(term) {
+        return;
+    }
+    while current_vim_word_class(term) == VimWordClass::Whitespace {
+        if !vim_step_left(term) {
+            return;
+        }
+    }
+
+    let target_class = current_vim_word_class(term);
+    while vim_step_left(term) {
+        if current_vim_word_class(term) != target_class {
+            let _ = vim_step_right(term);
+            return;
+        }
+    }
+}
+
+fn vim_word_right_end<T: EventListener>(term: &mut Term<T>) {
+    let initial_class = current_vim_word_class(term);
+    if !vim_step_right(term) {
+        return;
+    }
+
+    if initial_class == VimWordClass::Whitespace || current_vim_word_class(term) != initial_class {
+        while current_vim_word_class(term) == VimWordClass::Whitespace {
+            if !vim_step_right(term) {
+                return;
+            }
+        }
+    }
+
+    let target_class = current_vim_word_class(term);
+    while vim_step_right(term) {
+        if current_vim_word_class(term) != target_class {
+            let _ = vim_step_left(term);
+            return;
+        }
+    }
+}
+
+fn select_inner_vim_word<T: EventListener>(term: &mut Term<T>) -> (Point, Point) {
+    term.selection = None;
+    let target_class = current_vim_word_class(term);
+    while vim_step_left(term) {
+        if current_vim_word_class(term) != target_class {
+            let _ = vim_step_right(term);
+            break;
+        }
+    }
+
+    let selection_start = term.vi_mode_cursor.point;
+    let mut selection = Selection::new(SelectionType::Simple, selection_start, Side::Left);
+    selection.include_all();
+    term.selection = Some(selection);
+
+    while vim_step_right(term) {
+        if current_vim_word_class(term) != target_class {
+            let _ = vim_step_left(term);
+            break;
+        }
+    }
+
+    (selection_start, term.vi_mode_cursor.point)
+}
+
+fn select_around_vim_word<T: EventListener>(term: &mut Term<T>) {
+    let (word_start, word_end) = select_inner_vim_word(term);
+    let mut trailing_whitespace = false;
+
+    while vim_step_right_in_logical_line(term) {
+        if current_vim_word_class(term) == VimWordClass::Whitespace {
+            trailing_whitespace = true;
+            continue;
+        }
+
+        let _ = vim_step_left_in_logical_line(term);
+        return;
+    }
+
+    if !trailing_whitespace {
+        return;
+    }
+
+    term.selection = None;
+    set_vi_cursor_point(term, word_start);
+    let mut preceding_whitespace = false;
+    while vim_step_left_in_logical_line(term) {
+        if current_vim_word_class(term) == VimWordClass::Whitespace {
+            preceding_whitespace = true;
+        } else {
+            let _ = vim_step_right_in_logical_line(term);
+            break;
+        }
+    }
+
+    let selection_start = if preceding_whitespace {
+        term.vi_mode_cursor.point
+    } else {
+        word_start
+    };
+    let mut selection = Selection::new(SelectionType::Simple, word_end, Side::Right);
+    selection.update(selection_start, Side::Left);
+    selection.include_all();
+    term.selection = Some(selection);
 }
 
 pub struct AlacrittyTermState {
@@ -680,6 +1030,40 @@ fn visible_lines_and_runs(
     }
 
     (lines, text_runs)
+}
+
+fn append_vi_mode_indicator(rows: &mut Vec<RenderSurfaceRowSnapshot>, columns: usize) {
+    if columns == 0 {
+        return;
+    }
+
+    let text = match columns {
+        1 => "V",
+        2..=3 => "VI",
+        _ => " VI ",
+    };
+    let x = columns.saturating_sub(text.chars().count()) as u32;
+    let indicator = RenderSurfaceRunSnapshot {
+        x,
+        text: text.to_string(),
+        style: TextStyleDto {
+            foreground: Some(RgbColorDto::new(255, 255, 255)),
+            background: Some(RgbColorDto::new(38, 92, 168)),
+            bold: true,
+            italic: false,
+            underline: false,
+        },
+    };
+
+    if let Some(row) = rows.iter_mut().find(|row| row.y == 0) {
+        row.runs.push(indicator);
+    } else {
+        rows.push(RenderSurfaceRowSnapshot {
+            y: 0,
+            runs: vec![indicator],
+        });
+        rows.sort_by_key(|row| row.y);
+    }
 }
 
 fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurfaceRowSnapshot> {
@@ -1196,6 +1580,188 @@ mod tests {
             b"\x1b[?1l\x1b[?2004l\x1b[?1004l\x1b[?1002l\x1b[?1006l",
         );
         assert_eq!(store.input_modes(target_id), TerminalInputModes::default());
+    }
+
+    #[test]
+    fn toggles_alacritty_vi_mode_without_writing_to_the_pty() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(45);
+
+        assert!(!store.vi_mode_enabled(target_id));
+        assert!(store.set_vi_mode(target_id, Seq::new(1), true));
+        assert!(store.vi_mode_enabled(target_id));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+        let vi_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(vi_snapshot.latest_seq, Seq::new(1));
+        assert!(vi_snapshot.rows.iter().any(|row| {
+            row.runs
+                .iter()
+                .any(|run| run.text.trim() == "VI" && run.style.background.is_some())
+        }));
+
+        assert!(store.set_vi_mode(target_id, Seq::new(2), false));
+        assert!(!store.vi_mode_enabled(target_id));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+        assert!(
+            !store
+                .render_surface_snapshot_of(target_id)
+                .unwrap()
+                .rows
+                .iter()
+                .any(|row| row.runs.iter().any(|run| run.text.trim() == "VI"))
+        );
+    }
+
+    #[test]
+    fn vi_cursor_remains_visible_while_viewing_scrollback() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(54);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
+        assert!(store.scroll_display(target_id, Seq::new(2), Scroll::Top));
+        assert!(store.cursor_snapshot(target_id).is_none());
+
+        assert!(store.set_vi_mode(target_id, Seq::new(3), true));
+
+        let cursor = store.cursor_snapshot(target_id).unwrap();
+        assert_eq!((cursor.x, cursor.y), (0, 0));
+        assert_eq!(cursor.shape, RenderSurfaceCursorShape::Block);
+    }
+
+    #[test]
+    fn vi_motions_move_the_host_cursor_without_pty_writes() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(55);
+        store.apply_bytes(target_id, Seq::new(1), b"alpha beta");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 0);
+        assert!(store.vi_motion(target_id, Seq::new(4), TerminalViMotion::WordRight,));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 6);
+        assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::Last));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 9);
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_word_motion_treats_punctuation_as_vim_word_boundaries() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(60, 3));
+        let target_id = RenderTargetId::new(58);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"focus_border: rgba(hex: 0xfa2d55cc).into()",
+        );
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+
+        for (seq, expected_column) in [(4, 12), (5, 14), (6, 18), (7, 19), (8, 22), (9, 24)] {
+            assert!(store.vi_motion(target_id, Seq::new(seq), TerminalViMotion::WordRight,));
+            assert_eq!(store.cursor_snapshot(target_id).unwrap().x, expected_column);
+        }
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_word_motions_group_adjacent_punctuation_like_vim() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(30, 3));
+        let target_id = RenderTargetId::new(59);
+        store.apply_bytes(target_id, Seq::new(1), b"name().next value");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+
+        assert!(store.vi_motion(target_id, Seq::new(4), TerminalViMotion::WordRight));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 4);
+        assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::WordRight));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 7);
+        assert!(store.vi_motion(target_id, Seq::new(6), TerminalViMotion::WordRightEnd));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 10);
+        assert!(store.vi_motion(target_id, Seq::new(7), TerminalViMotion::WordLeft));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 7);
+        assert!(store.vi_motion(target_id, Seq::new(8), TerminalViMotion::WordLeft));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().x, 4);
+    }
+
+    #[test]
+    fn vi_visual_selection_toggles_and_follows_the_host_cursor() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(56);
+        store.apply_bytes(target_id, Seq::new(1), b"alpha beta");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+
+        assert!(store.set_vi_selection(
+            target_id,
+            Seq::new(4),
+            Some(TerminalViSelectionKind::Character),
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("a"));
+        assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::WordRight));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("alpha b"));
+
+        assert!(store.set_vi_selection(
+            target_id,
+            Seq::new(6),
+            Some(TerminalViSelectionKind::Line),
+        ));
+        assert_eq!(
+            store.selection_text(target_id).as_deref(),
+            Some("alpha beta\n")
+        );
+        assert!(store.set_vi_selection(target_id, Seq::new(7), None));
+        assert_eq!(store.selection_text(target_id), None);
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_inner_word_uses_the_same_vim_word_boundaries_as_motion() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(57);
+        store.apply_bytes(target_id, Seq::new(1), b"name().next");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+
+        assert!(store.select_vi_text_object(
+            target_id,
+            Seq::new(4),
+            TerminalViTextObject::InnerWord,
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("name"));
+
+        assert!(store.vi_motion(target_id, Seq::new(5), TerminalViMotion::WordRight));
+        assert!(store.select_vi_text_object(
+            target_id,
+            Seq::new(6),
+            TerminalViTextObject::InnerWord,
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("()."));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn vi_around_word_prefers_following_whitespace_then_preceding_whitespace() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(60);
+        store.apply_bytes(target_id, Seq::new(1), b"one two");
+        assert!(store.set_vi_mode(target_id, Seq::new(2), true));
+        assert!(store.vi_motion(target_id, Seq::new(3), TerminalViMotion::First));
+
+        assert!(store.select_vi_text_object(
+            target_id,
+            Seq::new(4),
+            TerminalViTextObject::AroundWord,
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some("one "));
+
+        assert!(store.set_vi_selection(target_id, Seq::new(5), None));
+        assert!(store.vi_motion(target_id, Seq::new(6), TerminalViMotion::WordRight));
+        assert!(store.select_vi_text_object(
+            target_id,
+            Seq::new(7),
+            TerminalViTextObject::AroundWord,
+        ));
+        assert_eq!(store.selection_text(target_id).as_deref(), Some(" two"));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
     }
 
     #[test]

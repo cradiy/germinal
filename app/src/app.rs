@@ -7,6 +7,7 @@ mod logging;
 mod paste;
 
 pub use config::{GerminalConfig, load_or_create_config};
+use config::{KeyboardAction, KeyboardBinding};
 pub use error::{AppError, AppResult};
 use germinal_application::service::{
     gshell_service::GShellServiceState, layout_service::LayoutServiceState,
@@ -274,6 +275,51 @@ impl App {
                 event: GShellInputEvent::CopySelection,
             });
         }
+        true
+    }
+
+    fn try_handle_keyboard_binding(
+        &mut self,
+        state: WindowInputElementState,
+        logical_key: &WindowInputKey,
+        physical_key: winit::keyboard::PhysicalKey,
+    ) -> bool {
+        let physical_modifiers = self.paste_controller.effective_modifiers();
+        let effective_modifiers = WindowInputModifiers::new(
+            self.window_input_modifiers.control_key() || physical_modifiers.control,
+            self.window_input_modifiers.alt_key(),
+            self.window_input_modifiers.shift_key() || physical_modifiers.shift,
+            self.window_input_modifiers.super_key(),
+        );
+        let action = self
+            .config
+            .keyboard
+            .bindings
+            .iter()
+            .find(|binding| {
+                matches_keyboard_binding(
+                    binding,
+                    effective_modifiers,
+                    state,
+                    logical_key,
+                    physical_key,
+                )
+            })
+            .map(|binding| binding.action);
+
+        let Some(action) = action else {
+            return false;
+        };
+
+        if state == WindowInputElementState::Pressed {
+            match action {
+                KeyboardAction::ToggleViMode => self.route_input_to_gshell(GShellInput {
+                    gshell_id: self.focused_gshell(),
+                    event: GShellInputEvent::ToggleViMode,
+                }),
+            }
+        }
+
         true
     }
 
@@ -637,6 +683,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     return;
                 }
 
+                if self.try_handle_keyboard_binding(state, &logical_key, physical_key) {
+                    return;
+                }
+
                 if self.try_handle_copy_shortcut(state, &logical_key, physical_key) {
                     return;
                 }
@@ -682,6 +732,102 @@ fn matches_pane_cycle_shortcut(
             WindowInputElementState::Pressed | WindowInputElementState::Released
         )
         && matches!(logical_key, WindowInputKey::Named(WindowInputNamedKey::Tab))
+}
+
+fn matches_keyboard_binding(
+    binding: &KeyboardBinding,
+    modifiers: WindowInputModifiers,
+    state: WindowInputElementState,
+    logical_key: &WindowInputKey,
+    physical_key: winit::keyboard::PhysicalKey,
+) -> bool {
+    matches!(
+        state,
+        WindowInputElementState::Pressed | WindowInputElementState::Released
+    ) && matches_binding_modifiers(&binding.mods, modifiers)
+        && matches_binding_key(&binding.key, logical_key, physical_key)
+}
+
+fn matches_binding_modifiers(spec: &str, actual: WindowInputModifiers) -> bool {
+    let mut control = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut super_key = false;
+
+    for modifier in spec
+        .split('|')
+        .map(str::trim)
+        .filter(|modifier| !modifier.is_empty())
+    {
+        if modifier.eq_ignore_ascii_case("control") {
+            control = true;
+        } else if modifier.eq_ignore_ascii_case("alt") {
+            alt = true;
+        } else if modifier.eq_ignore_ascii_case("shift") {
+            shift = true;
+        } else if modifier.eq_ignore_ascii_case("super") {
+            super_key = true;
+        } else {
+            return false;
+        }
+    }
+
+    actual.control_key() == control
+        && actual.alt_key() == alt
+        && actual.shift_key() == shift
+        && actual.super_key() == super_key
+}
+
+fn matches_binding_key(
+    spec: &str,
+    actual: &WindowInputKey,
+    physical_key: winit::keyboard::PhysicalKey,
+) -> bool {
+    if spec.eq_ignore_ascii_case("space")
+        && physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space)
+    {
+        return true;
+    }
+
+    match actual {
+        WindowInputKey::Character(character) => {
+            (spec.eq_ignore_ascii_case("space") && character == " ")
+                || spec.eq_ignore_ascii_case(character)
+        }
+        WindowInputKey::Named(named) => spec.eq_ignore_ascii_case(named_key_name(*named)),
+        WindowInputKey::Unidentified => false,
+    }
+}
+
+fn named_key_name(key: WindowInputNamedKey) -> &'static str {
+    match key {
+        WindowInputNamedKey::F1 => "F1",
+        WindowInputNamedKey::F2 => "F2",
+        WindowInputNamedKey::F3 => "F3",
+        WindowInputNamedKey::F4 => "F4",
+        WindowInputNamedKey::F5 => "F5",
+        WindowInputNamedKey::F6 => "F6",
+        WindowInputNamedKey::F7 => "F7",
+        WindowInputNamedKey::F8 => "F8",
+        WindowInputNamedKey::F9 => "F9",
+        WindowInputNamedKey::F10 => "F10",
+        WindowInputNamedKey::F11 => "F11",
+        WindowInputNamedKey::F12 => "F12",
+        WindowInputNamedKey::Enter => "Enter",
+        WindowInputNamedKey::Tab => "Tab",
+        WindowInputNamedKey::Backspace => "Backspace",
+        WindowInputNamedKey::Escape => "Escape",
+        WindowInputNamedKey::ArrowUp => "Up",
+        WindowInputNamedKey::ArrowDown => "Down",
+        WindowInputNamedKey::ArrowRight => "Right",
+        WindowInputNamedKey::ArrowLeft => "Left",
+        WindowInputNamedKey::Home => "Home",
+        WindowInputNamedKey::End => "End",
+        WindowInputNamedKey::Insert => "Insert",
+        WindowInputNamedKey::Delete => "Delete",
+        WindowInputNamedKey::PageUp => "PageUp",
+        WindowInputNamedKey::PageDown => "PageDown",
+    }
 }
 
 fn render_target_at_position(
@@ -803,6 +949,48 @@ mod tests {
             modifiers,
             WindowInputElementState::Pressed,
             &tab,
+        ));
+    }
+
+    #[test]
+    fn keyboard_binding_matches_key_and_exact_modifiers() {
+        let binding = KeyboardBinding {
+            key: "Space".to_string(),
+            mods: "Control|Shift".to_string(),
+            action: KeyboardAction::ToggleViMode,
+        };
+        let space = WindowInputKey::Character(" ".to_string());
+
+        assert!(matches_keyboard_binding(
+            &binding,
+            WindowInputModifiers::new(true, false, true, false),
+            WindowInputElementState::Pressed,
+            &space,
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space),
+        ));
+        assert!(!matches_keyboard_binding(
+            &binding,
+            WindowInputModifiers::new(true, true, true, false),
+            WindowInputElementState::Pressed,
+            &space,
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space),
+        ));
+    }
+
+    #[test]
+    fn space_binding_uses_physical_key_when_logical_key_is_missing() {
+        let binding = KeyboardBinding {
+            key: "Space".to_string(),
+            mods: "Control|Shift".to_string(),
+            action: KeyboardAction::ToggleViMode,
+        };
+
+        assert!(matches_keyboard_binding(
+            &binding,
+            WindowInputModifiers::new(true, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Unidentified,
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space),
         ));
     }
 

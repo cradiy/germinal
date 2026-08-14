@@ -25,6 +25,34 @@ pub enum TerminalSelectionSide {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViMotion {
+    Up,
+    Down,
+    Left,
+    Right,
+    First,
+    FirstOccupied,
+    Last,
+    WordLeft,
+    WordRight,
+    WordRightEnd,
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViSelectionKind {
+    Character,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViTextObject {
+    InnerWord,
+    AroundWord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSelectionPoint {
     pub column: u16,
     pub row: u16,
@@ -47,6 +75,10 @@ pub enum TerminalWorkerInput {
     },
     UpdateSelection(TerminalSelectionPoint),
     RequestSelectionText,
+    SetViMode(bool),
+    ViMotion(TerminalViMotion),
+    SetViSelection(Option<TerminalViSelectionKind>),
+    SelectViTextObject(TerminalViTextObject),
     SetPtyInput {
         sender: PtyInputSender,
         input_modes: TerminalInputModeState,

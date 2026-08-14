@@ -20,7 +20,7 @@ use germinal_ports::{
         runtime_event_dispatcher::IRuntimeEventDispatcherProvider,
         window_input_event::{
             WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
-            WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
+            WindowInputNamedKey, WindowPointerButton, WindowPointerPosition, WindowScrollDelta,
         },
     },
     pty_host::{
@@ -29,8 +29,8 @@ use germinal_ports::{
         terminal_input_mode::TerminalInputModeState,
         terminal_size::TerminalPtySize,
         worker_input::{
-            TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
-            TerminalWorkerInput,
+            TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
+            TerminalViSelectionKind, TerminalViTextObject, TerminalWorkerInput,
         },
     },
     rendering::surface_snapshot::RenderSurfaceSnapshot,
@@ -99,6 +99,10 @@ struct PtyPaneRuntime {
     selection_dragging: bool,
     selection_end: Option<TerminalSelectionPoint>,
     display_scrolled: bool,
+    vi_mode: bool,
+    vi_pending_g: bool,
+    vi_selection_kind: Option<TerminalViSelectionKind>,
+    vi_pending_text_object: Option<TerminalViTextObject>,
 }
 
 #[derive(kudi::DepInj)]
@@ -192,6 +196,10 @@ where
                 selection_dragging: false,
                 selection_end: None,
                 display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
             },
         );
     }
@@ -202,6 +210,7 @@ where
             GShellInputEvent::Bytes(bytes) => send_pty_host_bytes(state, pty_host_id, bytes),
             GShellInputEvent::Paste(text) => send_pty_host_paste(state, pty_host_id, &text),
             GShellInputEvent::CopySelection => request_pty_host_selection(state, pty_host_id),
+            GShellInputEvent::ToggleViMode => toggle_pty_host_vi_mode(state, pty_host_id),
             GShellInputEvent::Window(window_input) => match window_input {
                 WindowInputEvent::ModifiersChanged(modifiers) => {
                     *state.modifiers.borrow_mut() = modifiers;
@@ -311,11 +320,30 @@ fn request_pty_host_selection(state: &PtyServiceState, pty_host_id: PtyHostId) {
         .send(TerminalWorkerInput::RequestSelectionText);
 }
 
+fn toggle_pty_host_vi_mode(state: &PtyServiceState, pty_host_id: PtyHostId) {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+        return;
+    };
+
+    runtime.vi_mode = !runtime.vi_mode;
+    runtime.vi_pending_g = false;
+    runtime.vi_selection_kind = None;
+    runtime.vi_pending_text_object = None;
+
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetViMode(runtime.vi_mode));
+}
+
 fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
     let mut runtimes = state.pty_host_runtimes.borrow_mut();
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
+    if runtime.vi_mode {
+        return;
+    }
 
     return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
@@ -326,6 +354,9 @@ fn send_pty_host_paste(state: &PtyServiceState, pty_host_id: PtyHostId, text: &s
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
+    if runtime.vi_mode {
+        return;
+    }
     let Some(bytes) = encode_paste(runtime.input_modes.load(), text) else {
         return;
     };
@@ -363,6 +394,10 @@ fn send_pty_host_key(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
+    if runtime.vi_mode {
+        send_vi_mode_key(runtime, modifiers, key_state, logical_key);
+        return;
+    }
     let Some(bytes) = encode_key_event(
         runtime.input_modes.load(),
         modifiers,
@@ -375,6 +410,149 @@ fn send_pty_host_key(
 
     return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn send_vi_mode_key(
+    runtime: &mut PtyPaneRuntime,
+    modifiers: WindowInputModifiers,
+    key_state: WindowInputElementState,
+    logical_key: &WindowInputKey,
+) {
+    if key_state != WindowInputElementState::Pressed {
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Escape)
+    ) {
+        runtime.vi_pending_g = false;
+        runtime.vi_pending_text_object = None;
+        if runtime.vi_selection_kind.take().is_some() {
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetViSelection(None));
+        }
+        return;
+    }
+
+    let WindowInputKey::Character(key) = logical_key else {
+        runtime.vi_pending_g = false;
+        return;
+    };
+    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+        runtime.vi_pending_g = false;
+        runtime.vi_pending_text_object = None;
+        return;
+    }
+
+    if let Some(text_object) = runtime.vi_pending_text_object.take() {
+        runtime.vi_pending_g = false;
+        if key == "w" {
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SelectViTextObject(text_object));
+        }
+        return;
+    }
+
+    match key.as_str() {
+        "i" | "a" => {
+            if runtime.vi_selection_kind.is_some() {
+                runtime.vi_pending_text_object = Some(if key == "i" {
+                    TerminalViTextObject::InnerWord
+                } else {
+                    TerminalViTextObject::AroundWord
+                });
+                runtime.vi_pending_g = false;
+                return;
+            }
+            runtime.vi_mode = false;
+            runtime.vi_pending_g = false;
+            runtime.vi_pending_text_object = None;
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetViMode(false));
+            return;
+        }
+        "y" => {
+            runtime.vi_pending_g = false;
+            if runtime.vi_selection_kind.take().is_some() {
+                let _ = runtime
+                    .terminal_worker_sender
+                    .send(TerminalWorkerInput::RequestSelectionText);
+                let _ = runtime
+                    .terminal_worker_sender
+                    .send(TerminalWorkerInput::SetViSelection(None));
+            }
+            return;
+        }
+        "v" => {
+            runtime.vi_pending_g = false;
+            runtime.vi_selection_kind = toggle_vi_selection_kind(
+                runtime.vi_selection_kind,
+                TerminalViSelectionKind::Character,
+            );
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetViSelection(
+                    runtime.vi_selection_kind,
+                ));
+            return;
+        }
+        "V" => {
+            runtime.vi_pending_g = false;
+            runtime.vi_selection_kind =
+                toggle_vi_selection_kind(runtime.vi_selection_kind, TerminalViSelectionKind::Line);
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetViSelection(
+                    runtime.vi_selection_kind,
+                ));
+            return;
+        }
+        _ => {}
+    }
+
+    let motion = match key.as_str() {
+        "h" => Some(TerminalViMotion::Left),
+        "j" => Some(TerminalViMotion::Down),
+        "k" => Some(TerminalViMotion::Up),
+        "l" => Some(TerminalViMotion::Right),
+        "0" => Some(TerminalViMotion::First),
+        "^" => Some(TerminalViMotion::FirstOccupied),
+        "$" => Some(TerminalViMotion::Last),
+        "w" => Some(TerminalViMotion::WordRight),
+        "b" => Some(TerminalViMotion::WordLeft),
+        "e" => Some(TerminalViMotion::WordRightEnd),
+        "G" => Some(TerminalViMotion::Bottom),
+        "g" if runtime.vi_pending_g => Some(TerminalViMotion::Top),
+        "g" => {
+            runtime.vi_pending_g = true;
+            None
+        }
+        _ => None,
+    };
+
+    if key != "g" || motion.is_some() {
+        runtime.vi_pending_g = false;
+    }
+    if let Some(motion) = motion {
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::ViMotion(motion));
+    }
+}
+
+fn toggle_vi_selection_kind(
+    current: Option<TerminalViSelectionKind>,
+    requested: TerminalViSelectionKind,
+) -> Option<TerminalViSelectionKind> {
+    if current == Some(requested) {
+        None
+    } else {
+        Some(requested)
+    }
 }
 
 fn return_to_live_display(runtime: &mut PtyPaneRuntime) {
@@ -522,8 +700,8 @@ mod tests {
     use germinal_domain::pty_host::pty_host_id::PtyHostId;
     use germinal_ports::{
         event::window_input_event::{
-            WindowInputElementState, WindowInputModifiers, WindowPointerButton,
-            WindowPointerPosition,
+            WindowInputElementState, WindowInputKey, WindowInputModifiers, WindowInputNamedKey,
+            WindowPointerButton, WindowPointerPosition,
         },
         pty_host::{
             pty_input::pty_input_channel,
@@ -531,15 +709,17 @@ mod tests {
             terminal_size::TerminalPtySize,
             worker_input::{
                 TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
-                TerminalSelectionSide, TerminalWorkerInput,
+                TerminalSelectionSide, TerminalViMotion, TerminalViSelectionKind,
+                TerminalViTextObject, TerminalWorkerInput,
             },
         },
     };
 
     use super::{
         PtyClickTracker, PtyMouseEncoder, PtyPaneRuntime, PtyServiceState,
-        request_pty_host_selection, return_to_live_display, send_pty_host_focus,
-        send_pty_host_pointer_button, send_pty_host_pointer_moved,
+        request_pty_host_selection, return_to_live_display, send_pty_host_focus, send_pty_host_key,
+        send_pty_host_pointer_button, send_pty_host_pointer_moved, send_vi_mode_key,
+        toggle_pty_host_vi_mode,
     };
 
     #[test]
@@ -555,6 +735,10 @@ mod tests {
             selection_dragging: false,
             selection_end: None,
             display_scrolled: true,
+            vi_mode: false,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
         };
 
         return_to_live_display(&mut runtime);
@@ -568,6 +752,370 @@ mod tests {
 
         return_to_live_display(&mut runtime);
         assert!(terminal_worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn vi_mode_toggle_routes_to_the_terminal_worker() {
+        let state = PtyServiceState::new();
+        let pty_host_id = PtyHostId::new(1);
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(1);
+        state.pty_host_runtimes.borrow_mut().insert(
+            pty_host_id,
+            PtyPaneRuntime {
+                pty_input_sender,
+                terminal_worker_sender,
+                input_modes: TerminalInputModeState::default(),
+                mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+                click_tracker: PtyClickTracker::default(),
+                selection_dragging: false,
+                selection_end: None,
+                display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
+            },
+        );
+
+        toggle_pty_host_vi_mode(&state, pty_host_id);
+
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViMode(true))
+        ));
+        assert!(
+            state
+                .pty_host_runtimes
+                .borrow()
+                .get(&pty_host_id)
+                .is_some_and(|runtime| runtime.vi_mode)
+        );
+
+        let modifiers = WindowInputModifiers::new(false, false, false, false);
+        send_pty_host_key(
+            &state,
+            pty_host_id,
+            modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("k".into()),
+            Some("k"),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ViMotion(TerminalViMotion::Up))
+        ));
+
+        send_pty_host_key(
+            &state,
+            pty_host_id,
+            modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("x".into()),
+            Some("x"),
+        );
+        assert!(terminal_worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn vi_mode_recognizes_gg_and_uppercase_g() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(2);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+        };
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("g".into()),
+        );
+        assert!(terminal_worker_rx.try_recv().is_err());
+        assert!(runtime.vi_pending_g);
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("g".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ViMotion(TerminalViMotion::Top))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            WindowInputModifiers::new(false, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("G".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ViMotion(TerminalViMotion::Bottom))
+        ));
+    }
+
+    #[test]
+    fn vi_mode_handles_visual_selection_and_insert_mode_locally() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(3);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+        };
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("v".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(Some(
+                TerminalViSelectionKind::Character
+            )))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            WindowInputModifiers::new(false, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("V".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(Some(
+                TerminalViSelectionKind::Line
+            )))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("i".into()),
+        );
+        assert!(runtime.vi_mode);
+        assert_eq!(
+            runtime.vi_pending_text_object,
+            Some(TerminalViTextObject::InnerWord)
+        );
+        assert!(terminal_worker_rx.try_recv().is_err());
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Named(WindowInputNamedKey::Escape),
+        );
+        assert!(runtime.vi_mode);
+        assert_eq!(runtime.vi_pending_text_object, None);
+        assert_eq!(runtime.vi_selection_kind, None);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(None))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("i".into()),
+        );
+        assert!(!runtime.vi_mode);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViMode(false))
+        ));
+    }
+
+    #[test]
+    fn vi_mode_composes_vw_viw_and_vaw_without_pty_input() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(4);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+        };
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+
+        for key in ["v", "w"] {
+            send_vi_mode_key(
+                &mut runtime,
+                no_modifiers,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Character(key.into()),
+            );
+        }
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(Some(
+                TerminalViSelectionKind::Character
+            )))
+        ));
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ViMotion(TerminalViMotion::WordRight))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("i".into()),
+        );
+        assert!(runtime.vi_mode);
+        assert_eq!(
+            runtime.vi_pending_text_object,
+            Some(TerminalViTextObject::InnerWord)
+        );
+        assert!(terminal_worker_rx.try_recv().is_err());
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("w".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SelectViTextObject(
+                TerminalViTextObject::InnerWord
+            ))
+        ));
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("a".into()),
+        );
+        assert!(runtime.vi_mode);
+        assert_eq!(
+            runtime.vi_pending_text_object,
+            Some(TerminalViTextObject::AroundWord)
+        );
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("w".into()),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SelectViTextObject(
+                TerminalViTextObject::AroundWord
+            ))
+        ));
+    }
+
+    #[test]
+    fn vi_mode_yank_requests_copy_and_returns_to_navigation() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(3);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: Some(TerminalViSelectionKind::Character),
+            vi_pending_text_object: None,
+        };
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+
+        send_vi_mode_key(
+            &mut runtime,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("y".into()),
+        );
+
+        assert!(runtime.vi_mode);
+        assert_eq!(runtime.vi_selection_kind, None);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::RequestSelectionText)
+        ));
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSelection(None))
+        ));
+    }
+
+    #[test]
+    fn vi_mode_a_exits_from_navigation() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(1);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: true,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+        };
+
+        send_vi_mode_key(
+            &mut runtime,
+            WindowInputModifiers::new(false, false, false, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("a".into()),
+        );
+
+        assert!(!runtime.vi_mode);
+        assert_eq!(runtime.vi_pending_text_object, None);
+        assert_eq!(runtime.vi_selection_kind, None);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViMode(false))
+        ));
     }
 
     #[test]
@@ -612,6 +1160,10 @@ mod tests {
                 selection_dragging: false,
                 selection_end: None,
                 display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
             },
         );
         let position = WindowPointerPosition::new(15.0, 5.0);
@@ -702,6 +1254,10 @@ mod tests {
                 selection_dragging: true,
                 selection_end: Some(selection_end),
                 display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
             },
         );
 
