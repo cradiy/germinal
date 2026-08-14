@@ -572,6 +572,14 @@ impl App {
                         event: GShellInputEvent::ToggleViMode,
                     });
                 }
+                KeyboardAction::ToggleSearch => {
+                    let gshell_id = self.focused_gshell();
+                    self.clear_ime_preedit(gshell_id);
+                    self.route_input_to_gshell(GShellInput {
+                        gshell_id,
+                        event: GShellInputEvent::ToggleSearch,
+                    });
+                }
                 KeyboardAction::NewTab => self.create_workspace_tab(),
                 KeyboardAction::NextTab => self.activate_next_workspace_tab(),
                 KeyboardAction::PreviousTab => self.activate_previous_workspace_tab(),
@@ -1539,6 +1547,25 @@ mod tests {
             WindowInputElementState::Pressed,
             &WindowInputKey::Character("D".to_string()),
             winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD),
+        ));
+    }
+
+    #[test]
+    fn default_host_search_uses_ctrl_shift_f() {
+        let config = GerminalConfig::default();
+        let binding = config
+            .keyboard
+            .bindings
+            .iter()
+            .find(|binding| binding.action == KeyboardAction::ToggleSearch)
+            .expect("host search should have a default binding");
+
+        assert!(matches_keyboard_binding(
+            binding,
+            WindowInputModifiers::new(true, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("F".to_string()),
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyF),
         ));
     }
 

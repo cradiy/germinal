@@ -406,7 +406,7 @@ impl AlacrittyTerminalStore {
                 self.osc52_mode,
             )
         });
-        if state.term.mode().contains(TermMode::VI) == enabled {
+        if state.host_search_mode || state.term.mode().contains(TermMode::VI) == enabled {
             return false;
         }
 
@@ -415,6 +415,41 @@ impl AlacrittyTerminalStore {
             state.vi_search_prompt = None;
         }
         state.term.toggle_vi_mode();
+        state.latest_seq = seq;
+        state.selection_damage = true;
+        true
+    }
+
+    pub fn set_search_mode(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        enabled: bool,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(
+                self.size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
+        });
+        if state.host_search_mode == enabled {
+            return false;
+        }
+        if enabled && state.term.mode().contains(TermMode::VI) {
+            return false;
+        }
+
+        if !enabled {
+            state.term.scroll_display(Scroll::Bottom);
+            state.vi_search_prompt = None;
+        }
+        if state.term.mode().contains(TermMode::VI) != enabled {
+            state.term.toggle_vi_mode();
+        }
+        state.host_search_mode = enabled;
         state.latest_seq = seq;
         state.selection_damage = true;
         true
@@ -655,7 +690,9 @@ impl AlacrittyTerminalStore {
     ) -> RenderSurfaceSnapshot {
         let mut rows = visible_surface_rows(&state.term);
         if state.term.mode().contains(TermMode::VI) {
-            append_vi_mode_indicator(&mut rows, state.size.columns());
+            if !state.host_search_mode {
+                append_vi_mode_indicator(&mut rows, state.size.columns());
+            }
             if let Some(prompt) = state.vi_search_prompt.as_ref() {
                 append_vi_search_prompt(
                     &mut rows,
@@ -1157,6 +1194,7 @@ pub struct AlacrittyTermState {
     total_bytes: u64,
     chunk_count: u64,
     selection_damage: bool,
+    host_search_mode: bool,
     vi_search_prompt: Option<TerminalViSearchPrompt>,
 }
 
@@ -1214,6 +1252,7 @@ impl AlacrittyTermState {
             total_bytes: 0,
             chunk_count: 0,
             selection_damage: false,
+            host_search_mode: false,
             vi_search_prompt: None,
         }
     }
@@ -2288,6 +2327,51 @@ mod tests {
             TerminalViSearchDirection::Forward,
         ));
         assert!(store.take_pending_pty_writes(target_id).is_empty());
+    }
+
+    #[test]
+    fn host_search_uses_vi_navigation_without_rendering_the_vi_indicator() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(12, 4));
+        let target_id = RenderTargetId::new(63);
+        store.apply_bytes(target_id, Seq::new(1), b"alpha\r\nbeta\r\nalpha");
+
+        assert!(store.set_search_mode(target_id, Seq::new(2), true));
+        assert!(store.set_vi_search_prompt(
+            target_id,
+            Seq::new(3),
+            Some(TerminalViSearchPrompt {
+                direction: TerminalViSearchDirection::Forward,
+                query: "alpha".into(),
+            }),
+        ));
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert!(snapshot.rows.iter().any(|row| {
+            row.y == 3
+                && row
+                    .runs
+                    .iter()
+                    .any(|run| run.x == 0 && run.text == "/alpha ")
+        }));
+        assert!(!snapshot.rows.iter().any(|row| {
+            row.runs
+                .iter()
+                .any(|run| run.text == " VI " || run.text == "VI" || run.text == "V")
+        }));
+
+        assert!(store.vi_search(
+            target_id,
+            Seq::new(4),
+            "alpha",
+            TerminalViSearchDirection::Forward,
+        ));
+        assert_eq!(store.cursor_snapshot(target_id).unwrap().y, 0);
+
+        assert!(store.set_search_mode(target_id, Seq::new(5), false));
+        let state = store.inner.borrow();
+        let state = state.get(&target_id).unwrap();
+        assert!(!state.host_search_mode);
+        assert!(!state.term.mode().contains(TermMode::VI));
+        assert_eq!(state.term.grid().display_offset(), 0);
     }
 
     #[test]

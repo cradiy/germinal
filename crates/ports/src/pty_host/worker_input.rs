@@ -110,6 +110,7 @@ pub enum TerminalWorkerInput {
         text: Option<String>,
     },
     SetViMode(bool),
+    SetSearchMode(bool),
     ViMotion(TerminalViMotion),
     SetViSelection(Option<TerminalViSelectionKind>),
     SelectViTextObject(TerminalViTextObject),

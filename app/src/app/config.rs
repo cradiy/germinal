@@ -295,6 +295,11 @@ impl Default for KeyboardConfig {
                     action: KeyboardAction::ToggleViMode,
                 },
                 KeyboardBinding {
+                    key: "F".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::ToggleSearch,
+                },
+                KeyboardBinding {
                     key: "D".to_string(),
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::SplitHorizontal,
@@ -390,6 +395,7 @@ pub struct KeyboardBinding {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
     ToggleViMode,
+    ToggleSearch,
     NewTab,
     NextTab,
     PreviousTab,
@@ -614,17 +620,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 17);
+        assert_eq!(config.keyboard.bindings.len(), 18);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode
         );
         assert_eq!(
             config.keyboard.bindings[1].action,
+            KeyboardAction::ToggleSearch
+        );
+        assert_eq!(config.keyboard.bindings[1].key, "F");
+        assert_eq!(config.keyboard.bindings[1].mods, "Control|Shift");
+        assert_eq!(
+            config.keyboard.bindings[2].action,
             KeyboardAction::SplitHorizontal
         );
-        assert_eq!(config.keyboard.bindings[1].key, "D");
-        assert_eq!(config.keyboard.bindings[1].mods, "Control|Shift");
+        assert_eq!(config.keyboard.bindings[2].key, "D");
+        assert_eq!(config.keyboard.bindings[2].mods, "Control|Shift");
     }
 
     #[test]

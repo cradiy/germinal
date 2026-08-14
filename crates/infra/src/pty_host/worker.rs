@@ -422,6 +422,12 @@ where
                     self.unpublished_seq = Some(seq);
                 }
             }
+            TerminalWorkerInput::SetSearchMode(enabled) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.set_search_mode(enabled) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
             TerminalWorkerInput::ViMotion(motion) => {
                 self.flush_pending_input();
                 if let Some(seq) = self.vi_motion(motion) {
@@ -683,6 +689,14 @@ where
         let seq = Seq::new(self.seq);
         self.terminal_store
             .set_vi_mode(self.target_id, seq, enabled)
+            .then_some(seq)
+    }
+
+    fn set_search_mode(&mut self, enabled: bool) -> Option<Seq> {
+        self.seq += 1;
+        let seq = Seq::new(self.seq);
+        self.terminal_store
+            .set_search_mode(self.target_id, seq, enabled)
             .then_some(seq)
     }
 

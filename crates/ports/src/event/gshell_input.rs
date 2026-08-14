@@ -20,5 +20,6 @@ pub enum GShellInputEvent {
         text: Option<String>,
     },
     ToggleViMode,
+    ToggleSearch,
     Window(WindowInputEvent),
 }

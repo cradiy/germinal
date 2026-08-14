@@ -26,7 +26,7 @@ use germinal_ports::{
     pty_host::{
         pty_backend::{IPtyBackend, IPtyBackendProvider},
         pty_input::{PtyInput, PtyInputSender},
-        terminal_input_mode::TerminalInputModeState,
+        terminal_input_mode::{TerminalInputModeState, TerminalInputModes},
         terminal_size::TerminalPtySize,
         worker_input::{
             TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
@@ -244,6 +244,7 @@ where
                 }
             }
             GShellInputEvent::ToggleViMode => toggle_pty_host_vi_mode(state, pty_host_id),
+            GShellInputEvent::ToggleSearch => toggle_pty_host_search(state, pty_host_id),
             GShellInputEvent::Window(window_input) => match window_input {
                 WindowInputEvent::ModifiersChanged(modifiers) => {
                     *state.modifiers.borrow_mut() = modifiers;
@@ -363,6 +364,9 @@ fn toggle_pty_host_vi_mode(state: &PtyServiceState, pty_host_id: PtyHostId) {
         leave_pty_host_vi_mode(runtime);
         return;
     }
+    if host_search_active(runtime) {
+        leave_pty_host_search(runtime);
+    }
 
     runtime.vi_mode = true;
     runtime.vi_pending_g = false;
@@ -375,12 +379,44 @@ fn toggle_pty_host_vi_mode(state: &PtyServiceState, pty_host_id: PtyHostId) {
         .send(TerminalWorkerInput::SetViMode(true));
 }
 
+fn toggle_pty_host_search(state: &PtyServiceState, pty_host_id: PtyHostId) {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+        return;
+    };
+
+    if runtime.vi_mode {
+        if runtime.vi_search_input.is_some() {
+            runtime.vi_search_input = None;
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetViSearchPrompt(None));
+        } else {
+            start_vi_search(runtime, TerminalViSearchDirection::Forward);
+        }
+        return;
+    }
+    if host_search_active(runtime) {
+        leave_pty_host_search(runtime);
+        return;
+    }
+
+    runtime.vi_search_input = Some(ViSearchInput {
+        direction: TerminalViSearchDirection::Forward,
+        query: String::new(),
+    });
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetSearchMode(true));
+    publish_vi_search_prompt(runtime);
+}
+
 fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
     let mut runtimes = state.pty_host_runtimes.borrow_mut();
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    if runtime.vi_mode {
+    if runtime.vi_mode || host_search_active(runtime) {
         return;
     }
 
@@ -393,7 +429,7 @@ fn send_pty_host_paste(state: &PtyServiceState, pty_host_id: PtyHostId, text: &s
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    if runtime.vi_mode {
+    if runtime.vi_mode || host_search_active(runtime) {
         return;
     }
     let Some(bytes) = encode_paste(runtime.input_modes.load(), text) else {
@@ -433,6 +469,10 @@ fn send_pty_host_key(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
+    if host_search_active(runtime) {
+        send_host_search_key(runtime, modifiers, key_state, logical_key);
+        return;
+    }
     if runtime.vi_mode {
         send_vi_mode_key(runtime, modifiers, key_state, logical_key);
         return;
@@ -449,6 +489,97 @@ fn send_pty_host_key(
 
     return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn host_search_active(runtime: &PtyPaneRuntime) -> bool {
+    !runtime.vi_mode && runtime.vi_search_input.is_some()
+}
+
+fn send_host_search_key(
+    runtime: &mut PtyPaneRuntime,
+    modifiers: WindowInputModifiers,
+    key_state: WindowInputElementState,
+    logical_key: &WindowInputKey,
+) {
+    if key_state != WindowInputElementState::Pressed {
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Escape)
+    ) {
+        leave_pty_host_search(runtime);
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Backspace)
+    ) {
+        if let Some(search) = runtime.vi_search_input.as_mut() {
+            search.query.pop();
+        }
+        publish_vi_search_prompt(runtime);
+        return;
+    }
+
+    if matches!(
+        logical_key,
+        WindowInputKey::Named(WindowInputNamedKey::Enter)
+    ) {
+        let Some(search_input) = runtime.vi_search_input.as_ref() else {
+            return;
+        };
+        let pattern = if search_input.query.is_empty() {
+            runtime
+                .vi_last_search
+                .as_ref()
+                .map(|search| search.pattern.clone())
+        } else {
+            Some(search_input.query.clone())
+        };
+        let Some(pattern) = pattern else {
+            return;
+        };
+        let direction = if modifiers.shift_key() {
+            TerminalViSearchDirection::Backward
+        } else {
+            TerminalViSearchDirection::Forward
+        };
+        runtime.vi_last_search = Some(ViSearch {
+            direction,
+            pattern: pattern.clone(),
+        });
+        let _ = runtime
+            .terminal_worker_sender
+            .send(TerminalWorkerInput::ViSearch { pattern, direction });
+        return;
+    }
+
+    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
+        return;
+    }
+    let WindowInputKey::Character(text) = logical_key else {
+        return;
+    };
+    let Some(search) = runtime.vi_search_input.as_mut() else {
+        return;
+    };
+    search
+        .query
+        .extend(text.chars().filter(|character| !character.is_control()));
+    publish_vi_search_prompt(runtime);
+}
+
+fn leave_pty_host_search(runtime: &mut PtyPaneRuntime) {
+    runtime.vi_search_input = None;
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetViSearchPrompt(None));
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::SetSearchMode(false));
 }
 
 fn send_vi_mode_key(
@@ -784,7 +915,7 @@ fn send_pty_host_pointer_moved(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    let modes = runtime.input_modes.load();
+    let modes = host_navigation_input_modes(runtime);
     let selection_point = runtime.mouse.selection_point(position);
     let bytes = runtime.mouse.moved(modes, position, modifiers);
 
@@ -820,7 +951,7 @@ fn send_pty_host_pointer_button(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    let modes = runtime.input_modes.load();
+    let modes = host_navigation_input_modes(runtime);
     let selection_point = runtime.mouse.selection_point(position);
     let bytes = runtime
         .mouse
@@ -876,9 +1007,8 @@ fn send_pty_host_scroll(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    let action = runtime
-        .mouse
-        .scroll(runtime.input_modes.load(), delta, position, modifiers);
+    let modes = host_navigation_input_modes(runtime);
+    let action = runtime.mouse.scroll(modes, delta, position, modifiers);
     match action {
         PtyScrollAction::ReportToPty(reports) => {
             for bytes in reports {
@@ -896,6 +1026,14 @@ fn send_pty_host_scroll(
             }
         }
         PtyScrollAction::ScrollDisplay(_) => {}
+    }
+}
+
+fn host_navigation_input_modes(runtime: &PtyPaneRuntime) -> TerminalInputModes {
+    if runtime.vi_mode || host_search_active(runtime) {
+        TerminalInputModes::default()
+    } else {
+        runtime.input_modes.load()
     }
 }
 
@@ -926,7 +1064,7 @@ mod tests {
         PtyClickTracker, PtyMouseEncoder, PtyPaneRuntime, PtyServiceState,
         request_pty_host_selection, return_to_live_display, send_pty_host_focus, send_pty_host_key,
         send_pty_host_pointer_button, send_pty_host_pointer_moved, send_vi_mode_key,
-        toggle_pty_host_vi_mode,
+        toggle_pty_host_search, toggle_pty_host_vi_mode,
     };
 
     #[test]
@@ -1026,6 +1164,106 @@ mod tests {
             Some("x"),
         );
         assert!(terminal_worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn host_search_intercepts_input_and_navigates_in_both_directions() {
+        let state = PtyServiceState::new();
+        let pty_host_id = PtyHostId::new(2);
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(16);
+        state.pty_host_runtimes.borrow_mut().insert(
+            pty_host_id,
+            PtyPaneRuntime {
+                pty_input_sender,
+                terminal_worker_sender,
+                input_modes: TerminalInputModeState::default(),
+                mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+                click_tracker: PtyClickTracker::default(),
+                selection_dragging: false,
+                selection_end: None,
+                display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
+            },
+        );
+
+        toggle_pty_host_search(&state, pty_host_id);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetSearchMode(true))
+        ));
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(Some(
+                TerminalViSearchPrompt {
+                    direction: TerminalViSearchDirection::Forward,
+                    ref query,
+                }
+            ))) if query.is_empty()
+        ));
+
+        let no_modifiers = WindowInputModifiers::new(false, false, false, false);
+        send_pty_host_key(
+            &state,
+            pty_host_id,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("needle".into()),
+            Some("needle"),
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(Some(
+                TerminalViSearchPrompt {
+                    direction: TerminalViSearchDirection::Forward,
+                    ref query,
+                }
+            ))) if query == "needle"
+        ));
+
+        for (modifiers, direction) in [
+            (no_modifiers, TerminalViSearchDirection::Forward),
+            (
+                WindowInputModifiers::new(false, false, true, false),
+                TerminalViSearchDirection::Backward,
+            ),
+        ] {
+            send_pty_host_key(
+                &state,
+                pty_host_id,
+                modifiers,
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Named(WindowInputNamedKey::Enter),
+                None,
+            );
+            assert!(matches!(
+                terminal_worker_rx.try_recv(),
+                Ok(TerminalWorkerInput::ViSearch { ref pattern, direction: actual })
+                    if pattern == "needle" && actual == direction
+            ));
+        }
+
+        send_pty_host_key(
+            &state,
+            pty_host_id,
+            no_modifiers,
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Named(WindowInputNamedKey::Escape),
+            None,
+        );
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetViSearchPrompt(None))
+        ));
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::SetSearchMode(false))
+        ));
     }
 
     #[test]

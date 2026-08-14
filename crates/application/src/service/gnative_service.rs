@@ -165,6 +165,7 @@ fn gnative_input_event_from(
         GShellInputEvent::CopySelection => None,
         GShellInputEvent::Osc52ClipboardLoadResponse { .. } => None,
         GShellInputEvent::ToggleViMode => None,
+        GShellInputEvent::ToggleSearch => None,
         GShellInputEvent::Window(window_event) => match window_event {
             WindowInputEvent::ModifiersChanged(modifiers) => Some(
                 GNativeInputEvent::ModifiersChanged(gnative_input_modifiers_from(modifiers)),
@@ -412,6 +413,19 @@ mod tests {
         let input = GShellInput {
             gshell_id: GShellId::new(1),
             event: GShellInputEvent::ToggleViMode,
+        };
+
+        assert_eq!(
+            gnative_input_event_from(input, WindowInputModifiers::new(false, false, false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn host_search_does_not_enter_the_gnative_protocol() {
+        let input = GShellInput {
+            gshell_id: GShellId::new(1),
+            event: GShellInputEvent::ToggleSearch,
         };
 
         assert_eq!(
