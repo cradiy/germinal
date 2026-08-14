@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::{
     entity::pane_tree::PaneTree,
-    vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
+    vo::{
+        pane_id::PaneId, pane_resize_direction::PaneResizeDirection,
+        pane_split_direction::PaneSplitDirection, tab_id::TabId,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +97,10 @@ impl WorkspaceTab {
 
     pub fn swap_focused_pane_with(&mut self, other: PaneId) -> bool {
         self.pane_tree.swap_panes(self.focused_pane, other)
+    }
+
+    pub fn resize_focused_pane(&mut self, direction: PaneResizeDirection) -> bool {
+        self.pane_tree.resize_pane(self.focused_pane, direction)
     }
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {

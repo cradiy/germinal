@@ -23,7 +23,12 @@ use germinal_application::service::{
 };
 use germinal_domain::{
     gshell::vo::gshell_id::GShellId,
-    workspace::{entity::workspace::Workspace, vo::pane_split_direction::PaneSplitDirection},
+    workspace::{
+        entity::workspace::Workspace,
+        vo::{
+            pane_resize_direction::PaneResizeDirection, pane_split_direction::PaneSplitDirection,
+        },
+    },
 };
 use germinal_infra::{
     gnative::gst_video_player_bridge::GstVideoPlayerBridge,
@@ -430,6 +435,24 @@ impl App {
         self.request_redraw();
     }
 
+    fn resize_focused_workspace_pane(&mut self, direction: PaneResizeDirection) {
+        if self.render_runtime.is_none() || !self.pane_navigation_enabled {
+            return;
+        }
+
+        if !self.resize_focused_gshell(direction) {
+            return;
+        }
+
+        let window_size = self.current_terminal_size_info().window_size();
+        self.resize_workspace_gshells(window_size);
+        self.update_ime_cursor_area();
+        if let Some(position) = self.cursor_position {
+            self.route_pointer_moved(position);
+        }
+        self.request_redraw();
+    }
+
     fn close_workspace_gshell(&mut self, event_loop: &ActiveEventLoop, gshell_id: GShellId) {
         let previous_gshell = self.focused_gshell();
         let Some(outcome) = self.close_gshell(gshell_id) else {
@@ -557,6 +580,10 @@ impl App {
                 | KeyboardAction::FocusPaneRight
                 | KeyboardAction::FocusPaneUp
                 | KeyboardAction::FocusPaneDown
+                | KeyboardAction::ResizePaneLeft
+                | KeyboardAction::ResizePaneRight
+                | KeyboardAction::ResizePaneUp
+                | KeyboardAction::ResizePaneDown
         ) && !self.pane_navigation_enabled
         {
             return false;
@@ -617,6 +644,18 @@ impl App {
                 }
                 KeyboardAction::SwapPaneDown => {
                     self.swap_focused_workspace_pane(PaneDirection::Down);
+                }
+                KeyboardAction::ResizePaneLeft => {
+                    self.resize_focused_workspace_pane(PaneResizeDirection::Left);
+                }
+                KeyboardAction::ResizePaneRight => {
+                    self.resize_focused_workspace_pane(PaneResizeDirection::Right);
+                }
+                KeyboardAction::ResizePaneUp => {
+                    self.resize_focused_workspace_pane(PaneResizeDirection::Up);
+                }
+                KeyboardAction::ResizePaneDown => {
+                    self.resize_focused_workspace_pane(PaneResizeDirection::Down);
                 }
             }
         }
@@ -1620,6 +1659,21 @@ mod tests {
         ] {
             assert!(config.keyboard.bindings.iter().any(|binding| {
                 binding.key == key && binding.mods == "Control|Alt" && binding.action == action
+            }));
+        }
+    }
+
+    #[test]
+    fn default_directional_pane_resize_uses_alt_shift_arrows() {
+        let config = GerminalConfig::default();
+        for (key, action) in [
+            ("Left", KeyboardAction::ResizePaneLeft),
+            ("Right", KeyboardAction::ResizePaneRight),
+            ("Up", KeyboardAction::ResizePaneUp),
+            ("Down", KeyboardAction::ResizePaneDown),
+        ] {
+            assert!(config.keyboard.bindings.iter().any(|binding| {
+                binding.key == key && binding.mods == "Alt|Shift" && binding.action == action
             }));
         }
     }

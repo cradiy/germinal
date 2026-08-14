@@ -8,8 +8,14 @@ use std::{
 use germinal_domain::{
     gshell::vo::gshell_id::GShellId,
     workspace::{
-        entity::{pane_tree::PaneTree, workspace::Workspace},
-        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
+        entity::{
+            pane_tree::{MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, PaneTree, SPLIT_RATIO_SCALE},
+            workspace::Workspace,
+        },
+        vo::{
+            pane_id::PaneId, pane_resize_direction::PaneResizeDirection,
+            pane_split_direction::PaneSplitDirection, tab_id::TabId,
+        },
     },
 };
 use germinal_ports::{
@@ -196,6 +202,10 @@ impl WorkspaceServiceState {
             .swap_focused_pane_with(other_pane)
     }
 
+    pub fn resize_focused_gshell(&self, direction: PaneResizeDirection) -> bool {
+        self.workspace.borrow_mut().resize_focused_pane(direction)
+    }
+
     pub fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome> {
         let (tab_id, pane_id) = self
             .pane_bindings
@@ -379,20 +389,27 @@ fn collect_render_placements(
         }
         PaneTree::Split {
             direction,
+            ratio,
             first,
             second,
         } => {
-            let (first_bounds, second_bounds) = split_bounds(bounds, *direction);
+            let (first_bounds, second_bounds) = split_bounds(bounds, *direction, *ratio);
             collect_render_placements(first, tab_id, bindings, first_bounds, placements);
             collect_render_placements(second, tab_id, bindings, second_bounds, placements);
         }
     }
 }
 
-fn split_bounds(bounds: PixelRect, direction: PaneSplitDirection) -> (PixelRect, PixelRect) {
+fn split_bounds(
+    bounds: PixelRect,
+    direction: PaneSplitDirection,
+    ratio: u16,
+) -> (PixelRect, PixelRect) {
+    let ratio = u32::from(ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO));
+    let scale = u32::from(SPLIT_RATIO_SCALE);
     match direction {
         PaneSplitDirection::Horizontal => {
-            let first_width = bounds.width / 2;
+            let first_width = bounds.width.saturating_mul(ratio) / scale;
             let second_width = bounds.width.saturating_sub(first_width);
             (
                 PixelRect::new(bounds.x, bounds.y, first_width, bounds.height),
@@ -405,7 +422,7 @@ fn split_bounds(bounds: PixelRect, direction: PaneSplitDirection) -> (PixelRect,
             )
         }
         PaneSplitDirection::Vertical => {
-            let first_height = bounds.height / 2;
+            let first_height = bounds.height.saturating_mul(ratio) / scale;
             let second_height = bounds.height.saturating_sub(first_height);
             (
                 PixelRect::new(bounds.x, bounds.y, bounds.width, first_height),
@@ -483,6 +500,11 @@ where
             .swap_focused_gshell_with(other)
     }
 
+    fn resize_focused_gshell(&self, direction: PaneResizeDirection) -> bool {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .resize_focused_gshell(direction)
+    }
+
     fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome> {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).close_gshell(gshell_id)
     }
@@ -536,7 +558,13 @@ where
 mod tests {
     use germinal_domain::{
         gshell::vo::gshell_id::GShellId,
-        workspace::{entity::workspace::Workspace, vo::pane_split_direction::PaneSplitDirection},
+        workspace::{
+            entity::workspace::Workspace,
+            vo::{
+                pane_resize_direction::PaneResizeDirection,
+                pane_split_direction::PaneSplitDirection,
+            },
+        },
     };
     use germinal_ports::{
         pty_host::window_size::TerminalWindowSize,
@@ -729,5 +757,23 @@ mod tests {
         assert_eq!(placements[1].width_px, 51);
         assert_eq!(placements[0].height_px, 40);
         assert_eq!(placements[1].height_px, 40);
+    }
+
+    #[test]
+    fn resizing_focused_pane_changes_layout_and_rejects_the_wrong_axis() {
+        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+
+        assert!(!state.resize_focused_gshell(PaneResizeDirection::Up));
+        assert!(state.resize_focused_gshell(PaneResizeDirection::Left));
+
+        let placements = state.render_layout(TerminalWindowSize::new(100, 40));
+        assert_eq!(placements[0].width_px, 45);
+        assert_eq!(placements[1].x_px, 45);
+        assert_eq!(placements[1].width_px, 55);
+
+        assert!(state.resize_focused_gshell(PaneResizeDirection::Right));
+        let placements = state.render_layout(TerminalWindowSize::new(100, 40));
+        assert_eq!(placements[0].width_px, 50);
+        assert_eq!(placements[1].width_px, 50);
     }
 }

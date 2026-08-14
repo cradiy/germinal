@@ -4,7 +4,10 @@ use crate::{
     aggregate_root::AggregateRoot,
     workspace::{
         entity::workspace_tab::WorkspaceTab,
-        vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection, tab_id::TabId},
+        vo::{
+            pane_id::PaneId, pane_resize_direction::PaneResizeDirection,
+            pane_split_direction::PaneSplitDirection, tab_id::TabId,
+        },
     },
 };
 
@@ -144,6 +147,10 @@ impl Workspace {
 
     pub fn swap_focused_pane_with(&mut self, other: PaneId) -> bool {
         self.active_tab_mut().swap_focused_pane_with(other)
+    }
+
+    pub fn resize_focused_pane(&mut self, direction: PaneResizeDirection) -> bool {
+        self.active_tab_mut().resize_focused_pane(direction)
     }
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {

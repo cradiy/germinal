@@ -379,6 +379,26 @@ impl Default for KeyboardConfig {
                     mods: "Control|Shift|Alt".to_string(),
                     action: KeyboardAction::SwapPaneDown,
                 },
+                KeyboardBinding {
+                    key: "Left".to_string(),
+                    mods: "Alt|Shift".to_string(),
+                    action: KeyboardAction::ResizePaneLeft,
+                },
+                KeyboardBinding {
+                    key: "Right".to_string(),
+                    mods: "Alt|Shift".to_string(),
+                    action: KeyboardAction::ResizePaneRight,
+                },
+                KeyboardBinding {
+                    key: "Up".to_string(),
+                    mods: "Alt|Shift".to_string(),
+                    action: KeyboardAction::ResizePaneUp,
+                },
+                KeyboardBinding {
+                    key: "Down".to_string(),
+                    mods: "Alt|Shift".to_string(),
+                    action: KeyboardAction::ResizePaneDown,
+                },
             ],
         }
     }
@@ -412,6 +432,10 @@ pub enum KeyboardAction {
     SwapPaneRight,
     SwapPaneUp,
     SwapPaneDown,
+    ResizePaneLeft,
+    ResizePaneRight,
+    ResizePaneUp,
+    ResizePaneDown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,7 +644,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 18);
+        assert_eq!(config.keyboard.bindings.len(), 22);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode
@@ -637,6 +661,11 @@ mod tests {
         );
         assert_eq!(config.keyboard.bindings[2].key, "D");
         assert_eq!(config.keyboard.bindings[2].mods, "Control|Shift");
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "Left"
+                && binding.mods == "Alt|Shift"
+                && binding.action == KeyboardAction::ResizePaneLeft
+        }));
     }
 
     #[test]

@@ -488,6 +488,13 @@ impl IWorkspaceService for App {
         WorkspaceService::inj_ref(self).swap_focused_gshell_with(other)
     }
 
+    fn resize_focused_gshell(
+        &self,
+        direction: germinal_domain::workspace::vo::pane_resize_direction::PaneResizeDirection,
+    ) -> bool {
+        WorkspaceService::inj_ref(self).resize_focused_gshell(direction)
+    }
+
     fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome> {
         WorkspaceService::inj_ref(self).close_gshell(gshell_id)
     }

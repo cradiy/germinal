@@ -1,12 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-use crate::workspace::vo::{pane_id::PaneId, pane_split_direction::PaneSplitDirection};
+use crate::workspace::vo::{
+    pane_id::PaneId, pane_resize_direction::PaneResizeDirection,
+    pane_split_direction::PaneSplitDirection,
+};
+
+pub const SPLIT_RATIO_SCALE: u16 = 1_000;
+pub const DEFAULT_SPLIT_RATIO: u16 = SPLIT_RATIO_SCALE / 2;
+pub const MIN_SPLIT_RATIO: u16 = SPLIT_RATIO_SCALE / 10;
+pub const MAX_SPLIT_RATIO: u16 = SPLIT_RATIO_SCALE - MIN_SPLIT_RATIO;
+pub const SPLIT_RESIZE_STEP: u16 = SPLIT_RATIO_SCALE / 20;
+
+const fn default_split_ratio() -> u16 {
+    DEFAULT_SPLIT_RATIO
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaneTree {
     Pane(PaneId),
     Split {
         direction: PaneSplitDirection,
+        #[serde(default = "default_split_ratio")]
+        ratio: u16,
         first: Box<PaneTree>,
         second: Box<PaneTree>,
     },
@@ -49,6 +64,7 @@ impl PaneTree {
             Self::Pane(existing) if *existing == target => {
                 *self = Self::Split {
                     direction,
+                    ratio: DEFAULT_SPLIT_RATIO,
                     first: Box::new(Self::Pane(target)),
                     second: Box::new(Self::Pane(new_pane_id)),
                 };
@@ -68,6 +84,47 @@ impl PaneTree {
         }
 
         self.swap_pane_ids(first, second);
+        true
+    }
+
+    pub fn resize_pane(&mut self, target: PaneId, direction: PaneResizeDirection) -> bool {
+        let Self::Split {
+            direction: split_direction,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+
+        let target_branch = if first.contains_pane(target) {
+            first
+        } else if second.contains_pane(target) {
+            second
+        } else {
+            return false;
+        };
+
+        if target_branch.resize_pane(target, direction) {
+            return true;
+        }
+
+        if *split_direction != direction.split_direction() {
+            return false;
+        }
+
+        let resized = if direction.grows_first() {
+            ratio.saturating_add(SPLIT_RESIZE_STEP)
+        } else {
+            ratio.saturating_sub(SPLIT_RESIZE_STEP)
+        }
+        .clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO);
+        if resized == *ratio {
+            return false;
+        }
+
+        *ratio = resized;
         true
     }
 
@@ -113,6 +170,7 @@ fn remove_pane_from(tree: PaneTree, target: PaneId) -> Option<PaneTree> {
         PaneTree::Pane(pane_id) => (pane_id != target).then_some(PaneTree::Pane(pane_id)),
         PaneTree::Split {
             direction,
+            ratio,
             first,
             second,
         } => {
@@ -122,6 +180,7 @@ fn remove_pane_from(tree: PaneTree, target: PaneId) -> Option<PaneTree> {
             match (first, second) {
                 (Some(first), Some(second)) => Some(PaneTree::Split {
                     direction,
+                    ratio,
                     first: Box::new(first),
                     second: Box::new(second),
                 }),
@@ -135,6 +194,13 @@ fn remove_pane_from(tree: PaneTree, target: PaneId) -> Option<PaneTree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn root_ratio(tree: &PaneTree) -> u16 {
+        match tree {
+            PaneTree::Split { ratio, .. } => *ratio,
+            PaneTree::Pane(_) => panic!("expected a split pane tree"),
+        }
+    }
 
     #[test]
     fn removing_a_nested_pane_collapses_its_parent_split() {
@@ -175,5 +241,45 @@ mod tests {
         assert_eq!(tree.pane_ids(), vec![third, second, first]);
         assert!(!tree.swap_panes(first, PaneId::new(99)));
         assert!(!tree.swap_panes(first, first));
+    }
+
+    #[test]
+    fn resizing_moves_the_nearest_matching_split_and_clamps_its_ratio() {
+        let first = PaneId::new(0);
+        let second = PaneId::new(1);
+        let third = PaneId::new(2);
+        let mut tree = PaneTree::single(first);
+        assert!(tree.split_pane(first, PaneSplitDirection::Horizontal, second));
+        assert!(tree.split_pane(second, PaneSplitDirection::Horizontal, third));
+
+        assert!(tree.resize_pane(third, PaneResizeDirection::Right));
+        assert_eq!(root_ratio(&tree), DEFAULT_SPLIT_RATIO);
+        let PaneTree::Split { second, .. } = &tree else {
+            unreachable!();
+        };
+        assert_eq!(root_ratio(second), DEFAULT_SPLIT_RATIO + SPLIT_RESIZE_STEP);
+
+        for _ in 0..SPLIT_RATIO_SCALE / SPLIT_RESIZE_STEP {
+            tree.resize_pane(third, PaneResizeDirection::Left);
+        }
+        let PaneTree::Split { second, .. } = &tree else {
+            unreachable!();
+        };
+        assert_eq!(root_ratio(second), MIN_SPLIT_RATIO);
+        let mut nested = (**second).clone();
+        assert!(!nested.resize_pane(third, PaneResizeDirection::Left));
+    }
+
+    #[test]
+    fn resizing_uses_an_outer_split_when_the_inner_axis_does_not_match() {
+        let first = PaneId::new(0);
+        let second = PaneId::new(1);
+        let third = PaneId::new(2);
+        let mut tree = PaneTree::single(first);
+        assert!(tree.split_pane(first, PaneSplitDirection::Horizontal, second));
+        assert!(tree.split_pane(second, PaneSplitDirection::Vertical, third));
+
+        assert!(tree.resize_pane(third, PaneResizeDirection::Left));
+        assert_eq!(root_ratio(&tree), DEFAULT_SPLIT_RATIO - SPLIT_RESIZE_STEP);
     }
 }

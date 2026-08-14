@@ -1,5 +1,8 @@
 use germinal_domain::{
-    gshell::vo::gshell_id::GShellId, workspace::vo::pane_split_direction::PaneSplitDirection,
+    gshell::vo::gshell_id::GShellId,
+    workspace::vo::{
+        pane_resize_direction::PaneResizeDirection, pane_split_direction::PaneSplitDirection,
+    },
 };
 use thiserror::Error;
 
@@ -43,6 +46,7 @@ pub trait IWorkspaceService {
     fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>);
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId;
     fn swap_focused_gshell_with(&self, other: GShellId) -> bool;
+    fn resize_focused_gshell(&self, direction: PaneResizeDirection) -> bool;
     fn close_gshell(&self, gshell_id: GShellId) -> Option<WorkspaceGShellCloseOutcome>;
     fn visible_gshells(&self) -> Vec<GShellId>;
     fn workspace_render_layout(
