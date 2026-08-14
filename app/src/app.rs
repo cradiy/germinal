@@ -368,6 +368,20 @@ impl App {
         self.activate_workspace_tab(previous_gshell, focused_gshell);
     }
 
+    fn move_active_workspace_tab_left(&mut self) {
+        if self.move_active_tab_left() {
+            self.set_tab_bar(self.current_tab_bar_snapshot());
+            self.request_redraw();
+        }
+    }
+
+    fn move_active_workspace_tab_right(&mut self) {
+        if self.move_active_tab_right() {
+            self.set_tab_bar(self.current_tab_bar_snapshot());
+            self.request_redraw();
+        }
+    }
+
     fn activate_workspace_tab(&mut self, previous_gshell: GShellId, focused_gshell: GShellId) {
         self.pane_navigation_enabled = self.visible_gshells().len() > 1;
         if self.render_runtime.is_none() {
@@ -588,6 +602,13 @@ impl App {
         {
             return false;
         }
+        if matches!(
+            action,
+            KeyboardAction::MoveTabLeft | KeyboardAction::MoveTabRight
+        ) && self.tab_count() < 2
+        {
+            return false;
+        }
 
         if state == WindowInputElementState::Pressed {
             match action {
@@ -610,6 +631,8 @@ impl App {
                 KeyboardAction::NewTab => self.create_workspace_tab(),
                 KeyboardAction::NextTab => self.activate_next_workspace_tab(),
                 KeyboardAction::PreviousTab => self.activate_previous_workspace_tab(),
+                KeyboardAction::MoveTabLeft => self.move_active_workspace_tab_left(),
+                KeyboardAction::MoveTabRight => self.move_active_workspace_tab_right(),
                 KeyboardAction::SplitHorizontal => {
                     self.split_focused_workspace_pane(PaneSplitDirection::Horizontal);
                 }
@@ -1644,6 +1667,21 @@ mod tests {
         ] {
             assert!(config.keyboard.bindings.iter().any(|binding| {
                 binding.key == key && binding.mods == "Control|Shift" && binding.action == action
+            }));
+        }
+    }
+
+    #[test]
+    fn default_tab_reordering_uses_ctrl_shift_alt_h_and_l() {
+        let config = GerminalConfig::default();
+        for (key, action) in [
+            ("H", KeyboardAction::MoveTabLeft),
+            ("L", KeyboardAction::MoveTabRight),
+        ] {
+            assert!(config.keyboard.bindings.iter().any(|binding| {
+                binding.key == key
+                    && binding.mods == "Control|Shift|Alt"
+                    && binding.action == action
             }));
         }
     }

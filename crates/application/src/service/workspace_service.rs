@@ -127,6 +127,14 @@ impl WorkspaceServiceState {
         self.focused_gshell()
     }
 
+    pub fn move_active_tab_left(&self) -> bool {
+        self.workspace.borrow_mut().move_active_tab_left()
+    }
+
+    pub fn move_active_tab_right(&self) -> bool {
+        self.workspace.borrow_mut().move_active_tab_right()
+    }
+
     pub fn tab_count(&self) -> usize {
         self.workspace.borrow().tab_count()
     }
@@ -469,6 +477,14 @@ where
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).activate_previous_tab()
     }
 
+    fn move_active_tab_left(&self) -> bool {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).move_active_tab_left()
+    }
+
+    fn move_active_tab_right(&self) -> bool {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).move_active_tab_right()
+    }
+
     fn tab_count(&self) -> usize {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_count()
     }
@@ -690,6 +706,29 @@ mod tests {
         assert_eq!(state.activate_previous_tab(), first);
         assert_eq!(state.visible_gshells(), vec![first]);
         assert_eq!(state.activate_next_tab(), second);
+    }
+
+    #[test]
+    fn moving_active_tab_reorders_titles_and_gshells_without_changing_focus() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        state.update_gshell_title(first, Some("first".to_string()));
+        let second = state.create_tab_gshell();
+        state.update_gshell_title(second, Some("second".to_string()));
+        let third = state.create_tab_gshell();
+        state.update_gshell_title(third, Some("third".to_string()));
+
+        assert!(!state.move_active_tab_right());
+        assert!(state.move_active_tab_left());
+        assert_eq!(state.active_tab_index(), 1);
+        assert_eq!(state.focused_gshell(), third);
+        assert_eq!(state.tab_gshells(), vec![first, third, second]);
+        assert_eq!(state.tab_titles(), vec!["first", "third", "second"]);
+
+        assert!(state.move_active_tab_left());
+        assert!(!state.move_active_tab_left());
+        assert_eq!(state.focused_gshell(), third);
+        assert_eq!(state.tab_gshells(), vec![third, first, second]);
     }
 
     #[test]

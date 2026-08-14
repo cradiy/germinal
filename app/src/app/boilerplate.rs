@@ -457,6 +457,14 @@ impl IWorkspaceService for App {
         WorkspaceService::inj_ref(self).activate_previous_tab()
     }
 
+    fn move_active_tab_left(&self) -> bool {
+        WorkspaceService::inj_ref(self).move_active_tab_left()
+    }
+
+    fn move_active_tab_right(&self) -> bool {
+        WorkspaceService::inj_ref(self).move_active_tab_right()
+    }
+
     fn tab_count(&self) -> usize {
         WorkspaceService::inj_ref(self).tab_count()
     }

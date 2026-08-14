@@ -335,6 +335,16 @@ impl Default for KeyboardConfig {
                     action: KeyboardAction::NextTab,
                 },
                 KeyboardBinding {
+                    key: "H".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::MoveTabLeft,
+                },
+                KeyboardBinding {
+                    key: "L".to_string(),
+                    mods: "Control|Shift|Alt".to_string(),
+                    action: KeyboardAction::MoveTabRight,
+                },
+                KeyboardBinding {
                     key: "W".to_string(),
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::ClosePane,
@@ -419,6 +429,8 @@ pub enum KeyboardAction {
     NewTab,
     NextTab,
     PreviousTab,
+    MoveTabLeft,
+    MoveTabRight,
     SplitHorizontal,
     SplitVertical,
     FocusNextPane,
@@ -644,7 +656,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 22);
+        assert_eq!(config.keyboard.bindings.len(), 24);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode

@@ -90,6 +90,28 @@ impl Workspace {
         self.active_tab_id()
     }
 
+    pub fn move_active_tab_left(&mut self) -> bool {
+        if self.active_tab_index == 0 {
+            return false;
+        }
+
+        self.tabs
+            .swap(self.active_tab_index, self.active_tab_index - 1);
+        self.active_tab_index -= 1;
+        true
+    }
+
+    pub fn move_active_tab_right(&mut self) -> bool {
+        if self.active_tab_index + 1 >= self.tabs.len() {
+            return false;
+        }
+
+        self.tabs
+            .swap(self.active_tab_index, self.active_tab_index + 1);
+        self.active_tab_index += 1;
+        true
+    }
+
     pub fn activate_tab(&mut self, tab_id: TabId) -> bool {
         let Some(index) = self.tabs.iter().position(|tab| tab.tab_id() == tab_id) else {
             return false;
@@ -287,6 +309,36 @@ mod tests {
         assert_eq!(workspace.activate_previous_tab(), first_tab);
         assert_eq!(workspace.focused_pane(), first_focus);
         assert_eq!(workspace.activate_next_tab(), second_tab);
+    }
+
+    #[test]
+    fn moving_the_active_tab_reorders_without_changing_its_identity_or_focus() {
+        let mut workspace = Workspace::two_pane();
+        let first_tab = workspace.active_tab_id();
+        let first_focus = workspace.focused_pane();
+        let second_tab = workspace.create_tab();
+        let third_tab = workspace.create_tab();
+
+        assert!(!workspace.move_active_tab_right());
+        assert!(workspace.move_active_tab_left());
+        assert_eq!(workspace.active_tab_id(), third_tab);
+        assert_eq!(workspace.active_tab_index(), 1);
+        assert_eq!(
+            workspace
+                .tabs()
+                .iter()
+                .map(WorkspaceTab::tab_id)
+                .collect::<Vec<_>>(),
+            vec![first_tab, third_tab, second_tab]
+        );
+
+        assert!(workspace.move_active_tab_left());
+        assert!(!workspace.move_active_tab_left());
+        assert_eq!(workspace.active_tab_id(), third_tab);
+        assert_eq!(workspace.focused_pane(), PaneId::new(0));
+
+        assert!(workspace.activate_tab(first_tab));
+        assert_eq!(workspace.focused_pane(), first_focus);
     }
 
     #[test]

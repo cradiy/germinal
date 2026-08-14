@@ -39,6 +39,8 @@ pub trait IWorkspaceService {
     fn create_tab_gshell(&self) -> GShellId;
     fn activate_next_tab(&self) -> GShellId;
     fn activate_previous_tab(&self) -> GShellId;
+    fn move_active_tab_left(&self) -> bool;
+    fn move_active_tab_right(&self) -> bool;
     fn tab_count(&self) -> usize;
     fn active_tab_index(&self) -> usize;
     fn tab_titles(&self) -> Vec<String>;
