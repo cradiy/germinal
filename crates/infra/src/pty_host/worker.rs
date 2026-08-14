@@ -21,7 +21,7 @@ use germinal_ports::{
         snapshot::TerminalSnapshotProvider,
         terminal_input_mode::TerminalInputModeState,
         worker_backend::ITerminalWorkerBackend,
-        worker_input::TerminalWorkerInput,
+        worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
     },
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
     seq::Seq,
@@ -351,6 +351,12 @@ where
                 self.flush_pending_input();
                 self.unpublished_seq = Some(self.resize(to_alacritty_term_size(size)));
             }
+            TerminalWorkerInput::ScrollDisplay(scroll) => {
+                self.flush_pending_input();
+                if let Some(seq) = self.scroll_display(scroll) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
             TerminalWorkerInput::SetPtyInput {
                 sender,
                 input_modes,
@@ -451,6 +457,23 @@ where
         self.perf.resize_max = self.perf.resize_max.max(elapsed);
 
         seq
+    }
+
+    fn scroll_display(&mut self, scroll: TerminalDisplayScroll) -> Option<Seq> {
+        self.seq += 1;
+
+        let seq = Seq::new(self.seq);
+        let scroll = match scroll {
+            TerminalDisplayScroll::Delta(lines) => alacritty_terminal::grid::Scroll::Delta(lines),
+            TerminalDisplayScroll::PageUp => alacritty_terminal::grid::Scroll::PageUp,
+            TerminalDisplayScroll::PageDown => alacritty_terminal::grid::Scroll::PageDown,
+            TerminalDisplayScroll::Top => alacritty_terminal::grid::Scroll::Top,
+            TerminalDisplayScroll::Bottom => alacritty_terminal::grid::Scroll::Bottom,
+        };
+
+        self.terminal_store
+            .scroll_display(self.target_id, seq, scroll)
+            .then_some(seq)
     }
 
     fn publish_unpublished_snapshot(&mut self) -> bool {
@@ -811,8 +834,10 @@ mod tests {
             runtime_event_dispatcher::IRuntimeEventDispatcher,
         },
         pty_host::{
-            pty_input::pty_input_channel, terminal_input_mode::TerminalInputModeState,
-            worker_backend::ITerminalWorkerBackend, worker_input::TerminalWorkerInput,
+            pty_input::pty_input_channel,
+            terminal_input_mode::TerminalInputModeState,
+            worker_backend::ITerminalWorkerBackend,
+            worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
         },
         rendering::surface_snapshot::RenderSurfaceSnapshot,
     };
@@ -987,6 +1012,50 @@ mod tests {
         assert!(modes.focus_in_out());
         assert!(modes.sgr_mouse());
         assert!(modes.mouse_report_click());
+    }
+
+    #[test]
+    fn terminal_worker_publishes_scrolled_history() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend =
+            PlatformTerminalWorkerBackend::with_worker_count(TestDispatcher { tx: event_tx }, 1);
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(6),
+            TerminalGridSize::new(8, 2),
+            snapshot_tx,
+            wake_pending.clone(),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(b"one\r\ntwo\r\nthree".to_vec()))
+            .expect("terminal output should send");
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("live snapshot should arrive");
+        event_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("live frame-ready event should arrive");
+        wake_pending.store(false, Ordering::Release);
+
+        input
+            .send(TerminalWorkerInput::ScrollDisplay(
+                TerminalDisplayScroll::Delta(1),
+            ))
+            .expect("scroll command should send");
+        let snapshot = snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("history snapshot should arrive");
+        let text: String = snapshot
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(text.contains("one"));
+        assert!(!text.contains("three"));
+        assert!(snapshot.cursor.is_none());
     }
 
     #[test]

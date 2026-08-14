@@ -27,7 +27,7 @@ use germinal_ports::{
         pty_input::{PtyInput, PtyInputSender},
         terminal_input_mode::TerminalInputModeState,
         terminal_size::TerminalPtySize,
-        worker_input::TerminalWorkerInput,
+        worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
     },
     rendering::surface_snapshot::RenderSurfaceSnapshot,
     service::{
@@ -39,7 +39,8 @@ use germinal_ports::{
 use tracing::warn;
 
 use super::pty_input_encoder::{
-    PtyMouseEncoder, encode_focus_changed, encode_ime_commit, encode_key_event, encode_paste,
+    PtyMouseEncoder, PtyScrollAction, encode_focus_changed, encode_ime_commit, encode_key_event,
+    encode_paste,
 };
 
 struct PtyPaneRuntime {
@@ -47,6 +48,7 @@ struct PtyPaneRuntime {
     terminal_worker_sender: SyncSender<TerminalWorkerInput>,
     input_modes: TerminalInputModeState,
     mouse: PtyMouseEncoder,
+    display_scrolled: bool,
 }
 
 #[derive(kudi::DepInj)]
@@ -136,6 +138,7 @@ where
                 terminal_worker_sender,
                 input_modes,
                 mouse: PtyMouseEncoder::new(pty_size),
+                display_scrolled: false,
             },
         );
     }
@@ -238,23 +241,25 @@ where
 }
 
 fn send_pty_host_bytes(state: &PtyServiceState, pty_host_id: PtyHostId, bytes: Vec<u8>) {
-    let runtimes = state.pty_host_runtimes.borrow();
-    let Some(runtime) = runtimes.get(&pty_host_id) else {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
 
+    return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
 fn send_pty_host_paste(state: &PtyServiceState, pty_host_id: PtyHostId, text: &str) {
-    let runtimes = state.pty_host_runtimes.borrow();
-    let Some(runtime) = runtimes.get(&pty_host_id) else {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
     let Some(bytes) = encode_paste(runtime.input_modes.load(), text) else {
         return;
     };
 
+    return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
 }
 
@@ -278,8 +283,8 @@ fn send_pty_host_key(
     logical_key: &WindowInputKey,
     text: Option<&str>,
 ) {
-    let runtimes = state.pty_host_runtimes.borrow();
-    let Some(runtime) = runtimes.get(&pty_host_id) else {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
     let Some(bytes) = encode_key_event(
@@ -292,7 +297,21 @@ fn send_pty_host_key(
         return;
     };
 
+    return_to_live_display(runtime);
     let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+}
+
+fn return_to_live_display(runtime: &mut PtyPaneRuntime) {
+    if !runtime.display_scrolled {
+        return;
+    }
+
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::ScrollDisplay(
+            TerminalDisplayScroll::Bottom,
+        ));
+    runtime.display_scrolled = false;
 }
 
 fn send_pty_host_pointer_moved(
@@ -351,10 +370,64 @@ fn send_pty_host_scroll(
     let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
         return;
     };
-    let reports = runtime
+    let action = runtime
         .mouse
         .scroll(runtime.input_modes.load(), delta, position, modifiers);
-    for bytes in reports {
-        let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+    match action {
+        PtyScrollAction::ReportToPty(reports) => {
+            for bytes in reports {
+                let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+            }
+        }
+        PtyScrollAction::ScrollDisplay(lines) if lines != 0 => {
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::ScrollDisplay(
+                    TerminalDisplayScroll::Delta(lines),
+                ));
+            if lines > 0 {
+                runtime.display_scrolled = true;
+            }
+        }
+        PtyScrollAction::ScrollDisplay(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use germinal_ports::pty_host::{
+        pty_input::pty_input_channel,
+        terminal_input_mode::TerminalInputModeState,
+        terminal_size::TerminalPtySize,
+        worker_input::{TerminalDisplayScroll, TerminalWorkerInput},
+    };
+
+    use super::{PtyMouseEncoder, PtyPaneRuntime, return_to_live_display};
+
+    #[test]
+    fn input_returns_a_scrolled_pane_to_the_live_display_once() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(2);
+        let mut runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            display_scrolled: true,
+        };
+
+        return_to_live_display(&mut runtime);
+        assert!(!runtime.display_scrolled);
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ScrollDisplay(
+                TerminalDisplayScroll::Bottom
+            ))
+        ));
+
+        return_to_live_display(&mut runtime);
+        assert!(terminal_worker_rx.try_recv().is_err());
     }
 }

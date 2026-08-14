@@ -10,6 +10,12 @@ const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 const MAX_SCROLL_REPORTS_PER_EVENT: i32 = 32;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PtyScrollAction {
+    ReportToPty(Vec<Vec<u8>>),
+    ScrollDisplay(i32),
+}
+
 pub(super) fn encode_key_event(
     modes: TerminalInputModes,
     modifiers: WindowInputModifiers,
@@ -176,15 +182,7 @@ impl PtyMouseEncoder {
         delta: WindowScrollDelta,
         position: WindowPointerPosition,
         modifiers: WindowInputModifiers,
-    ) -> Vec<Vec<u8>> {
-        let Some(cell) = terminal_cell_at(position, self.size) else {
-            return Vec::new();
-        };
-        self.last_pointer_cell = Some(cell);
-        if !mouse_reporting_enabled(modes) {
-            return Vec::new();
-        }
-
+    ) -> PtyScrollAction {
         let (x, y) = match delta {
             WindowScrollDelta::Lines { x, y } => (f64::from(x), f64::from(y)),
             WindowScrollDelta::Pixels { x, y } => {
@@ -197,11 +195,20 @@ impl PtyMouseEncoder {
         };
         let x_steps = take_scroll_steps(&mut self.wheel_x, x);
         let y_steps = take_scroll_steps(&mut self.wheel_y, y);
+
+        if !mouse_reporting_enabled(modes) {
+            return PtyScrollAction::ScrollDisplay(y_steps);
+        }
+
+        let Some(cell) = terminal_cell_at(position, self.size) else {
+            return PtyScrollAction::ReportToPty(Vec::new());
+        };
+        self.last_pointer_cell = Some(cell);
         let modifiers = modifier_code(modifiers);
         let mut reports = Vec::with_capacity((x_steps.abs() + y_steps.abs()) as usize);
         append_scroll_reports(&mut reports, y_steps, 64, 65, modifiers, cell);
         append_scroll_reports(&mut reports, x_steps, 67, 66, modifiers, cell);
-        reports
+        PtyScrollAction::ReportToPty(reports)
     }
 }
 
@@ -669,15 +676,14 @@ mod tests {
         let modifiers = WindowInputModifiers::new(false, false, false, false);
         let position = WindowPointerPosition::new(5.0, 5.0);
 
-        assert!(
-            encoder
-                .scroll(
-                    mouse_modes,
-                    WindowScrollDelta::Pixels { x: 0.0, y: 5.0 },
-                    position,
-                    modifiers,
-                )
-                .is_empty()
+        assert_eq!(
+            encoder.scroll(
+                mouse_modes,
+                WindowScrollDelta::Pixels { x: 0.0, y: 5.0 },
+                position,
+                modifiers,
+            ),
+            PtyScrollAction::ReportToPty(Vec::new())
         );
         assert_eq!(
             encoder.scroll(
@@ -686,7 +692,24 @@ mod tests {
                 position,
                 modifiers,
             ),
-            vec![b"\x1b[<64;1;1M".to_vec()]
+            PtyScrollAction::ReportToPty(vec![b"\x1b[<64;1;1M".to_vec()])
+        );
+    }
+
+    #[test]
+    fn scroll_without_mouse_reporting_moves_the_host_display() {
+        let mut encoder = PtyMouseEncoder::new(TerminalPtySize::new(10, 20, 200, 100));
+        let modifiers = WindowInputModifiers::new(false, false, false, false);
+        let position = WindowPointerPosition::new(5.0, 5.0);
+
+        assert_eq!(
+            encoder.scroll(
+                TerminalInputModes::default(),
+                WindowScrollDelta::Lines { x: 3.0, y: 2.0 },
+                position,
+                modifiers,
+            ),
+            PtyScrollAction::ScrollDisplay(2)
         );
     }
 }

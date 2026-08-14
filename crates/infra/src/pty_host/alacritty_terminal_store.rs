@@ -8,8 +8,8 @@ use std::{
 
 use alacritty_terminal::{
     event::{Event, EventListener},
-    grid::Dimensions,
-    term::{Config, Term, TermDamage, TermMode, cell::Flags, color::Colors},
+    grid::{Dimensions, Scroll},
+    term::{Config, Term, TermDamage, TermMode, cell::Flags, color::Colors, point_to_viewport},
     vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use germinal_ports::{
@@ -201,6 +201,27 @@ impl AlacrittyTerminalStore {
         }
     }
 
+    pub fn scroll_display(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        scroll: Scroll,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+
+        let previous_offset = state.term.grid().display_offset();
+        state.term.scroll_display(scroll);
+        if state.term.grid().display_offset() == previous_offset {
+            return false;
+        }
+
+        state.latest_seq = seq;
+        true
+    }
+
     fn snapshot_from_state(
         render_target_id: RenderTargetId,
         state: &mut AlacrittyTermState,
@@ -348,7 +369,9 @@ impl AlacrittyTerminalStore {
     ) -> Option<RenderSurfaceCursorSnapshot> {
         let inner = self.inner.borrow();
         let state = inner.get(&render_target_id)?;
-        if !state.term.mode().contains(TermMode::SHOW_CURSOR) {
+        if state.term.grid().display_offset() != 0
+            || !state.term.mode().contains(TermMode::SHOW_CURSOR)
+        {
             return None;
         }
 
@@ -518,18 +541,16 @@ fn visible_lines_and_runs(
     term: &Term<PtyWriteEventListener>,
 ) -> (Vec<TerminalLineSnapshot>, Vec<TerminalTextRunSnapshot>) {
     let renderable = term.renderable_content();
+    let display_offset = renderable.display_offset;
     let mut cells_by_row: BTreeMap<u32, Vec<StyledCell>> = BTreeMap::new();
 
     for indexed in renderable.display_iter {
-        let raw_row = indexed.point.line.0;
-        let raw_col = indexed.point.column.0;
-        let cell = indexed.cell;
-
-        let Some(row) = u32::try_from(raw_row).ok() else {
+        let Some(point) = point_to_viewport(display_offset, indexed.point) else {
             continue;
         };
-
-        let col = raw_col as u32;
+        let cell = indexed.cell;
+        let row = point.line as u32;
+        let col = point.column.0 as u32;
 
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == KITTY_IMAGE_PLACEHOLDER {
             continue;
@@ -565,6 +586,7 @@ fn visible_lines_and_runs(
 
 fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurfaceRowSnapshot> {
     let renderable = term.renderable_content();
+    let display_offset = renderable.display_offset;
     let mut rows = Vec::new();
     let mut current_row = None::<u32>;
     let mut current_runs = Vec::new();
@@ -574,15 +596,12 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
     let mut current_style = None::<TextStyleDto>;
 
     for indexed in renderable.display_iter {
-        let raw_row = indexed.point.line.0;
-        let raw_col = indexed.point.column.0;
-        let cell = indexed.cell;
-
-        let Some(row) = u32::try_from(raw_row).ok() else {
+        let Some(point) = point_to_viewport(display_offset, indexed.point) else {
             continue;
         };
-
-        let col = raw_col as u32;
+        let cell = indexed.cell;
+        let row = point.line as u32;
+        let col = point.column.0 as u32;
 
         if current_row != Some(row) {
             if let Some(style) = current_style.take() {
@@ -660,9 +679,13 @@ fn visible_surface_rows(term: &Term<PtyWriteEventListener>) -> Vec<RenderSurface
 }
 
 fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlaceholderCell> {
-    term.renderable_content()
+    let renderable = term.renderable_content();
+    let display_offset = renderable.display_offset;
+
+    renderable
         .display_iter
         .filter_map(|indexed| {
+            let point = point_to_viewport(display_offset, indexed.point)?;
             let cell = indexed.cell;
             if cell.c != KITTY_IMAGE_PLACEHOLDER {
                 return None;
@@ -672,8 +695,8 @@ fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlace
             };
             Some(KittyPlaceholderCell {
                 image_id: u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b),
-                x_cell: u32::try_from(indexed.point.column.0).ok()?,
-                y_cell: u32::try_from(indexed.point.line.0).ok()?,
+                x_cell: u32::try_from(point.column.0).ok()?,
+                y_cell: u32::try_from(point.line).ok()?,
             })
         })
         .collect()
@@ -1045,6 +1068,64 @@ mod tests {
             store.cursor_snapshot(target_id).unwrap().shape,
             RenderSurfaceCursorShape::Underline,
         );
+    }
+
+    #[test]
+    fn scroll_display_reveals_history_and_hides_the_live_cursor() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(47);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
+
+        let live_text: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(!live_text.contains("one"));
+        assert!(live_text.contains("three"));
+
+        assert!(store.scroll_display(target_id, Seq::new(2), Scroll::Delta(1)));
+        let history_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        let history_text: String = history_snapshot
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(history_text.contains("one"));
+        assert!(!history_text.contains("three"));
+        assert_eq!(history_snapshot.latest_seq, Seq::new(2));
+        assert!(store.cursor_snapshot(target_id).is_none());
+
+        assert!(store.scroll_display(target_id, Seq::new(3), Scroll::Bottom));
+        assert!(store.cursor_snapshot(target_id).is_some());
+        assert!(!store.scroll_display(target_id, Seq::new(4), Scroll::Bottom));
+    }
+
+    #[test]
+    fn alternate_screen_does_not_scroll_into_primary_history() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
+        let target_id = RenderTargetId::new(48);
+        store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b[?1049halt");
+
+        assert!(!store.scroll_display(target_id, Seq::new(3), Scroll::Delta(1)));
+        let alternate_text: String = store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(alternate_text.contains("alt"));
+        assert!(!alternate_text.contains("one"));
+
+        store.apply_bytes(target_id, Seq::new(4), b"\x1b[?1049l");
+        assert!(store.scroll_display(target_id, Seq::new(5), Scroll::Delta(1)));
     }
 
     #[test]
