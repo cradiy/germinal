@@ -3,27 +3,27 @@ use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::S
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
-	App(AppRuntimeEvent),
-	Workspace(WorkspaceRuntimeEvent),
-	GShell(GShellRuntimeEvent),
+    App(AppRuntimeEvent),
+    Workspace(WorkspaceRuntimeEvent),
+    GShell(GShellRuntimeEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppRuntimeEvent {
-	ShutdownRequested,
+    ShutdownRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceRuntimeEvent {
-	RedrawRequested,
+    RedrawRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GShellRuntimeEvent {
-	EnterGNative { gshell_id: GShellId },
-	GNativeConnected { accepted: GNativeSessionAccepted },
-	GNativeConnectionFailed { gshell_id: GShellId, reason: String },
-	ExitGNative { gshell_id: GShellId },
-	FrameReady { gshell_id: GShellId, seq: Seq },
-	Closed { gshell_id: GShellId },
+    EnterGNative { gshell_id: GShellId },
+    GNativeConnected { accepted: GNativeSessionAccepted },
+    GNativeConnectionFailed { gshell_id: GShellId, reason: String },
+    ExitGNative { gshell_id: GShellId },
+    FrameReady { gshell_id: GShellId, seq: Seq },
+    Closed { gshell_id: GShellId },
 }

@@ -1,16 +1,16 @@
 [package]
-name                 = "germinal-gnative-demo"
-version.workspace    = true
-edition.workspace    = true
-license.workspace    = true
+name = "germinal-gnative-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository.workspace = true
-authors.workspace    = true
+authors.workspace = true
 
 [dependencies]
-germinal-domain.workspace           = true
+germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
-germinal-gnative-sdk.workspace      = true
-germinal-gnative-ui.workspace       = true
-germinal-gnative-widgets.workspace  = true
-germinal-ports.workspace            = true
-thiserror.workspace                 = true
+germinal-gnative-sdk.workspace = true
+germinal-gnative-ui.workspace = true
+germinal-gnative-widgets.workspace = true
+germinal-ports.workspace = true
+thiserror.workspace = true

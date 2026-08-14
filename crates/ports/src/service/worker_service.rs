@@ -5,14 +5,14 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::
 use crate::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 pub trait IWorkerService {
-	type TerminalWorkerSender;
+    type TerminalWorkerSender;
 
-	fn start_worker_pool(&self);
-	fn spawn_terminal_worker(
-		&self,
-		gshell_id: GShellId,
-		initial_size: TerminalGridSize,
-		surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-		snapshot_wake_pending: Arc<AtomicBool>,
-	) -> Option<Self::TerminalWorkerSender>;
+    fn start_worker_pool(&self);
+    fn spawn_terminal_worker(
+        &self,
+        gshell_id: GShellId,
+        initial_size: TerminalGridSize,
+        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        snapshot_wake_pending: Arc<AtomicBool>,
+    ) -> Option<Self::TerminalWorkerSender>;
 }

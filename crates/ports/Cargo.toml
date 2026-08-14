@@ -1,15 +1,15 @@
 [package]
-name                 = "germinal-ports"
-version.workspace    = true
-edition.workspace    = true
-license.workspace    = true
+name = "germinal-ports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository.workspace = true
-authors.workspace    = true
+authors.workspace = true
 
 [dependencies]
-germinal-domain.workspace           = true
+germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
-serde.workspace                     = true
-serde_json.workspace                = true
-thiserror.workspace                 = true
-unicode-width.workspace             = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true

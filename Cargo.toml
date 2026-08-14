@@ -15,63 +15,63 @@ members = [
 ]
 
 [workspace.package]
-version    = "0.0.1"
-edition    = "2024"
-license    = "MIT"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
 repository = "https://github.com/zooeywm/germinal"
-authors    = ["zooeywm <zooeywm@gmail.com>"]
+authors = ["zooeywm <zooeywm@gmail.com>"]
 
 [workspace.dependencies]
-germinal-domain           = { path = "crates/domain" }
-germinal-ports            = { path = "crates/ports" }
-germinal-application      = { path = "crates/application" }
-germinal-infra            = { path = "crates/infra" }
-germinal-gnative-core     = { path = "crates/gnative_core" }
+germinal-domain = { path = "crates/domain" }
+germinal-ports = { path = "crates/ports" }
+germinal-application = { path = "crates/application" }
+germinal-infra = { path = "crates/infra" }
+germinal-gnative-core = { path = "crates/gnative_core" }
 germinal-gnative-protocol = { path = "crates/gnative_protocol" }
-germinal-gnative-ui       = { path = "crates/gnative_ui" }
-germinal-gnative-widgets  = { path = "crates/gnative_widgets" }
-germinal-gnative-sdk      = { path = "crates/gnative_sdk" }
+germinal-gnative-ui = { path = "crates/gnative_ui" }
+germinal-gnative-widgets = { path = "crates/gnative_widgets" }
+germinal-gnative-sdk = { path = "crates/gnative_sdk" }
 
 # util
-unicode-width      = "0.2"
-serde              = { version = "1", features = ["derive"] }
-serde_json         = "1"
-thiserror          = "2"
-eros               = "0.6"
-tracing            = "0.1"
+unicode-width = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+eros = "0.6"
+tracing = "0.1"
 tracing-subscriber = "0.3"
-toml               = "1.1"
-base64             = "0.22"
-flate2             = "1"
-png                = "0.18"
+toml = "1.1"
+base64 = "0.22"
+flate2 = "1"
+png = "0.18"
 
 # application
 kudi = "0.1"
 
 # infra
-alacritty_terminal   = "0.26"
-wgpu                 = "30.0"
-crossfont            = "0.9"
-winit                = "0.30"
-pollster             = "0.4"
-portable-pty         = "0.9"
-nix                  = { version = "0.31", default-features = false }
-compio               = { version = "0.19", default-features = false }
-rayon                = "1"
-ash                  = "0.38"
-gstreamer            = { version = "0.25.3", features = ["v1_28"] }
-gstreamer-app        = { version = "0.25.2", features = ["v1_28"] }
-gstreamer-audio      = { version = "0.25.3", features = ["v1_28"] }
-gstreamer-video      = { version = "0.25.3", features = ["v1_28"] }
+alacritty_terminal = "0.26"
+wgpu = "30.0"
+crossfont = "0.9"
+winit = "0.30"
+pollster = "0.4"
+portable-pty = "0.9"
+nix = { version = "0.31", default-features = false }
+compio = { version = "0.19", default-features = false }
+rayon = "1"
+ash = "0.38"
+gstreamer = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-app = { version = "0.25.2", features = ["v1_28"] }
+gstreamer-audio = { version = "0.25.3", features = ["v1_28"] }
+gstreamer-video = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-allocators = { version = "0.25.2", features = ["v1_28"] }
-arboard              = { version = "3", features = ["wayland-data-control"] }
+arboard = { version = "3", features = ["wayland-data-control"] }
 
 [profile.product]
-inherits      = "release"
-opt-level     = 3
-debug         = false
-strip         = "none"
-lto           = true
+inherits = "release"
+opt-level = 3
+debug = false
+strip = "none"
+lto = true
 codegen-units = 1
-incremental   = false
-panic         = "abort"
+incremental = false
+panic = "abort"

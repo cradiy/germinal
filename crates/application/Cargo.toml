@@ -1,16 +1,16 @@
 [package]
-name                 = "germinal-application"
-version.workspace    = true
-edition.workspace    = true
-license.workspace    = true
+name = "germinal-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository.workspace = true
-authors.workspace    = true
+authors.workspace = true
 
 [dependencies]
-germinal-domain.workspace           = true
+germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
-germinal-ports.workspace            = true
+germinal-ports.workspace = true
 
-kudi.workspace      = true
-tracing.workspace   = true
+kudi.workspace = true
+tracing.workspace = true
 thiserror.workspace = true

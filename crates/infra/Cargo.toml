@@ -1,39 +1,39 @@
 [package]
-name                 = "germinal-infra"
-version.workspace    = true
-edition.workspace    = true
-license.workspace    = true
+name = "germinal-infra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository.workspace = true
-authors.workspace    = true
+authors.workspace = true
 
 [dependencies]
-germinal-ports.workspace            = true
-germinal-domain.workspace           = true
+germinal-ports.workspace = true
+germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
 
-alacritty_terminal.workspace   = true
-wgpu.workspace                 = true
-crossfont.workspace            = true
-unicode-width.workspace        = true
-winit.workspace                = true
-pollster.workspace             = true
-portable-pty.workspace         = true
-serde.workspace                = true
-serde_json.workspace           = true
-tracing.workspace              = true
-thiserror.workspace            = true
-rayon.workspace                = true
-ash.workspace                  = true
-gstreamer.workspace            = true
-gstreamer-app.workspace        = true
-gstreamer-audio.workspace      = true
-gstreamer-video.workspace      = true
+alacritty_terminal.workspace = true
+wgpu.workspace = true
+crossfont.workspace = true
+unicode-width.workspace = true
+winit.workspace = true
+pollster.workspace = true
+portable-pty.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+ash.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-audio.workspace = true
+gstreamer-video.workspace = true
 gstreamer-allocators.workspace = true
-compio                         = { workspace = true, features = ["runtime", "time", "io", "fs", "net"] }
-flume                          = "0.11"
-base64.workspace              = true
-flate2.workspace              = true
-png.workspace                 = true
+compio = { workspace = true, features = ["runtime", "time", "io", "fs", "net"] }
+flume = "0.11"
+base64.workspace = true
+flate2.workspace = true
+png.workspace = true
 
 
 [target.'cfg(unix)'.dependencies]
