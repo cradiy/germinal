@@ -61,7 +61,7 @@ impl AppPaths {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GerminalConfig {
     pub window: WindowConfig,
@@ -212,24 +212,7 @@ fn expand_home(path: &Path) -> PathBuf {
     PathBuf::from(home).join(components.as_path())
 }
 
-impl Default for GerminalConfig {
-    fn default() -> Self {
-        Self {
-            window: WindowConfig::default(),
-            font: FontConfig::default(),
-            cursor: CursorConfig::default(),
-            colors: ColorsConfig::default(),
-            terminal: TerminalConfig::default(),
-            scrolling: ScrollingConfig::default(),
-            bell: BellConfig::default(),
-            tabs: TabsConfig::default(),
-            keyboard: KeyboardConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,16 +227,6 @@ impl ColorsConfig {
     fn resolve(&mut self, config_dir: &Path) -> Result<(), String> {
         self.resolved = kitty_colors::resolve_color_theme(self, config_dir)?;
         Ok(())
-    }
-}
-
-impl Default for ColorsConfig {
-    fn default() -> Self {
-        Self {
-            theme: None,
-            overrides: BTreeMap::new(),
-            resolved: TerminalColorTheme::default(),
-        }
     }
 }
 
@@ -645,20 +618,15 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {

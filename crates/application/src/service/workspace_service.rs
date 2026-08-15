@@ -335,6 +335,12 @@ impl WorkspaceServiceState {
     }
 }
 
+impl Default for WorkspaceServiceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn default_tab_title() -> String {
     let Ok(current_dir) = env::current_dir() else {
         return ".".to_string();

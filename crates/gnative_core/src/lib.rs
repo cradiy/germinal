@@ -368,6 +368,12 @@ impl IntoDivChild for Video {
     }
 }
 
+impl Default for Div {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Div {
     pub fn new() -> Self {
         Self {

@@ -662,7 +662,7 @@ fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool
     let remaining_nanos = interval_nanos.saturating_sub(phase_elapsed_nanos);
     let remaining = Duration::from_nanos(u64::try_from(remaining_nanos).unwrap_or(u64::MAX));
 
-    (phase % 2 == 0, now + remaining)
+    (phase.is_multiple_of(2), now + remaining)
 }
 
 const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);

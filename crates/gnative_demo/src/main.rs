@@ -1637,7 +1637,7 @@ fn scan_video_entries(path: &str) -> Result<Vec<VideoEntry>, DemoError> {
         videos.push(VideoEntry { name, path });
     }
 
-    videos.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    videos.sort_by_key(|video| video.name.to_lowercase());
     Ok(videos)
 }
 

@@ -79,10 +79,9 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         font_size_px: f32,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
         Ok(Self {
-            source: WgpuTerminalGlyphAtlasSource::Crossfont(WgpuCrossfontGlyphAtlasBuilder::new(
-                font_family,
-                font_size_px,
-            )?),
+            source: WgpuTerminalGlyphAtlasSource::Crossfont(Box::new(
+                WgpuCrossfontGlyphAtlasBuilder::new(font_family, font_size_px)?,
+            )),
             texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
             cache: RefCell::new(HashMap::new()),
         })
@@ -90,7 +89,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
     pub fn with_crossfont_builder(crossfont_builder: WgpuCrossfontGlyphAtlasBuilder) -> Self {
         Self {
-            source: WgpuTerminalGlyphAtlasSource::Crossfont(crossfont_builder),
+            source: WgpuTerminalGlyphAtlasSource::Crossfont(Box::new(crossfont_builder)),
             texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
             cache: RefCell::new(HashMap::new()),
         }
@@ -182,7 +181,7 @@ impl Default for WgpuTerminalGlyphAtlasFrameBuilder {
 #[derive(Debug, Clone)]
 pub enum WgpuTerminalGlyphAtlasSource {
     Debug5x7(WgpuDebugGlyphAtlasBuilder),
-    Crossfont(WgpuCrossfontGlyphAtlasBuilder),
+    Crossfont(Box<WgpuCrossfontGlyphAtlasBuilder>),
 }
 
 impl WgpuTerminalGlyphAtlasSource {

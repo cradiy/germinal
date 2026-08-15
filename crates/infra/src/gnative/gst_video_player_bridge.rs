@@ -299,8 +299,7 @@ impl LinuxPlaybackRuntime {
         if !canonical_path.is_file() {
             return Err(GstVideoPlayerBridgeError::UnreadableVideoPath {
                 path: path.to_string(),
-            }
-            .into());
+            });
         }
 
         self.stop_current();
@@ -491,7 +490,7 @@ fn video_surface_frame_from_sample(
         .caps()
         .ok_or(GstVideoPlayerBridgeError::SampleMissingCaps)?;
     if !gst_video::is_dma_drm_caps(caps) {
-        return Err(GstVideoPlayerBridgeError::SampleCapsNotDmaDrm.into());
+        return Err(GstVideoPlayerBridgeError::SampleCapsNotDmaDrm);
     }
 
     let info = gst_video::VideoInfoDmaDrm::from_caps(caps)
@@ -499,7 +498,7 @@ fn video_surface_frame_from_sample(
     let format = gst_video::dma_drm_fourcc_to_format(info.fourcc())
         .map_err(|source| GstVideoPlayerBridgeError::DecodeVideoFormat { source })?;
     if format != gst_video::VideoFormat::Nv12 {
-        return Err(GstVideoPlayerBridgeError::UnsupportedVideoFormat { format }.into());
+        return Err(GstVideoPlayerBridgeError::UnsupportedVideoFormat { format });
     }
 
     let buffer = sample
@@ -507,18 +506,11 @@ fn video_surface_frame_from_sample(
         .ok_or(GstVideoPlayerBridgeError::SampleMissingBuffer)?;
     let (offsets, strides) = plane_layout(buffer, &info);
     if offsets.len() < 2 || strides.len() < 2 {
-        return Err(GstVideoPlayerBridgeError::Nv12PlaneLayoutMissing.into());
+        return Err(GstVideoPlayerBridgeError::Nv12PlaneLayoutMissing);
     }
     let color_profile = color_profile_from_video_info(&info);
 
-    let y_plane = dma_buf_plane_from_memory(
-        buffer,
-        0,
-        if buffer.n_memory() == 1 { 0 } else { 0 },
-        offsets[0],
-        strides[0],
-        info.modifier(),
-    )?;
+    let y_plane = dma_buf_plane_from_memory(buffer, 0, 0, offsets[0], strides[0], info.modifier())?;
     let uv_plane = dma_buf_plane_from_memory(
         buffer,
         1,
@@ -597,8 +589,7 @@ fn dma_buf_plane_from_memory(
             plane_index,
             memory_index,
             memory_count: buffer.n_memory(),
-        }
-        .into());
+        });
     }
 
     let memory = buffer.peek_memory(memory_index);
@@ -634,7 +625,7 @@ fn duplicate_dmabuf_fd(memory: &gst::MemoryRef) -> Result<OwnedFd, GstVideoPlaye
         return duplicate_raw_fd(exported.fd());
     }
 
-    Err(GstVideoPlayerBridgeError::MemoryNotBackedByDmaBuf.into())
+    Err(GstVideoPlayerBridgeError::MemoryNotBackedByDmaBuf)
 }
 
 #[cfg(target_os = "linux")]

@@ -336,6 +336,12 @@ pub struct GroupBox {
     fill: bool,
 }
 
+impl Default for GroupBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GroupBox {
     pub fn new() -> Self {
         Self {
@@ -576,13 +582,14 @@ impl IntoElementNode for Input {
             container = container.border_1();
         }
 
-        if self.state.value().is_empty() && !self.state.is_focused() {
-            if let Some(placeholder) = self.state.placeholder_text() {
-                return container
-                    .text_color(rgb(112, 118, 132))
-                    .child(placeholder.to_string())
-                    .into_element();
-            }
+        if self.state.value().is_empty()
+            && !self.state.is_focused()
+            && let Some(placeholder) = self.state.placeholder_text()
+        {
+            return container
+                .text_color(rgb(112, 118, 132))
+                .child(placeholder.to_string())
+                .into_element();
         }
 
         container

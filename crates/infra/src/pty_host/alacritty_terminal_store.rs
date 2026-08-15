@@ -1552,13 +1552,13 @@ fn visible_surface_rows(
                 current_text.clear();
             }
 
-            if let Some(previous_row) = current_row.replace(row) {
-                if !current_runs.is_empty() {
-                    rows.push(RenderSurfaceRowSnapshot {
-                        y: previous_row,
-                        runs: std::mem::take(&mut current_runs),
-                    });
-                }
+            if let Some(previous_row) = current_row.replace(row)
+                && !current_runs.is_empty()
+            {
+                rows.push(RenderSurfaceRowSnapshot {
+                    y: previous_row,
+                    runs: std::mem::take(&mut current_runs),
+                });
             }
         }
 
@@ -1617,13 +1617,13 @@ fn visible_surface_rows(
         push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, style);
     }
 
-    if let Some(row) = current_row {
-        if !current_runs.is_empty() {
-            rows.push(RenderSurfaceRowSnapshot {
-                y: row,
-                runs: current_runs,
-            });
-        }
+    if let Some(row) = current_row
+        && !current_runs.is_empty()
+    {
+        rows.push(RenderSurfaceRowSnapshot {
+            y: row,
+            runs: current_runs,
+        });
     }
 
     rows
@@ -3085,9 +3085,11 @@ mod tests {
 
     #[test]
     fn applies_configured_kitty_palette_and_default_colors() {
-        let mut color_theme = TerminalColorTheme::default();
-        color_theme.foreground = RgbColorDto::new(210, 211, 212);
-        color_theme.background = RgbColorDto::new(20, 21, 22);
+        let mut color_theme = TerminalColorTheme {
+            foreground: RgbColorDto::new(210, 211, 212),
+            background: RgbColorDto::new(20, 21, 22),
+            ..TerminalColorTheme::default()
+        };
         color_theme.palette[4] = RgbColorDto::new(40, 80, 160);
         let store = AlacrittyTerminalStore::with_size_scrollback_cursor_style_osc52_and_colors(
             AlacrittyTermSize::default(),

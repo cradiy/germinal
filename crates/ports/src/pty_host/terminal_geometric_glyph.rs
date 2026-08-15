@@ -468,14 +468,13 @@ fn merge_adjacent_rect_rows(
 ) -> Vec<TerminalGeometricGlyphRect> {
     let mut merged: Vec<TerminalGeometricGlyphRect> = Vec::new();
     for rect in rects {
-        if let Some(last) = merged.last_mut() {
-            if last.x_px == rect.x_px
-                && last.width_px == rect.width_px
-                && last.y_px + last.height_px == rect.y_px
-            {
-                last.height_px += rect.height_px;
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.x_px == rect.x_px
+            && last.width_px == rect.width_px
+            && last.y_px + last.height_px == rect.y_px
+        {
+            last.height_px += rect.height_px;
+            continue;
         }
         merged.push(rect);
     }

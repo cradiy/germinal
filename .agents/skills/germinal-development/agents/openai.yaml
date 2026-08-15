@@ -1,0 +1,4 @@
+interface:
+  display_name: "Germinal Development"
+  short_description: "Develop, test, and lint the Germinal workspace"
+  default_prompt: "Use $germinal-development to implement and verify a change in Germinal."

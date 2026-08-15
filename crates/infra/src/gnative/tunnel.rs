@@ -588,7 +588,7 @@ where
                 if read_buffer.is_empty() {
                     return Ok(None);
                 }
-                return Err(GNativeTunnelError::AppClosedMidMessage.into());
+                return Err(GNativeTunnelError::AppClosedMidMessage);
             }
             n => {
                 chunk.truncate(n);

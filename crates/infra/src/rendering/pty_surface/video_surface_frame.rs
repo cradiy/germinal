@@ -53,12 +53,12 @@ impl WgpuVideoSurfaceNv12GpuFrame {
         width_px: u32,
         height_px: u32,
         color_profile: WgpuVideoSurfaceColorProfile,
-        y_texture: Arc<wgpu::Texture>,
-        y_plane: wgpu::TextureView,
-        uv_texture: Arc<wgpu::Texture>,
-        uv_plane: wgpu::TextureView,
+        y_plane: (Arc<wgpu::Texture>, wgpu::TextureView),
+        uv_plane: (Arc<wgpu::Texture>, wgpu::TextureView),
         plane_sampler: wgpu::Sampler,
     ) -> Self {
+        let (y_texture, y_plane) = y_plane;
+        let (uv_texture, uv_plane) = uv_plane;
         Self {
             width_px,
             height_px,

@@ -53,16 +53,20 @@ const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const TERMINAL_WORKER_PERF_LOG_ENV: &str = "GERMINAL_TERMINAL_WORKER_PERF_LOG";
 const TERMINAL_WORKER_POOL_ENV: &str = "GERMINAL_TERMINAL_WORKER_THREADS";
 
-struct TerminalWorkerRegistration<Dispatch> {
+struct TerminalWorkerConfig<Dispatch> {
     proxy: Dispatch,
     gshell_id: GShellId,
-    initial_size: TerminalGridSize,
+    initial_size: AlacrittyTermSize,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
     color_theme: TerminalColorTheme,
     osc52_mode: TerminalOsc52Mode,
     surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
     snapshot_wake_pending: Arc<AtomicBool>,
+}
+
+struct TerminalWorkerRegistration<Dispatch> {
+    config: TerminalWorkerConfig<Dispatch>,
     input_rx: Receiver<TerminalWorkerInput>,
 }
 
@@ -83,17 +87,7 @@ where
 {
     fn new(registration: TerminalWorkerRegistration<Dispatch>) -> Self {
         Self {
-            runtime: TerminalWorkerRuntime::new(
-                registration.proxy,
-                registration.gshell_id,
-                to_alacritty_term_size(registration.initial_size),
-                registration.scrollback_history,
-                registration.cursor_style,
-                registration.color_theme,
-                registration.osc52_mode,
-                registration.surface_snapshot_tx,
-                registration.snapshot_wake_pending,
-            ),
+            runtime: TerminalWorkerRuntime::new(registration.config),
             input_rx: registration.input_rx,
         }
     }
@@ -186,29 +180,13 @@ where
 
     fn spawn_terminal_worker(
         &self,
-        proxy: Dispatch,
-        gshell_id: GShellId,
-        initial_size: TerminalGridSize,
-        scrollback_history: usize,
-        cursor_style: TerminalCursorStyle,
-        color_theme: TerminalColorTheme,
-        osc52_mode: TerminalOsc52Mode,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-        snapshot_wake_pending: Arc<AtomicBool>,
+        config: TerminalWorkerConfig<Dispatch>,
     ) -> SyncSender<TerminalWorkerInput> {
         let (tx, rx) = mpsc::sync_channel::<TerminalWorkerInput>(TERMINAL_INPUT_CHANNEL_CAPACITY);
         let lane_index =
             self.next_lane.fetch_add(1, Ordering::Relaxed) % self.registration_txs.len();
         let registration = TerminalWorkerRegistration {
-            proxy,
-            gshell_id,
-            initial_size,
-            scrollback_history,
-            cursor_style,
-            color_theme,
-            osc52_mode,
-            surface_snapshot_tx,
-            snapshot_wake_pending,
+            config,
             input_rx: rx,
         };
 
@@ -311,38 +289,28 @@ impl<Dispatch> TerminalWorkerRuntime<Dispatch>
 where
     Dispatch: IRuntimeEventDispatcher,
 {
-    fn new(
-        proxy: Dispatch,
-        gshell_id: GShellId,
-        initial_size: AlacrittyTermSize,
-        scrollback_history: usize,
-        cursor_style: TerminalCursorStyle,
-        color_theme: TerminalColorTheme,
-        osc52_mode: TerminalOsc52Mode,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-        snapshot_wake_pending: Arc<AtomicBool>,
-    ) -> Self {
-        let target_id = RenderTargetId::new(gshell_id.value());
+    fn new(config: TerminalWorkerConfig<Dispatch>) -> Self {
+        let target_id = RenderTargetId::new(config.gshell_id.value());
         let terminal_store =
             AlacrittyTerminalStore::with_size_scrollback_cursor_style_osc52_and_colors(
-                initial_size,
-                scrollback_history,
-                cursor_style,
-                osc52_mode,
-                color_theme,
+                config.initial_size,
+                config.scrollback_history,
+                config.cursor_style,
+                config.osc52_mode,
+                config.color_theme,
             );
 
         Self {
-            proxy,
+            proxy: config.proxy,
 
-            gshell_id,
+            gshell_id: config.gshell_id,
             target_id,
             seq: 0,
 
             terminal_store,
 
-            surface_snapshot_tx,
-            snapshot_wake_pending,
+            surface_snapshot_tx: config.surface_snapshot_tx,
+            snapshot_wake_pending: config.snapshot_wake_pending,
 
             pending_chunks: Vec::new(),
             pending_bytes_len: 0,
@@ -1111,17 +1079,17 @@ where
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
-        self.pool().spawn_terminal_worker(
-            self.proxy.clone(),
+        self.pool().spawn_terminal_worker(TerminalWorkerConfig {
+            proxy: self.proxy.clone(),
             gshell_id,
-            initial_size,
-            self.scrollback_history,
-            self.cursor_style,
-            self.color_theme,
-            self.osc52_mode,
+            initial_size: to_alacritty_term_size(initial_size),
+            scrollback_history: self.scrollback_history,
+            cursor_style: self.cursor_style,
+            color_theme: self.color_theme,
+            osc52_mode: self.osc52_mode,
             surface_snapshot_tx,
             snapshot_wake_pending,
-        )
+        })
     }
 }
 
@@ -1157,7 +1125,7 @@ mod tests {
 
     use super::{
         PlatformTerminalWorkerBackend, TerminalColorTheme, TerminalCursorStyle, TerminalOsc52Mode,
-        TerminalWorkerRuntime,
+        TerminalWorkerConfig, TerminalWorkerRuntime,
     };
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
@@ -1550,17 +1518,17 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let wake_pending = Arc::new(AtomicBool::new(false));
-        let mut runtime = TerminalWorkerRuntime::new(
-            TestDispatcher { tx: event_tx },
-            GShellId::new(5),
-            super::AlacrittyTermSize::new(20, 4),
-            TEST_SCROLLBACK_HISTORY,
-            TerminalCursorStyle::default(),
-            TerminalColorTheme::default(),
-            TerminalOsc52Mode::default(),
-            snapshot_tx,
-            wake_pending.clone(),
-        );
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(5),
+            initial_size: super::AlacrittyTermSize::new(20, 4),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: wake_pending.clone(),
+        });
 
         let initial_seq = runtime.apply_byte_chunks(&[b"old".to_vec()]).unwrap();
         runtime.unpublished_seq = Some(initial_seq);
@@ -1599,17 +1567,17 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
         let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let (pty_tx, pty_rx) = pty_input_channel();
-        let mut runtime = TerminalWorkerRuntime::new(
-            TestDispatcher { tx: event_tx },
-            GShellId::new(9),
-            super::AlacrittyTermSize::new(20, 4),
-            TEST_SCROLLBACK_HISTORY,
-            TerminalCursorStyle::default(),
-            TerminalColorTheme::default(),
-            TerminalOsc52Mode::CopyPaste,
-            snapshot_tx,
-            Arc::new(AtomicBool::new(false)),
-        );
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(9),
+            initial_size: super::AlacrittyTermSize::new(20, 4),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::CopyPaste,
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
         runtime.pty_input_tx = Some(pty_tx);
 
         runtime.apply_byte_chunks(&[b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07".to_vec()]);

@@ -57,7 +57,7 @@ pub fn import_nv12_dmabuf_frame(
     if frame.width_px == 0 || frame.height_px == 0 {
         return Err(VideoSurfaceImportError::EmptyFrame);
     }
-    if frame.width_px % 2 != 0 || frame.height_px % 2 != 0 {
+    if !frame.width_px.is_multiple_of(2) || !frame.height_px.is_multiple_of(2) {
         return Err(VideoSurfaceImportError::OddDimensions {
             width_px: frame.width_px,
             height_px: frame.height_px,
@@ -126,10 +126,8 @@ pub fn import_nv12_dmabuf_frame(
         frame.width_px,
         frame.height_px,
         frame.color_profile,
-        y_texture,
-        y_plane,
-        uv_texture,
-        uv_plane,
+        (y_texture, y_plane),
+        (uv_texture, uv_plane),
         plane_sampler,
     ))
 }

@@ -9,13 +9,16 @@ pub enum RepositoryError {
     InconsistentData,
 }
 
+pub type RepositoryResult<T> = Result<T, RepositoryError>;
+pub type RepositoryEntry<Id, Aggregate> = (Id, Aggregate);
+
 pub trait IRepository {
     type Id: Copy + Eq;
     type Aggregate: AggregateRoot;
 
-    fn get(&self, id: Self::Id) -> Result<Option<Self::Aggregate>, RepositoryError>;
-    fn list(&self) -> Result<Vec<(Self::Id, Self::Aggregate)>, RepositoryError>;
-    fn insert(&self, aggregate: Self::Aggregate) -> Result<Self::Id, RepositoryError>;
-    fn update(&self, id: Self::Id, aggregate: Self::Aggregate) -> Result<(), RepositoryError>;
-    fn delete(&self, id: Self::Id) -> Result<(), RepositoryError>;
+    fn get(&self, id: Self::Id) -> RepositoryResult<Option<Self::Aggregate>>;
+    fn list(&self) -> RepositoryResult<Vec<RepositoryEntry<Self::Id, Self::Aggregate>>>;
+    fn insert(&self, aggregate: Self::Aggregate) -> RepositoryResult<Self::Id>;
+    fn update(&self, id: Self::Id, aggregate: Self::Aggregate) -> RepositoryResult<()>;
+    fn delete(&self, id: Self::Id) -> RepositoryResult<()>;
 }
