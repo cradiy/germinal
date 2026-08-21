@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     process::Command,
     time::{Duration, Instant},
@@ -31,6 +31,7 @@ use germinal_domain::{
         },
     },
 };
+use germinal_infra::rendering::pty_surface::render_plugin::WgpuPaneRenderPlugin;
 use germinal_infra::{
     gnative::gst_video_player_bridge::GstVideoPlayerBridge,
     pty::PlatformPtyBackend,
@@ -97,6 +98,8 @@ pub struct App {
     terminal_worker_backend: PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
     render_runtime_factory: WgpuTerminalWindowRuntimeFactory,
     render_runtime: Option<WgpuTerminalWindowRuntime>,
+    pending_wgpu_pane_plugins: Vec<WgpuPaneRenderPlugin>,
+    wgpu_pane_targets: HashSet<RenderTargetId>,
     render_window_id: Option<WindowId>,
     audible_bell: AudibleBell,
     paste_controller: HostPasteController,
@@ -134,7 +137,20 @@ impl App {
         config: GerminalConfig,
         workspace: Workspace,
     ) -> AppResult<Self> {
+        Self::new_with_workspace_and_wgpu_panes(runtime_event_proxy, config, workspace, Vec::new())
+    }
+
+    pub fn new_with_workspace_and_wgpu_panes(
+        runtime_event_proxy: EventLoopProxy<RuntimeEvent>,
+        config: GerminalConfig,
+        workspace: Workspace,
+        wgpu_pane_plugins: Vec<WgpuPaneRenderPlugin>,
+    ) -> AppResult<Self> {
         let pane_navigation_enabled = workspace.active_tab().pane_count() > 1;
+        let wgpu_pane_targets = wgpu_pane_plugins
+            .iter()
+            .map(WgpuPaneRenderPlugin::target_id)
+            .collect();
         let runtime_event_dispatcher = AppRuntimeEventDispatcher {
             proxy: runtime_event_proxy,
         };
@@ -182,6 +198,8 @@ impl App {
                 window_opacity,
             ),
             render_runtime: None,
+            pending_wgpu_pane_plugins: wgpu_pane_plugins,
+            wgpu_pane_targets,
             render_window_id: None,
             audible_bell,
             paste_controller: HostPasteController::default(),
@@ -238,7 +256,10 @@ impl App {
 
         let runtime = self
             .render_runtime_factory
-            .create_window_runtime(window)
+            .create_window_runtime_with_plugins(
+                window,
+                std::mem::take(&mut self.pending_wgpu_pane_plugins),
+            )
             .map_err(AppError::CreateWindowRuntime)?;
         self.render_runtime = Some(runtime);
         self.render_window_id = Some(window_id);
@@ -312,6 +333,9 @@ impl App {
         let surface_snapshot_tx = self.surface_snapshot_sender();
         let snapshot_wake_pending = self.snapshot_wake_pending();
         for placement in placements {
+            if self.wgpu_pane_targets.contains(&placement.target_id) {
+                continue;
+            }
             let size_info = self.terminal_size_info_for_surface(placement);
             let spawn_config = self.pty_spawn_config_for_gshell(
                 GShellId::new(placement.target_id.value()),
@@ -360,6 +384,9 @@ impl App {
         self.set_current_workspace_render_layout(placements.clone());
 
         for placement in placements {
+            if self.wgpu_pane_targets.contains(&placement.target_id) {
+                continue;
+            }
             let size_info = self.terminal_size_info_for_surface(placement);
             self.resize_gshell(GShellId::new(placement.target_id.value()), size_info);
         }
@@ -750,10 +777,10 @@ impl App {
         }
 
         self.routed_input_modifiers = modifiers;
-        self.route_input_to_gshell(GShellInput {
-            gshell_id: self.focused_gshell(),
-            event: GShellInputEvent::Window(WindowInputEvent::ModifiersChanged(modifiers)),
-        });
+        self.route_window_input(
+            self.focused_gshell(),
+            WindowInputEvent::ModifiersChanged(modifiers),
+        );
     }
 
     fn write_selection_to_clipboard(&mut self, gshell_id: GShellId, text: Option<String>) {
@@ -844,10 +871,23 @@ impl App {
         let _ = runtime.update_ime_cursor_area(RenderTargetId::new(self.focused_gshell().value()));
     }
 
-    fn route_focus_changed(&self, gshell_id: GShellId, focused: bool) {
+    fn route_focus_changed(&mut self, gshell_id: GShellId, focused: bool) {
+        self.route_window_input(gshell_id, WindowInputEvent::FocusChanged(focused));
+    }
+
+    fn route_window_input(&mut self, gshell_id: GShellId, event: WindowInputEvent) {
+        let target_id = RenderTargetId::new(gshell_id.value());
+        if self
+            .render_runtime
+            .as_mut()
+            .is_some_and(|runtime| runtime.route_wgpu_pane_input(target_id, &event))
+        {
+            return;
+        }
+
         self.route_input_to_gshell(GShellInput {
             gshell_id,
-            event: GShellInputEvent::Window(WindowInputEvent::FocusChanged(focused)),
+            event: GShellInputEvent::Window(event),
         });
     }
 
@@ -915,23 +955,20 @@ impl App {
             self.route_pointer_left();
             self.pointer_gshell = Some(gshell_id);
         }
-        self.route_input_to_gshell(GShellInput {
+        self.route_window_input(
             gshell_id,
-            event: GShellInputEvent::Window(WindowInputEvent::PointerMoved {
+            WindowInputEvent::PointerMoved {
                 position: local_position,
                 modifiers: self.window_input_modifiers,
-            }),
-        });
+            },
+        );
     }
 
     fn route_pointer_left(&mut self) {
         let Some(gshell_id) = self.pointer_gshell.take() else {
             return;
         };
-        self.route_input_to_gshell(GShellInput {
-            gshell_id,
-            event: GShellInputEvent::Window(WindowInputEvent::PointerLeft),
-        });
+        self.route_window_input(gshell_id, WindowInputEvent::PointerLeft);
     }
 
     fn drain_media_bridge_frames(&self) {
@@ -979,6 +1016,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
         self.ensure_workspace_gshells();
         let focused_gshell = self.focused_gshell();
         self.set_focused_render_target(RenderTargetId::new(focused_gshell.value()));
+        if self.window_focused {
+            self.route_focus_changed(focused_gshell, true);
+        }
         self.prepare_render_backend();
     }
 
@@ -1189,29 +1229,29 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if let Some(position) = self.cursor_position
                     && let Some((gshell_id, local_position)) = self.pointer_input_at(position)
                 {
-                    self.route_input_to_gshell(GShellInput {
+                    self.route_window_input(
                         gshell_id,
-                        event: GShellInputEvent::Window(WindowInputEvent::PointerButton {
+                        WindowInputEvent::PointerButton {
                             state: winit_element_state_to_port(state),
                             button: winit_mouse_button_to_port(button),
                             position: local_position,
                             modifiers: self.window_input_modifiers,
-                        }),
-                    });
+                        },
+                    );
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(position) = self.cursor_position
                     && let Some((gshell_id, local_position)) = self.pointer_input_at(position)
                 {
-                    self.route_input_to_gshell(GShellInput {
+                    self.route_window_input(
                         gshell_id,
-                        event: GShellInputEvent::Window(WindowInputEvent::Scroll {
+                        WindowInputEvent::Scroll {
                             delta: winit_scroll_delta_to_port(delta),
                             position: local_position,
                             modifiers: self.window_input_modifiers,
-                        }),
-                    });
+                        },
+                    );
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1233,6 +1273,22 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     return;
                 }
 
+                let focused_gshell = self.focused_gshell();
+                let plugin_event = WindowInputEvent::Key {
+                    state,
+                    repeat,
+                    logical_key: logical_key.clone(),
+                    text: text.clone(),
+                };
+                if self.render_runtime.as_mut().is_some_and(|runtime| {
+                    runtime.route_wgpu_pane_input(
+                        RenderTargetId::new(focused_gshell.value()),
+                        &plugin_event,
+                    )
+                }) {
+                    return;
+                }
+
                 if self.try_handle_copy_shortcut(state, &logical_key, physical_key) {
                     return;
                 }
@@ -1241,15 +1297,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     return;
                 }
 
-                self.route_input_to_gshell(GShellInput {
-                    gshell_id: self.focused_gshell(),
-                    event: GShellInputEvent::Window(WindowInputEvent::Key {
-                        state,
-                        repeat,
-                        logical_key,
-                        text,
-                    }),
-                });
+                self.route_window_input(focused_gshell, plugin_event);
             }
             WindowEvent::Ime(Ime::Enabled) => {
                 self.ime_enabled = true;
@@ -1263,11 +1311,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.update_ime_cursor_area();
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                self.clear_ime_preedit(self.focused_gshell());
-                self.route_input_to_gshell(GShellInput {
-                    gshell_id: self.focused_gshell(),
-                    event: GShellInputEvent::Window(WindowInputEvent::Ime(text)),
-                });
+                let focused_gshell = self.focused_gshell();
+                self.clear_ime_preedit(focused_gshell);
+                self.route_window_input(focused_gshell, WindowInputEvent::Ime(text));
                 self.update_ime_cursor_area();
             }
             WindowEvent::Ime(Ime::Disabled) => {

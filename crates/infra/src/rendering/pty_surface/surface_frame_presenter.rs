@@ -8,6 +8,7 @@ use crate::rendering::pty_surface::{
         WgpuTerminalRenderView,
     },
     pipeline_factory::WgpuTerminalPipeline,
+    render_plugin::{WgpuPaneRenderContext, WgpuPaneRenderPlugin},
     render_target_plan::{WgpuTerminalClearColor, WgpuTerminalRenderTargetPlan},
     renderer_backend::WgpuRendererConfig,
     visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
@@ -103,10 +104,37 @@ impl WgpuTerminalSurfaceFramePresenter {
                 )
             })
             .collect();
+        let mut plugin_draw_count = 0;
+        let mut plugin_redraw_requested = false;
+        for plugin in input.render_plugins.iter_mut() {
+            let Some(placement) = input
+                .workspace_layout
+                .iter()
+                .find(|placement| placement.target_id == plugin.target_id())
+                .copied()
+            else {
+                continue;
+            };
+            let result = plugin.render(WgpuPaneRenderContext {
+                device: input.device,
+                queue: input.queue,
+                command_encoder: &mut command_encoder,
+                target_view: &target_view,
+                color_format: input.color_format,
+                placement,
+                scale_factor: input.scale_factor,
+                elapsed: input.elapsed,
+            });
+            plugin_draw_count += usize::from(result.rendered);
+            plugin_redraw_requested |= result.request_redraw;
+        }
         let render_target_plans = input
-            .surfaces
+            .workspace_layout
             .iter()
-            .map(|surface| surface.render_target_plan)
+            .map(|placement| {
+                WgpuTerminalRenderTargetPlan::new(placement.width_px, placement.height_px)
+                    .with_origin(placement.x_px, placement.y_px)
+            })
             .collect::<Vec<_>>();
         let divider_draw_count =
             self.divider_renderer
@@ -128,6 +156,8 @@ impl WgpuTerminalSurfaceFramePresenter {
         Ok(WgpuTerminalWorkspaceFramePresentResult {
             render_results,
             divider_draw_count,
+            plugin_draw_count,
+            plugin_redraw_requested,
             visual_bell_draw_count,
             acquired_surface_frame: true,
             submitted: true,
@@ -177,6 +207,12 @@ pub struct WgpuTerminalWorkspacePresentInput<'a, 'window> {
     pub queue: &'a wgpu::Queue,
     pub pipeline: &'a WgpuTerminalPipeline,
     pub surfaces: &'a [WgpuTerminalWorkspaceSurface<'a>],
+    pub workspace_layout:
+        &'a [germinal_ports::rendering::workspace_layout::RenderSurfacePlacement],
+    pub render_plugins: &'a mut [WgpuPaneRenderPlugin],
+    pub color_format: wgpu::TextureFormat,
+    pub scale_factor: f64,
+    pub elapsed: Duration,
     pub visual_bell: Option<WgpuVisualBellFrame>,
     pub clear_color: WgpuTerminalClearColor,
 }
@@ -202,6 +238,8 @@ pub struct WgpuTerminalSurfaceFrameTimings {
 pub struct WgpuTerminalWorkspaceFramePresentResult {
     pub render_results: Vec<WgpuTerminalFrameRenderResult>,
     pub divider_draw_count: usize,
+    pub plugin_draw_count: usize,
+    pub plugin_redraw_requested: bool,
     pub visual_bell_draw_count: usize,
     pub acquired_surface_frame: bool,
     pub submitted: bool,

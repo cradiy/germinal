@@ -46,6 +46,7 @@ use crate::rendering::pty_surface::{
     frame_renderer::WgpuTerminalFrameRenderer,
     pipeline_factory::{WgpuTerminalPipeline, WgpuTerminalPipelineFactory},
     pipeline_spec::WgpuTerminalPipelineSpec,
+    render_plugin::{WgpuPaneRenderPlugin, WgpuPaneResizeEvent},
     render_target_plan::{
         WgpuTerminalClearColor, WgpuTerminalLoadOp, WgpuTerminalRenderTargetPlan,
     },
@@ -115,6 +116,8 @@ pub struct WgpuTerminalWindowRuntime {
     cursor_blink_epoch: Instant,
     next_cursor_blink_at: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
+    render_plugins: Vec<WgpuPaneRenderPlugin>,
+    started_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,13 +215,22 @@ impl WgpuTerminalWindowRuntimeFactory {
         &self,
         window: Arc<Window>,
     ) -> Result<WgpuTerminalWindowRuntime, WindowRuntimeError> {
-        pollster::block_on(WgpuTerminalWindowRuntime::new(
+        self.create_window_runtime_with_plugins(window, Vec::new())
+    }
+
+    pub fn create_window_runtime_with_plugins(
+        &self,
+        window: Arc<Window>,
+        render_plugins: Vec<WgpuPaneRenderPlugin>,
+    ) -> Result<WgpuTerminalWindowRuntime, WindowRuntimeError> {
+        pollster::block_on(WgpuTerminalWindowRuntime::new_with_render_plugins(
             window,
             self.profile.clone(),
             self.base_title.clone(),
             self.cursor_blink_interval,
             self.color_theme,
             self.background_opacity,
+            render_plugins,
         ))
     }
 }
@@ -231,6 +243,27 @@ impl WgpuTerminalWindowRuntime {
         cursor_blink_interval: Duration,
         color_theme: TerminalColorTheme,
         background_opacity: f32,
+    ) -> Result<Self, WindowRuntimeError> {
+        Self::new_with_render_plugins(
+            window,
+            profile,
+            base_title,
+            cursor_blink_interval,
+            color_theme,
+            background_opacity,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn new_with_render_plugins(
+        window: Arc<Window>,
+        profile: TerminalProfile,
+        base_title: String,
+        cursor_blink_interval: Duration,
+        color_theme: TerminalColorTheme,
+        background_opacity: f32,
+        render_plugins: Vec<WgpuPaneRenderPlugin>,
     ) -> Result<Self, WindowRuntimeError> {
         let background_opacity = normalized_opacity(background_opacity);
         let instance = wgpu::Instance::default();
@@ -334,6 +367,8 @@ impl WgpuTerminalWindowRuntime {
             cursor_blink_epoch: now,
             next_cursor_blink_at: None,
             perf: WgpuTerminalRenderPerf::new(),
+            render_plugins,
+            started_at: now,
         })
     }
 
@@ -417,6 +452,8 @@ impl WgpuTerminalWindowRuntime {
         self.presenter
             .frame_renderer()
             .remove_render_target(target_id);
+        self.render_plugins
+            .retain(|plugin| plugin.target_id() != target_id);
         self.request_redraw();
     }
 
@@ -425,8 +462,41 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        let scale_factor = self.window.scale_factor();
+        for plugin in &mut self.render_plugins {
+            let Some(placement) = placements
+                .iter()
+                .find(|placement| placement.target_id == plugin.target_id())
+                .copied()
+            else {
+                continue;
+            };
+            let _ = plugin.resize(WgpuPaneResizeEvent {
+                placement,
+                scale_factor,
+            });
+        }
         self.workspace_layout = placements;
         self.request_redraw();
+    }
+
+    pub fn route_wgpu_pane_input(
+        &mut self,
+        target_id: RenderTargetId,
+        event: &germinal_ports::event::window_input_event::WindowInputEvent,
+    ) -> bool {
+        let Some(plugin) = self
+            .render_plugins
+            .iter_mut()
+            .find(|plugin| plugin.target_id() == target_id)
+        else {
+            return false;
+        };
+        let result = plugin.input(event);
+        if result.request_redraw {
+            self.request_redraw();
+        }
+        true
     }
 
     pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
@@ -512,27 +582,39 @@ impl WgpuTerminalWindowRuntime {
         let now = Instant::now();
         let visual_bell = self.visual_bell_frame(now);
         let blinking_cursor_visible = self.blinking_cursor_frame(now);
-        let mut surfaces = self
-            .workspace_layout
+        let render_plugin_targets = self
+            .render_plugins
             .iter()
-            .filter_map(|placement| {
-                let surface_snapshot = self.surface_snapshots.get(&placement.target_id)?;
-                let size_info = self.terminal_size_info_for_window_size(placement.window_size());
-                Some(WgpuTerminalWorkspaceSurface {
-                    render_target_plan: WgpuTerminalRenderTargetPlan::new(
-                        placement.width_px,
-                        placement.height_px,
-                    )
-                    .with_origin(placement.x_px, placement.y_px)
-                    .with_load_op(WgpuTerminalLoadOp::Load),
-                    surface_snapshot,
-                    renderer_config: WgpuRendererConfig::from(size_info)
-                        .with_color_theme(self.color_theme)
-                        .with_background_opacity(self.background_opacity)
-                        .with_blinking_cursor_visible(blinking_cursor_visible),
-                })
-            })
+            .map(WgpuPaneRenderPlugin::target_id)
             .collect::<Vec<_>>();
+        let profile = &self.profile;
+        let scale_factor = TerminalScaleFactor::new(self.window.scale_factor());
+        let mut surfaces =
+            self.workspace_layout
+                .iter()
+                .filter_map(|placement| {
+                    if render_plugin_targets.contains(&placement.target_id) {
+                        return None;
+                    }
+                    let surface_snapshot = self.surface_snapshots.get(&placement.target_id)?;
+                    let size_info = profile.size_info_for_window_metrics(
+                        TerminalWindowMetrics::new(placement.window_size(), scale_factor),
+                    );
+                    Some(WgpuTerminalWorkspaceSurface {
+                        render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                            placement.width_px,
+                            placement.height_px,
+                        )
+                        .with_origin(placement.x_px, placement.y_px)
+                        .with_load_op(WgpuTerminalLoadOp::Load),
+                        surface_snapshot,
+                        renderer_config: WgpuRendererConfig::from(size_info)
+                            .with_color_theme(self.color_theme)
+                            .with_background_opacity(self.background_opacity)
+                            .with_blinking_cursor_visible(blinking_cursor_visible),
+                    })
+                })
+                .collect::<Vec<_>>();
         let tab_bar_surface = self
             .tab_bar
             .as_ref()
@@ -575,6 +657,11 @@ impl WgpuTerminalWindowRuntime {
                 queue: &self.queue,
                 pipeline: &self.pipeline,
                 surfaces: &surfaces,
+                workspace_layout: &self.workspace_layout,
+                render_plugins: &mut self.render_plugins,
+                color_format: self.surface_config.format,
+                scale_factor: self.window.scale_factor(),
+                elapsed: self.started_at.elapsed(),
                 visual_bell,
                 clear_color: if self.background_opacity < 1.0 {
                     WgpuTerminalClearColor::transparent()
@@ -583,6 +670,9 @@ impl WgpuTerminalWindowRuntime {
                 },
             }) {
             Ok(result) => {
+                if result.plugin_redraw_requested {
+                    self.request_redraw();
+                }
                 self.perf.record_frame(row_count, run_count, &result);
             }
             Err(error) => {

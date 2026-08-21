@@ -20,6 +20,7 @@ pub mod quad_vertex_buffer_builder;
 pub mod render_pass_adapter;
 pub mod render_pass_encoder;
 pub mod render_pass_plan;
+pub mod render_plugin;
 pub mod render_target_plan;
 pub mod renderer_backend;
 pub mod shader;
