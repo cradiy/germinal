@@ -41,6 +41,9 @@ use crate::rendering::pty_surface::video_surface_dmabuf_importer::{
     VideoSurfaceImportError, import_nv12_dmabuf_frame,
 };
 use crate::rendering::pty_surface::{
+    background_shader_renderer::{
+        WgpuBackgroundShaderError, WgpuBackgroundShaderRenderer, WgpuBackgroundShaderSource,
+    },
     crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError},
     frame_builder::WgpuTerminalFrameBuilder,
     frame_renderer::WgpuTerminalFrameRenderer,
@@ -84,6 +87,8 @@ pub enum WindowRuntimeError {
     BuildGlyphAtlas(#[source] WgpuCrossfontGlyphAtlasError),
     #[error("failed to load crossfont metrics: {0}")]
     LoadCrossfontMetrics(#[source] WgpuCrossfontGlyphAtlasError),
+    #[error("failed to create terminal background shader: {0}")]
+    CreateBackgroundShader(#[source] WgpuBackgroundShaderError),
     #[cfg(target_os = "linux")]
     #[error("failed to import an NV12 dma_buf video frame into the terminal renderer: {source}")]
     ImportVideoSurfaceFrame {
@@ -109,6 +114,9 @@ pub struct WgpuTerminalWindowRuntime {
     profile: TerminalProfile,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
+    background_shader_enabled: bool,
+    background_shader_animated: bool,
+    next_background_frame_at: Option<Instant>,
     needs_redraw: bool,
     visual_bell_until: Option<Instant>,
     cursor_blink_interval: Duration,
@@ -192,6 +200,17 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     cursor_blink_interval: Duration,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
+    background_shader: Option<WgpuBackgroundShaderSource>,
+}
+
+struct WgpuTerminalWindowRuntimeOptions {
+    profile: TerminalProfile,
+    base_title: String,
+    cursor_blink_interval: Duration,
+    color_theme: TerminalColorTheme,
+    background_opacity: f32,
+    render_plugins: Vec<WgpuPaneRenderPlugin>,
+    background_shader: Option<WgpuBackgroundShaderSource>,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
@@ -208,7 +227,13 @@ impl WgpuTerminalWindowRuntimeFactory {
             cursor_blink_interval,
             color_theme,
             background_opacity: normalized_opacity(background_opacity),
+            background_shader: None,
         }
+    }
+
+    pub fn with_background_shader(mut self, shader: WgpuBackgroundShaderSource) -> Self {
+        self.background_shader = Some(shader);
+        self
     }
 
     pub fn create_window_runtime(
@@ -223,14 +248,17 @@ impl WgpuTerminalWindowRuntimeFactory {
         window: Arc<Window>,
         render_plugins: Vec<WgpuPaneRenderPlugin>,
     ) -> Result<WgpuTerminalWindowRuntime, WindowRuntimeError> {
-        pollster::block_on(WgpuTerminalWindowRuntime::new_with_render_plugins(
+        pollster::block_on(WgpuTerminalWindowRuntime::new_with_options(
             window,
-            self.profile.clone(),
-            self.base_title.clone(),
-            self.cursor_blink_interval,
-            self.color_theme,
-            self.background_opacity,
-            render_plugins,
+            WgpuTerminalWindowRuntimeOptions {
+                profile: self.profile.clone(),
+                base_title: self.base_title.clone(),
+                cursor_blink_interval: self.cursor_blink_interval,
+                color_theme: self.color_theme,
+                background_opacity: self.background_opacity,
+                render_plugins,
+                background_shader: self.background_shader.clone(),
+            },
         ))
     }
 }
@@ -265,6 +293,34 @@ impl WgpuTerminalWindowRuntime {
         background_opacity: f32,
         render_plugins: Vec<WgpuPaneRenderPlugin>,
     ) -> Result<Self, WindowRuntimeError> {
+        Self::new_with_options(
+            window,
+            WgpuTerminalWindowRuntimeOptions {
+                profile,
+                base_title,
+                cursor_blink_interval,
+                color_theme,
+                background_opacity,
+                render_plugins,
+                background_shader: None,
+            },
+        )
+        .await
+    }
+
+    async fn new_with_options(
+        window: Arc<Window>,
+        options: WgpuTerminalWindowRuntimeOptions,
+    ) -> Result<Self, WindowRuntimeError> {
+        let WgpuTerminalWindowRuntimeOptions {
+            profile,
+            base_title,
+            cursor_blink_interval,
+            color_theme,
+            background_opacity,
+            render_plugins,
+            background_shader,
+        } = options;
         let background_opacity = normalized_opacity(background_opacity);
         let instance = wgpu::Instance::default();
 
@@ -337,11 +393,26 @@ impl WgpuTerminalWindowRuntime {
         );
         let visual_bell_renderer =
             WgpuVisualBellRenderer::new(&device, surface_config.format, color_theme.bell_border);
-        let presenter = WgpuTerminalSurfaceFramePresenter::new(
+        let background_shader_animated = background_shader
+            .as_ref()
+            .is_some_and(WgpuBackgroundShaderSource::animated);
+        let background_shader_renderer = match background_shader.as_ref() {
+            Some(source) => Some(
+                WgpuBackgroundShaderRenderer::new(&device, surface_config.format, source)
+                    .await
+                    .map_err(WindowRuntimeError::CreateBackgroundShader)?,
+            ),
+            None => None,
+        };
+        let background_shader_enabled = background_shader_renderer.is_some();
+        let mut presenter = WgpuTerminalSurfaceFramePresenter::new(
             frame_renderer,
             divider_renderer,
             visual_bell_renderer,
         );
+        if let Some(renderer) = background_shader_renderer {
+            presenter = presenter.with_background_shader(renderer);
+        }
 
         let now = Instant::now();
         Ok(Self {
@@ -360,6 +431,9 @@ impl WgpuTerminalWindowRuntime {
             profile,
             color_theme,
             background_opacity,
+            background_shader_enabled,
+            background_shader_animated,
+            next_background_frame_at: background_shader_animated.then_some(now),
             needs_redraw: false,
             visual_bell_until: None,
             cursor_blink_interval: cursor_blink_interval.max(Duration::from_millis(1)),
@@ -582,6 +656,11 @@ impl WgpuTerminalWindowRuntime {
         let now = Instant::now();
         let visual_bell = self.visual_bell_frame(now);
         let blinking_cursor_visible = self.blinking_cursor_frame(now);
+        let terminal_background_opacity = if self.background_shader_enabled {
+            0.0
+        } else {
+            self.background_opacity
+        };
         let render_plugin_targets = self
             .render_plugins
             .iter()
@@ -610,7 +689,7 @@ impl WgpuTerminalWindowRuntime {
                         surface_snapshot,
                         renderer_config: WgpuRendererConfig::from(size_info)
                             .with_color_theme(self.color_theme)
-                            .with_background_opacity(self.background_opacity)
+                            .with_background_opacity(terminal_background_opacity)
                             .with_blinking_cursor_visible(blinking_cursor_visible),
                     })
                 })
@@ -635,7 +714,7 @@ impl WgpuTerminalWindowRuntime {
                 surface_snapshot: &tab_bar_surface.snapshot,
                 renderer_config: WgpuRendererConfig::from(size_info)
                     .with_color_theme(self.color_theme)
-                    .with_background_opacity(self.background_opacity)
+                    .with_background_opacity(terminal_background_opacity)
                     .with_blinking_cursor_visible(blinking_cursor_visible),
             });
         }
@@ -660,10 +739,13 @@ impl WgpuTerminalWindowRuntime {
                 workspace_layout: &self.workspace_layout,
                 render_plugins: &mut self.render_plugins,
                 color_format: self.surface_config.format,
+                width_px: self.surface_config.width,
+                height_px: self.surface_config.height,
                 scale_factor: self.window.scale_factor(),
                 elapsed: self.started_at.elapsed(),
+                background_opacity: self.background_opacity,
                 visual_bell,
-                clear_color: if self.background_opacity < 1.0 {
+                clear_color: if self.background_shader_enabled || self.background_opacity < 1.0 {
                     WgpuTerminalClearColor::transparent()
                 } else {
                     WgpuTerminalClearColor::black()
@@ -680,10 +762,36 @@ impl WgpuTerminalWindowRuntime {
                 self.handle_present_error(error);
             }
         }
+        self.next_background_frame_at = self
+            .background_shader_animated
+            .then_some(now + BACKGROUND_ANIMATION_FRAME_INTERVAL);
     }
 
-    pub fn next_cursor_blink_deadline(&self) -> Option<Instant> {
-        self.next_cursor_blink_at
+    pub fn next_render_deadline(&self) -> Option<Instant> {
+        match (self.next_cursor_blink_at, self.next_background_frame_at) {
+            (Some(cursor), Some(background)) => Some(cursor.min(background)),
+            (Some(cursor), None) => Some(cursor),
+            (None, Some(background)) => Some(background),
+            (None, None) => None,
+        }
+    }
+
+    pub fn take_due_render_deadline(&mut self, now: Instant) -> bool {
+        let cursor_due = self
+            .next_cursor_blink_at
+            .is_some_and(|deadline| deadline <= now);
+        if cursor_due {
+            self.next_cursor_blink_at = Some(now + self.cursor_blink_interval);
+        }
+
+        let background_due = self
+            .next_background_frame_at
+            .is_some_and(|deadline| deadline <= now);
+        if background_due {
+            self.next_background_frame_at = Some(now + BACKGROUND_ANIMATION_FRAME_INTERVAL);
+        }
+
+        cursor_due || background_due
     }
 
     fn blinking_cursor_frame(&mut self, now: Instant) -> bool {
@@ -1030,6 +1138,7 @@ fn terminal_size_info(
 }
 
 const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
+const BACKGROUND_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RENDER_PERF_LOG_ENV: &str = "GERMINAL_RENDER_PERF_LOG";
 
 struct WgpuTerminalRenderPerf {

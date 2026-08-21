@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use germinal_infra::rendering::pty_surface::background_shader_renderer::WgpuBackgroundShaderSource;
 use germinal_ports::pty_host::{
     color_theme::TerminalColorTheme,
     cursor_style::{TerminalCursorShape, TerminalCursorStyle},
@@ -65,6 +66,8 @@ impl AppPaths {
 #[serde(default)]
 pub struct GerminalConfig {
     pub window: WindowConfig,
+    #[serde(skip_serializing_if = "BackgroundConfig::is_disabled")]
+    pub background: BackgroundConfig,
     pub font: FontConfig,
     pub cursor: CursorConfig,
     pub colors: ColorsConfig,
@@ -119,6 +122,10 @@ impl GerminalConfig {
 
     pub fn terminal_color_theme(&self) -> TerminalColorTheme {
         self.colors.resolved
+    }
+
+    pub fn background_shader(&self) -> Option<WgpuBackgroundShaderSource> {
+        self.background.resolved.clone()
     }
 
     pub fn pty_shell_command(&self) -> Option<PtyShellCommand> {
@@ -221,6 +228,56 @@ pub struct ColorsConfig {
     pub overrides: BTreeMap<String, String>,
     #[serde(skip)]
     resolved: TerminalColorTheme,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shader: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animated: Option<bool>,
+    #[serde(skip)]
+    resolved: Option<WgpuBackgroundShaderSource>,
+}
+
+impl BackgroundConfig {
+    fn is_disabled(&self) -> bool {
+        self.shader.is_none()
+    }
+
+    fn resolve(&mut self, config_dir: &Path) -> Result<(), String> {
+        let Some(shader) = self.shader.as_deref() else {
+            self.resolved = None;
+            return Ok(());
+        };
+
+        if shader == Path::new("starfield") {
+            let animated = self.animated.unwrap_or(true);
+            self.resolved = Some(WgpuBackgroundShaderSource::starfield().with_animated(animated));
+            return Ok(());
+        }
+
+        let shader_path = expand_home(shader);
+        let shader_path = if shader_path.is_absolute() {
+            shader_path
+        } else {
+            config_dir.join(shader_path)
+        };
+        let source = fs::read_to_string(&shader_path).map_err(|error| {
+            format!(
+                "failed to read background shader {}: {error}",
+                shader_path.display()
+            )
+        })?;
+        let animated = self.animated.unwrap_or(false);
+        self.resolved = Some(WgpuBackgroundShaderSource::new(
+            shader_path.display().to_string(),
+            source,
+            animated,
+        ));
+        Ok(())
+    }
 }
 
 impl ColorsConfig {
@@ -658,6 +715,13 @@ pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
             path: paths.config_file().to_path_buf(),
             message,
         })?;
+    config
+        .background
+        .resolve(paths.config_dir())
+        .map_err(|message| AppError::InvalidConfig {
+            path: paths.config_file().to_path_buf(),
+            message,
+        })?;
 
     Ok((config, paths))
 }
@@ -722,6 +786,8 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path, time::SystemTime};
+
     use germinal_ports::pty_host::{
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
         font_family::TerminalFontFamily,
@@ -729,7 +795,7 @@ mod tests {
     };
     use germinal_ports::rendering::tab_bar::TabBarPosition;
 
-    use super::{GerminalConfig, KeyboardAction, ShellConfig};
+    use super::{BackgroundConfig, GerminalConfig, KeyboardAction, ShellConfig};
 
     #[test]
     fn default_config_serializes_alacritty_style_fields() {
@@ -737,6 +803,7 @@ mod tests {
 
         let value: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
+        assert!(value.get("background").is_none());
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
         assert_eq!(
             value["font"]["normal"]["family"].as_str(),
@@ -773,6 +840,57 @@ mod tests {
             TerminalCursorStyle::new(TerminalCursorShape::Beam, true)
         );
         assert_eq!(config.cursor.blink_interval_ms, 320);
+    }
+
+    #[test]
+    fn resolves_built_in_starfield_background() {
+        let mut background: BackgroundConfig = toml::from_str(
+            r#"
+            shader = "starfield"
+            "#,
+        )
+        .unwrap();
+
+        background.resolve(Path::new("/unused")).unwrap();
+
+        let shader = background.resolved.unwrap();
+        assert_eq!(shader.label(), "starfield");
+        assert!(shader.animated());
+        assert!(shader.source().contains("fn background("));
+    }
+
+    #[test]
+    fn resolves_relative_custom_background_shader() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_dir = std::env::temp_dir().join(format!(
+            "germinal-background-config-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(config_dir.join("shaders")).unwrap();
+        let shader_path = config_dir.join("shaders/custom.wgsl");
+        fs::write(
+            &shader_path,
+            "fn background(uv: vec2<f32>, time: f32, resolution: vec2<f32>) -> vec4<f32> { return vec4<f32>(uv, time / resolution.x, 1.0); }",
+        )
+        .unwrap();
+        let mut background: BackgroundConfig = toml::from_str(
+            r#"
+            shader = "shaders/custom.wgsl"
+            animated = true
+            "#,
+        )
+        .unwrap();
+
+        background.resolve(&config_dir).unwrap();
+
+        let shader = background.resolved.unwrap();
+        assert_eq!(shader.label(), shader_path.display().to_string());
+        assert!(shader.animated());
+        assert!(shader.source().contains("return vec4<f32>"));
+        fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use germinal_ports::rendering::surface_snapshot::RenderSurfaceSnapshot;
 
 use crate::rendering::pty_surface::{
+    background_shader_renderer::{WgpuBackgroundShaderFrame, WgpuBackgroundShaderRenderer},
     frame_renderer::{
         WgpuTerminalFrameRenderResult, WgpuTerminalFrameRenderer, WgpuTerminalGpuContext,
         WgpuTerminalRenderView,
@@ -15,8 +16,8 @@ use crate::rendering::pty_surface::{
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
 
-#[derive(Debug, Clone)]
 pub struct WgpuTerminalSurfaceFramePresenter {
+    background_shader_renderer: Option<WgpuBackgroundShaderRenderer>,
     frame_renderer: WgpuTerminalFrameRenderer,
     divider_renderer: WgpuWorkspaceDividerRenderer,
     visual_bell_renderer: WgpuVisualBellRenderer,
@@ -29,10 +30,16 @@ impl WgpuTerminalSurfaceFramePresenter {
         visual_bell_renderer: WgpuVisualBellRenderer,
     ) -> Self {
         Self {
+            background_shader_renderer: None,
             frame_renderer,
             divider_renderer,
             visual_bell_renderer,
         }
+    }
+
+    pub fn with_background_shader(mut self, renderer: WgpuBackgroundShaderRenderer) -> Self {
+        self.background_shader_renderer = Some(renderer);
+        self
     }
 
     pub fn frame_renderer(&self) -> &WgpuTerminalFrameRenderer {
@@ -83,6 +90,23 @@ impl WgpuTerminalSurfaceFramePresenter {
         let create_command_encoder = create_encoder_started_at.elapsed();
         clear_target_view(&mut command_encoder, &target_view, input.clear_color);
 
+        let background_draw_count =
+            self.background_shader_renderer
+                .as_ref()
+                .map_or(0, |renderer| {
+                    renderer.encode(
+                        input.queue,
+                        &mut command_encoder,
+                        &target_view,
+                        WgpuBackgroundShaderFrame {
+                            width_px: input.width_px,
+                            height_px: input.height_px,
+                            elapsed_seconds: input.elapsed.as_secs_f32(),
+                            opacity: input.background_opacity,
+                        },
+                    );
+                    1
+                });
         let render_to_view_started_at = Instant::now();
         let render_results = input
             .surfaces
@@ -155,6 +179,7 @@ impl WgpuTerminalSurfaceFramePresenter {
 
         Ok(WgpuTerminalWorkspaceFramePresentResult {
             render_results,
+            background_draw_count,
             divider_draw_count,
             plugin_draw_count,
             plugin_redraw_requested,
@@ -211,8 +236,11 @@ pub struct WgpuTerminalWorkspacePresentInput<'a, 'window> {
         &'a [germinal_ports::rendering::workspace_layout::RenderSurfacePlacement],
     pub render_plugins: &'a mut [WgpuPaneRenderPlugin],
     pub color_format: wgpu::TextureFormat,
+    pub width_px: u32,
+    pub height_px: u32,
     pub scale_factor: f64,
     pub elapsed: Duration,
+    pub background_opacity: f32,
     pub visual_bell: Option<WgpuVisualBellFrame>,
     pub clear_color: WgpuTerminalClearColor,
 }
@@ -237,6 +265,7 @@ pub struct WgpuTerminalSurfaceFrameTimings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WgpuTerminalWorkspaceFramePresentResult {
     pub render_results: Vec<WgpuTerminalFrameRenderResult>,
+    pub background_draw_count: usize,
     pub divider_draw_count: usize,
     pub plugin_draw_count: usize,
     pub plugin_redraw_requested: bool,

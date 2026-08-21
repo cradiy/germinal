@@ -169,7 +169,19 @@ impl App {
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
         let window_title = config.window.title.clone();
         let window_opacity = config.window.opacity;
+        let background_shader = config.background_shader();
         let audible_bell = AudibleBell::new(config.bell.command.clone());
+        let render_runtime_factory = WgpuTerminalWindowRuntimeFactory::new(
+            terminal_profile.clone(),
+            window_title,
+            cursor_blink_interval,
+            terminal_color_theme,
+            window_opacity,
+        );
+        let render_runtime_factory = match background_shader {
+            Some(shader) => render_runtime_factory.with_background_shader(shader),
+            None => render_runtime_factory,
+        };
 
         let app = Self {
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
@@ -190,13 +202,7 @@ impl App {
                 terminal_color_theme,
                 terminal_osc52_mode,
             ),
-            render_runtime_factory: WgpuTerminalWindowRuntimeFactory::new(
-                terminal_profile,
-                window_title,
-                cursor_blink_interval,
-                terminal_color_theme,
-                window_opacity,
-            ),
+            render_runtime_factory,
             render_runtime: None,
             pending_wgpu_pane_plugins: wgpu_pane_plugins,
             wgpu_pane_targets,
@@ -996,11 +1002,11 @@ impl App {
 
 impl ApplicationHandler<RuntimeEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+        let now = Instant::now();
         if self
             .render_runtime
-            .as_ref()
-            .and_then(WgpuTerminalWindowRuntime::next_cursor_blink_deadline)
-            .is_some_and(|deadline| deadline <= Instant::now())
+            .as_mut()
+            .is_some_and(|runtime| runtime.take_due_render_deadline(now))
         {
             self.request_redraw();
         }
@@ -1330,7 +1336,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
         let control_flow = self
             .render_runtime
             .as_ref()
-            .and_then(WgpuTerminalWindowRuntime::next_cursor_blink_deadline)
+            .and_then(WgpuTerminalWindowRuntime::next_render_deadline)
             .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         event_loop.set_control_flow(control_flow);
     }

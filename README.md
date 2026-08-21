@@ -85,6 +85,42 @@ The value must be between `0.0` (fully transparent background) and `1.0` (opaque
 cursor content, and explicit application background colors remain opaque. Transparency also
 depends on support from the window system and compositor.
 
+## Shader backgrounds
+
+Germinal includes an animated meteor-shower starfield background. Enable it in
+`~/.config/germinal/config.toml`:
+
+```toml
+[background]
+shader = "starfield"
+```
+
+You can also load a custom WGSL file. Relative paths are resolved from
+`~/.config/germinal`, and paths beginning with `~` are expanded:
+
+```toml
+[background]
+shader = "shaders/background.wgsl"
+animated = true
+```
+
+The WGSL file defines this function:
+
+```wgsl
+fn background(
+    uv: vec2<f32>,
+    time: f32,
+    resolution: vec2<f32>,
+) -> vec4<f32> {
+    return vec4<f32>(uv.x, uv.y, 0.2, 1.0);
+}
+```
+
+`uv` runs from the top-left corner `(0, 0)` to the bottom-right corner `(1, 1)`,
+`time` is the elapsed time in seconds, and `resolution` is the window size in physical pixels.
+Custom shaders are static by default; set `animated = true` when the shader uses `time`. The
+built-in starfield is animated automatically. `window.opacity` is applied to the shader output.
+
 ## Kitty color themes
 
 Germinal can load a Kitty color theme directly. Set one path in

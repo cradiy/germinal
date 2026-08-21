@@ -1,3 +1,4 @@
+pub mod background_shader_renderer;
 pub mod buffer_uploader;
 pub mod command_encoder_adapter;
 pub mod command_plan;
