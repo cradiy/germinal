@@ -4,10 +4,11 @@ use std::sync::{
     mpsc::{Sender, SyncSender},
 };
 
-use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 
 use crate::{
-    pty_host::worker_input::TerminalWorkerInput, rendering::surface_snapshot::RenderSurfaceSnapshot,
+    pty_host::{terminal_size::TerminalPtySize, worker_input::TerminalWorkerInput},
+    rendering::surface_snapshot::RenderSurfaceSnapshot,
 };
 
 pub trait ITerminalWorkerBackend {
@@ -15,7 +16,7 @@ pub trait ITerminalWorkerBackend {
     fn spawn_terminal_worker(
         &self,
         gshell_id: GShellId,
-        initial_size: TerminalGridSize,
+        initial_size: TerminalPtySize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput>;

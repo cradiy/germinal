@@ -4,6 +4,7 @@ use germinal_domain::{
         pane_resize_direction::PaneResizeDirection, pane_split_direction::PaneSplitDirection,
     },
 };
+use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::{
@@ -46,6 +47,8 @@ pub trait IWorkspaceService {
     fn tab_titles(&self) -> Vec<String>;
     fn tab_gshells(&self) -> Vec<GShellId>;
     fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>);
+    fn update_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf);
+    fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>);
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId;
     fn swap_focused_gshell_with(&self, other: GShellId) -> bool;
     fn resize_focused_gshell(&self, direction: PaneResizeDirection) -> bool;

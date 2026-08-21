@@ -150,7 +150,6 @@ where
             gshell_id,
             pty_host_id,
             spawn_config,
-            term_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
         );
@@ -187,6 +186,15 @@ where
         self.prj_ref().pty_host_working_directory(pty_host_id)
     }
 
+    fn report_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf) {
+        let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
+        let Some(pty_host_id) = state.pty_host_id_of(gshell_id) else {
+            return;
+        };
+        self.prj_ref()
+            .update_pty_host_working_directory(pty_host_id, working_directory);
+    }
+
     fn route_input_to_gshell(&self, input: GShellInput) {
         let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());
 
@@ -212,8 +220,7 @@ where
                     return;
                 };
                 state.sync_pty_host_size(pty_host_id, term_size);
-                self.prj_ref()
-                    .resize_pty_host(pty_host_id, pty_size, term_size);
+                self.prj_ref().resize_pty_host(pty_host_id, pty_size);
             }
             GShellMode::GNative => self.prj_ref().resize_gnative_session(gshell_id, size_info),
         }

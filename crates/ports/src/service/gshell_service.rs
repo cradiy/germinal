@@ -25,6 +25,7 @@ pub trait IGShellService {
     fn exit_gnative_mode(&self, gshell_id: GShellId);
     fn remove_gshell(&self, gshell_id: GShellId);
     fn gshell_working_directory(&self, gshell_id: GShellId) -> Option<PathBuf>;
+    fn report_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf);
     fn route_input_to_gshell(&self, input: GShellInput);
     fn resize_gshell(&self, gshell_id: GShellId, size_info: TerminalSizeInfo);
 }

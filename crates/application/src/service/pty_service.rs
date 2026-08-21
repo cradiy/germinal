@@ -10,10 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use germinal_domain::{
-    gshell::vo::gshell_id::GShellId,
-    pty_host::{pty_host_id::PtyHostId, terminal_size::TerminalGridSize},
-};
+use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
 use germinal_gnative_protocol::gnative::session::GNATIVE_PROTOCOL_VERSION;
 use germinal_ports::{
     event::{
@@ -126,6 +123,7 @@ struct ViSearch {
 #[target(PtyService)]
 pub struct PtyServiceState {
     pty_host_runtimes: RefCell<HashMap<PtyHostId, PtyPaneRuntime>>,
+    reported_working_directories: RefCell<HashMap<PtyHostId, PathBuf>>,
     modifiers: RefCell<WindowInputModifiers>,
 }
 
@@ -133,6 +131,7 @@ impl PtyServiceState {
     pub fn new() -> Self {
         Self {
             pty_host_runtimes: RefCell::new(HashMap::new()),
+            reported_working_directories: RefCell::new(HashMap::new()),
             modifiers: RefCell::new(WindowInputModifiers::new(false, false, false, false)),
         }
     }
@@ -157,7 +156,6 @@ where
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
         spawn_config: PtySpawnConfig,
-        term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
@@ -167,9 +165,10 @@ where
         }
 
         let proxy = self.prj_ref().runtime_event_dispatcher().clone();
+        let pty_size = spawn_config.initial_size;
         let Some(terminal_worker_sender) = self.prj_ref().spawn_terminal_worker(
             gshell_id,
-            term_size,
+            pty_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
         ) else {
@@ -187,7 +186,6 @@ where
             }
         };
 
-        let pty_size = spawn_config.initial_size;
         let pty_input_sender = self.prj_ref().pty_backend().spawn_pty(
             proxy,
             gshell_id,
@@ -323,24 +321,43 @@ where
     fn remove_pty_host(&self, pty_host_id: PtyHostId) {
         let state: &PtyServiceState = self.prj_ref().as_ref();
         state.pty_host_runtimes.borrow_mut().remove(&pty_host_id);
+        state
+            .reported_working_directories
+            .borrow_mut()
+            .remove(&pty_host_id);
     }
 
     fn pty_host_working_directory(&self, pty_host_id: PtyHostId) -> Option<PathBuf> {
         let state: &PtyServiceState = self.prj_ref().as_ref();
+        if let Some(working_directory) = state
+            .reported_working_directories
+            .borrow()
+            .get(&pty_host_id)
+            .cloned()
+        {
+            return Some(working_directory);
+        }
         let runtimes = state.pty_host_runtimes.borrow();
-        let process_id = runtimes
-            .get(&pty_host_id)?
-            .pty_input_sender
-            .child_process_id()?;
+        let runtime = runtimes.get(&pty_host_id)?;
+        let process_id = runtime.pty_input_sender.child_process_id()?;
         process_working_directory(process_id)
     }
 
-    fn resize_pty_host(
+    fn update_pty_host_working_directory(
         &self,
         pty_host_id: PtyHostId,
-        pty_size: TerminalPtySize,
-        term_size: TerminalGridSize,
+        working_directory: PathBuf,
     ) {
+        let state: &PtyServiceState = self.prj_ref().as_ref();
+        if state.pty_host_runtimes.borrow().contains_key(&pty_host_id) {
+            state
+                .reported_working_directories
+                .borrow_mut()
+                .insert(pty_host_id, working_directory);
+        }
+    }
+
+    fn resize_pty_host(&self, pty_host_id: PtyHostId, pty_size: TerminalPtySize) {
         let state: &PtyServiceState = self.prj_ref().as_ref();
         let mut runtimes = state.pty_host_runtimes.borrow_mut();
         let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
@@ -354,7 +371,7 @@ where
         let _ = runtime.pty_input_sender.send(PtyInput::Resize(pty_size));
         let _ = runtime
             .terminal_worker_sender
-            .send(TerminalWorkerInput::Resize(term_size));
+            .send(TerminalWorkerInput::Resize(pty_size));
     }
 }
 

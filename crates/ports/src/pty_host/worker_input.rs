@@ -1,7 +1,8 @@
-use germinal_domain::pty_host::terminal_size::TerminalGridSize;
-
 use crate::pty_host::terminal_clipboard::TerminalClipboard;
-use crate::pty_host::{pty_input::PtyInputSender, terminal_input_mode::TerminalInputModeState};
+use crate::pty_host::{
+    pty_input::PtyInputSender, terminal_input_mode::TerminalInputModeState,
+    terminal_size::TerminalPtySize,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalDisplayScroll {
@@ -96,7 +97,7 @@ impl TerminalSelectionPoint {
 
 pub enum TerminalWorkerInput {
     Bytes(Vec<u8>),
-    Resize(TerminalGridSize),
+    Resize(TerminalPtySize),
     ScrollDisplay(TerminalDisplayScroll),
     StartSelection {
         kind: TerminalSelectionKind,

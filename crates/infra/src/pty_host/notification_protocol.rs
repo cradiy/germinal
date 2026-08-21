@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose};
 use germinal_ports::pty_host::terminal_notification::{
@@ -14,6 +14,16 @@ pub(crate) enum NotificationProtocolEvent {
     Bytes(Vec<u8>),
     Notification(TerminalNotification),
     PtyWrite(Vec<u8>),
+    WorkingDirectory(PathBuf),
+    ShellIntegration(ShellIntegrationEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShellIntegrationEvent {
+    PromptStart,
+    PromptEnd,
+    CommandStarted { command: Option<String> },
+    CommandFinished { exit_code: Option<i32> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +174,24 @@ impl TerminalNotificationProtocolDecoder {
     }
 
     fn parse_osc(&mut self, data: &[u8]) -> Option<Vec<NotificationProtocolEvent>> {
+        if let Some(payload) = data.strip_prefix(b"7;") {
+            return Some(
+                parse_working_directory(payload)
+                    .map(NotificationProtocolEvent::WorkingDirectory)
+                    .into_iter()
+                    .collect(),
+            );
+        }
+
+        if let Some(payload) = data.strip_prefix(b"133;") {
+            return Some(
+                parse_shell_integration(payload)
+                    .map(NotificationProtocolEvent::ShellIntegration)
+                    .into_iter()
+                    .collect(),
+            );
+        }
+
         if let Some(payload) = data.strip_prefix(b"9;") {
             return Some(self.parse_legacy_notification(payload));
         }
@@ -259,6 +287,79 @@ impl TerminalNotificationProtocolDecoder {
             }
             None => self.pending_anonymous = Some(pending),
         }
+    }
+}
+
+fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
+    let file_url = payload.strip_prefix(b"file://")?;
+    let path_start = file_url.iter().position(|byte| *byte == b'/')?;
+    let decoded = percent_decode(&file_url[path_start..])?;
+    let path = String::from_utf8(decoded).ok()?;
+    (!path.is_empty() && !path.contains('\0')).then(|| PathBuf::from(platform_file_url_path(path)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_file_url_path(path: String) -> String {
+    path
+}
+
+#[cfg(target_os = "windows")]
+fn platform_file_url_path(path: String) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' {
+        path[1..].to_owned()
+    } else {
+        path
+    }
+}
+
+fn parse_shell_integration(payload: &[u8]) -> Option<ShellIntegrationEvent> {
+    let mut fields = payload.split(|byte| *byte == b';');
+    match fields.next()? {
+        b"A" => Some(ShellIntegrationEvent::PromptStart),
+        b"B" => Some(ShellIntegrationEvent::PromptEnd),
+        b"C" => {
+            let command = fields.find_map(|field| {
+                let encoded = field.strip_prefix(b"cmdline_url=")?;
+                String::from_utf8(percent_decode(encoded)?).ok()
+            });
+            Some(ShellIntegrationEvent::CommandStarted { command })
+        }
+        b"D" => {
+            let exit_code = fields
+                .next()
+                .and_then(|field| std::str::from_utf8(field).ok())
+                .and_then(|field| field.parse().ok());
+            Some(ShellIntegrationEvent::CommandFinished { exit_code })
+        }
+        _ => None,
+    }
+}
+
+fn percent_decode(input: &[u8]) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'%' {
+            decoded.push(input[index]);
+            index += 1;
+            continue;
+        }
+
+        let high = hex_value(*input.get(index + 1)?)?;
+        let low = hex_value(*input.get(index + 2)?)?;
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    Some(decoded)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -482,5 +583,56 @@ mod tests {
             panic!("expected a notification event");
         };
         assert!(!notification.focus_on_activation);
+    }
+
+    #[test]
+    fn decodes_osc_7_working_directory_urls() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert_eq!(
+            decoder.feed(b"before\x1b]7;file://fedora/home/user/My%20Project\x1b\\after"),
+            vec![
+                NotificationProtocolEvent::Bytes(b"before".to_vec()),
+                NotificationProtocolEvent::WorkingDirectory(PathBuf::from("/home/user/My Project")),
+                NotificationProtocolEvent::Bytes(b"after".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn consumes_invalid_osc_7_without_forwarding_it_to_the_terminal_parser() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert!(
+            decoder
+                .feed(b"\x1b]7;https://example.com/tmp\x1b\\")
+                .is_empty()
+        );
+        assert!(decoder.feed(b"\x1b]7;file://host/bad%2\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn decodes_osc_133_prompt_and_command_boundaries() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert_eq!(
+            decoder.feed(
+                b"\x1b]133;A;click_events=1\x1b\\\x1b]133;B\x1b\\\x1b]133;C;cmdline_url=cargo%20test\x1b\\\x1b]133;D;0\x1b\\"
+            ),
+            vec![
+                NotificationProtocolEvent::ShellIntegration(
+                    ShellIntegrationEvent::PromptStart
+                ),
+                NotificationProtocolEvent::ShellIntegration(ShellIntegrationEvent::PromptEnd),
+                NotificationProtocolEvent::ShellIntegration(
+                    ShellIntegrationEvent::CommandStarted {
+                        command: Some("cargo test".to_owned()),
+                    }
+                ),
+                NotificationProtocolEvent::ShellIntegration(
+                    ShellIntegrationEvent::CommandFinished { exit_code: Some(0) }
+                ),
+            ]
+        );
     }
 }

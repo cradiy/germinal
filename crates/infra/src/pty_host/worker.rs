@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_ports::{
     event::{
         runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -25,6 +25,7 @@ use germinal_ports::{
         snapshot::TerminalSnapshotProvider,
         terminal_clipboard::{TerminalClipboard, TerminalOsc52Mode},
         terminal_input_mode::TerminalInputModeState,
+        terminal_size::TerminalPtySize,
         worker_backend::ITerminalWorkerBackend,
         worker_input::{
             TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint, TerminalViMotion,
@@ -43,7 +44,12 @@ use crate::{
     gnative::control_sequence::GNativeEnterControlSequenceDecoder,
     pty_host::{
         alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
-        notification_protocol::{NotificationProtocolEvent, TerminalNotificationProtocolDecoder},
+        compatibility_protocol::{
+            CompatibilityProtocolEvent, TerminalCompatibilityProtocolDecoder,
+        },
+        notification_protocol::{
+            NotificationProtocolEvent, ShellIntegrationEvent, TerminalNotificationProtocolDecoder,
+        },
     },
 };
 
@@ -59,7 +65,7 @@ const TERMINAL_WORKER_POOL_ENV: &str = "GERMINAL_TERMINAL_WORKER_THREADS";
 struct TerminalWorkerConfig<Dispatch> {
     proxy: Dispatch,
     gshell_id: GShellId,
-    initial_size: AlacrittyTermSize,
+    initial_size: TerminalPtySize,
     scrollback_history: usize,
     cursor_style: TerminalCursorStyle,
     color_theme: TerminalColorTheme,
@@ -287,6 +293,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     pending_pty_writes: Vec<Vec<u8>>,
     input_modes: Option<TerminalInputModeState>,
     gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
+    compatibility_decoder: TerminalCompatibilityProtocolDecoder,
     notification_decoder: TerminalNotificationProtocolDecoder,
 }
 
@@ -298,7 +305,7 @@ where
         let target_id = RenderTargetId::new(config.gshell_id.value());
         let terminal_store =
             AlacrittyTerminalStore::with_size_scrollback_cursor_style_osc52_and_colors(
-                config.initial_size,
+                to_alacritty_term_size(config.initial_size),
                 config.scrollback_history,
                 config.cursor_style,
                 config.osc52_mode,
@@ -331,6 +338,10 @@ where
             pending_pty_writes: Vec::new(),
             input_modes: None,
             gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
+            compatibility_decoder: TerminalCompatibilityProtocolDecoder::new(
+                config.initial_size,
+                config.color_theme,
+            ),
             notification_decoder: TerminalNotificationProtocolDecoder::default(),
         }
     }
@@ -368,6 +379,7 @@ where
             }
             TerminalWorkerInput::Resize(size) => {
                 self.flush_pending_input();
+                self.compatibility_decoder.resize(size);
                 self.unpublished_seq = Some(self.resize(to_alacritty_term_size(size)));
             }
             TerminalWorkerInput::ScrollDisplay(scroll) => {
@@ -517,25 +529,15 @@ where
             let decode_result = self.gnative_enter_decoder.decode(bytes);
             enter_gnative |= decode_result.enter_gnative;
 
-            for event in self.notification_decoder.feed(&decode_result.visible_bytes) {
+            for event in self
+                .compatibility_decoder
+                .feed(&decode_result.visible_bytes)
+            {
                 match event {
-                    NotificationProtocolEvent::Bytes(bytes) => {
-                        applied_visible_bytes = true;
-                        self.terminal_store.apply_bytes(self.target_id, seq, &bytes);
-
-                        let pending_pty_writes =
-                            self.terminal_store.take_pending_pty_writes(self.target_id);
-                        self.forward_pty_writes(pending_pty_writes);
+                    CompatibilityProtocolEvent::Bytes(bytes) => {
+                        self.apply_compatible_bytes(seq, &bytes, &mut applied_visible_bytes);
                     }
-                    NotificationProtocolEvent::Notification(notification) => {
-                        let _ = self.proxy.dispatch(RuntimeEvent::GShell(
-                            GShellRuntimeEvent::SystemNotificationRequested {
-                                gshell_id: self.gshell_id,
-                                notification,
-                            },
-                        ));
-                    }
-                    NotificationProtocolEvent::PtyWrite(bytes) => {
+                    CompatibilityProtocolEvent::PtyWrite(bytes) => {
                         self.forward_pty_writes(vec![bytes]);
                     }
                 }
@@ -575,6 +577,64 @@ where
         self.perf.apply_max = self.perf.apply_max.max(elapsed);
 
         applied_visible_bytes.then_some(seq)
+    }
+
+    fn apply_compatible_bytes(&mut self, seq: Seq, bytes: &[u8], applied_visible_bytes: &mut bool) {
+        for event in self.notification_decoder.feed(bytes) {
+            match event {
+                NotificationProtocolEvent::Bytes(bytes) => {
+                    *applied_visible_bytes = true;
+                    self.terminal_store.apply_bytes(self.target_id, seq, &bytes);
+
+                    let pending_pty_writes =
+                        self.terminal_store.take_pending_pty_writes(self.target_id);
+                    self.forward_pty_writes(pending_pty_writes);
+                }
+                NotificationProtocolEvent::Notification(notification) => {
+                    let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                        GShellRuntimeEvent::SystemNotificationRequested {
+                            gshell_id: self.gshell_id,
+                            notification,
+                        },
+                    ));
+                }
+                NotificationProtocolEvent::PtyWrite(bytes) => {
+                    self.forward_pty_writes(vec![bytes]);
+                }
+                NotificationProtocolEvent::WorkingDirectory(working_directory) => {
+                    let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                        GShellRuntimeEvent::WorkingDirectoryChanged {
+                            gshell_id: self.gshell_id,
+                            working_directory,
+                        },
+                    ));
+                }
+                NotificationProtocolEvent::ShellIntegration(event) => match event {
+                    ShellIntegrationEvent::PromptStart | ShellIntegrationEvent::PromptEnd => {}
+                    ShellIntegrationEvent::CommandStarted { command } => {
+                        let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                            GShellRuntimeEvent::CommandChanged {
+                                gshell_id: self.gshell_id,
+                                command,
+                            },
+                        ));
+                    }
+                    ShellIntegrationEvent::CommandFinished { exit_code } => {
+                        debug!(
+                            gshell_id = self.gshell_id.value(),
+                            ?exit_code,
+                            "terminal command finished"
+                        );
+                        let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                            GShellRuntimeEvent::CommandChanged {
+                                gshell_id: self.gshell_id,
+                                command: None,
+                            },
+                        ));
+                    }
+                },
+            }
+        }
     }
 
     fn resize(&mut self, size: AlacrittyTermSize) -> Seq {
@@ -1052,8 +1112,8 @@ fn terminal_worker_pool_size() -> usize {
         .unwrap_or(1)
 }
 
-fn to_alacritty_term_size(size: TerminalGridSize) -> AlacrittyTermSize {
-    AlacrittyTermSize::new(size.columns(), size.rows())
+fn to_alacritty_term_size(size: TerminalPtySize) -> AlacrittyTermSize {
+    AlacrittyTermSize::new(size.columns() as usize, size.rows() as usize)
 }
 
 pub struct PlatformTerminalWorkerBackend<Dispatch> {
@@ -1117,14 +1177,14 @@ where
     fn spawn_terminal_worker(
         &self,
         gshell_id: GShellId,
-        initial_size: TerminalGridSize,
+        initial_size: TerminalPtySize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
         self.pool().spawn_terminal_worker(TerminalWorkerConfig {
             proxy: self.proxy.clone(),
             gshell_id,
-            initial_size: to_alacritty_term_size(initial_size),
+            initial_size,
             scrollback_history: self.scrollback_history,
             cursor_style: self.cursor_style,
             color_theme: self.color_theme,
@@ -1143,9 +1203,7 @@ mod tests {
         mpsc::{self, Sender},
     };
 
-    use germinal_domain::{
-        gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize,
-    };
+    use germinal_domain::gshell::vo::gshell_id::GShellId;
     use germinal_ports::{
         event::{
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -1157,6 +1215,7 @@ mod tests {
             terminal_clipboard::TerminalClipboard,
             terminal_input_mode::TerminalInputModeState,
             terminal_notification::{TerminalNotification, TerminalNotificationOccasion},
+            terminal_size::TerminalPtySize,
             worker_backend::ITerminalWorkerBackend,
             worker_input::{
                 TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
@@ -1203,13 +1262,13 @@ mod tests {
 
         let first_input = backend.spawn_terminal_worker(
             GShellId::new(1),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx.clone(),
             Arc::new(AtomicBool::new(false)),
         );
         let second_input = backend.spawn_terminal_worker(
             GShellId::new(2),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1266,7 +1325,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(3),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1323,7 +1382,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(4),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1365,7 +1424,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(5),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1413,7 +1472,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(8),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1453,7 +1512,7 @@ mod tests {
         let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let input = backend.spawn_terminal_worker(
             GShellId::new(10),
-            TerminalGridSize::new(80, 24),
+            TerminalPtySize::new(24, 80, 960, 576),
             snapshot_tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -1497,7 +1556,7 @@ mod tests {
         let wake_pending = Arc::new(AtomicBool::new(false));
         let input = backend.spawn_terminal_worker(
             GShellId::new(6),
-            TerminalGridSize::new(8, 2),
+            TerminalPtySize::new(2, 8, 96, 48),
             snapshot_tx,
             wake_pending.clone(),
         );
@@ -1544,7 +1603,7 @@ mod tests {
         let wake_pending = Arc::new(AtomicBool::new(false));
         let input = backend.spawn_terminal_worker(
             GShellId::new(7),
-            TerminalGridSize::new(16, 2),
+            TerminalPtySize::new(2, 16, 192, 48),
             snapshot_tx,
             wake_pending.clone(),
         );
@@ -1607,7 +1666,7 @@ mod tests {
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
             gshell_id: GShellId::new(5),
-            initial_size: super::AlacrittyTermSize::new(20, 4),
+            initial_size: TerminalPtySize::new(4, 20, 240, 96),
             scrollback_history: TEST_SCROLLBACK_HISTORY,
             cursor_style: TerminalCursorStyle::default(),
             color_theme: TerminalColorTheme::default(),
@@ -1656,7 +1715,7 @@ mod tests {
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
             gshell_id: GShellId::new(11),
-            initial_size: super::AlacrittyTermSize::new(200, 60),
+            initial_size: TerminalPtySize::new(60, 200, 2_400, 1_440),
             scrollback_history: TEST_SCROLLBACK_HISTORY,
             cursor_style: TerminalCursorStyle::default(),
             color_theme: TerminalColorTheme::default(),
@@ -1666,7 +1725,7 @@ mod tests {
         });
 
         runtime.apply_byte_chunks(&[
-            b"\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
+            b"\x1b[?996n\x1b[14t\x1b[16t\x1b[?2031h\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
                 .to_vec(),
         ]);
 
@@ -1678,10 +1737,53 @@ mod tests {
         match pollster::block_on(pty_rx.recv()) {
             Some(PtyInput::Bytes(bytes)) => assert_eq!(
                 bytes,
-                b"\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c"
+                b"\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c"
             ),
             other => panic!("unexpected pty input: {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_worker_dispatches_osc_7_and_osc_133_metadata() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(12),
+            initial_size: TerminalPtySize::new(4, 20, 240, 96),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(
+            runtime.apply_byte_chunks(&[
+                b"\x1b]7;file://host/home/user/project\x1b\\\x1b]133;C;cmdline_url=cargo%20test\x1b\\\x1b]133;D;0\x1b\\"
+                    .to_vec(),
+            ]),
+            None
+        );
+
+        assert_eq!(
+            event_rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                RuntimeEvent::GShell(GShellRuntimeEvent::WorkingDirectoryChanged {
+                    gshell_id: GShellId::new(12),
+                    working_directory: std::path::PathBuf::from("/home/user/project"),
+                }),
+                RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged {
+                    gshell_id: GShellId::new(12),
+                    command: Some("cargo test".to_owned()),
+                }),
+                RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged {
+                    gshell_id: GShellId::new(12),
+                    command: None,
+                }),
+            ]
+        );
     }
 
     #[test]
@@ -1692,7 +1794,7 @@ mod tests {
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
             gshell_id: GShellId::new(9),
-            initial_size: super::AlacrittyTermSize::new(20, 4),
+            initial_size: TerminalPtySize::new(4, 20, 240, 96),
             scrollback_history: TEST_SCROLLBACK_HISTORY,
             cursor_style: TerminalCursorStyle::default(),
             color_theme: TerminalColorTheme::default(),

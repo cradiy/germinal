@@ -1,6 +1,7 @@
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_domain::workspace::vo::pane_split_direction::PaneSplitDirection;
 use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::Seq};
+use std::path::PathBuf;
 
 use crate::pty_host::hyperlink::TerminalHyperlink;
 use crate::pty_host::terminal_clipboard::TerminalClipboard;
@@ -46,6 +47,14 @@ pub enum GShellRuntimeEvent {
     TitleChanged {
         gshell_id: GShellId,
         title: Option<String>,
+    },
+    WorkingDirectoryChanged {
+        gshell_id: GShellId,
+        working_directory: PathBuf,
+    },
+    CommandChanged {
+        gshell_id: GShellId,
+        command: Option<String>,
     },
     HyperlinksChanged {
         gshell_id: GShellId,

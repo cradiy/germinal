@@ -4,9 +4,10 @@ use std::sync::{
     mpsc::{Sender, SyncSender},
 };
 
-use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
+use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_ports::{
     pty_host::{
+        terminal_size::TerminalPtySize,
         worker_backend::{ITerminalWorkerBackend, ITerminalWorkerBackendProvider},
         worker_input::TerminalWorkerInput,
     },
@@ -43,7 +44,7 @@ where
     fn spawn_terminal_worker(
         &self,
         gshell_id: GShellId,
-        initial_size: TerminalGridSize,
+        initial_size: TerminalPtySize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Option<SyncSender<TerminalWorkerInput>> {

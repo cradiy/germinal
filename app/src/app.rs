@@ -1170,6 +1170,22 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.set_tab_bar(self.current_tab_bar_snapshot());
                 self.request_redraw();
             }
+            RuntimeEvent::GShell(GShellRuntimeEvent::WorkingDirectoryChanged {
+                gshell_id,
+                working_directory,
+            }) => {
+                self.report_gshell_working_directory(gshell_id, working_directory.clone());
+                self.update_gshell_working_directory(gshell_id, working_directory);
+                self.sync_current_terminal_window_title();
+                self.set_tab_bar(self.current_tab_bar_snapshot());
+                self.request_redraw();
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged { gshell_id, command }) => {
+                self.update_gshell_command(gshell_id, command);
+                self.sync_current_terminal_window_title();
+                self.set_tab_bar(self.current_tab_bar_snapshot());
+                self.request_redraw();
+            }
             RuntimeEvent::GShell(GShellRuntimeEvent::HyperlinksChanged {
                 gshell_id,
                 hyperlinks,

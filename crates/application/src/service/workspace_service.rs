@@ -2,7 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     env,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use germinal_domain::{
@@ -34,6 +34,8 @@ pub struct WorkspaceServiceState {
     workspace: RefCell<Workspace>,
     pane_bindings: RefCell<HashMap<(TabId, PaneId), GShellId>>,
     gshell_titles: RefCell<HashMap<GShellId, String>>,
+    gshell_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
+    gshell_commands: RefCell<HashMap<GShellId, String>>,
     default_tab_title: String,
     next_gshell_id: Cell<u64>,
 }
@@ -49,6 +51,8 @@ impl WorkspaceServiceState {
             workspace: RefCell::new(workspace),
             pane_bindings: RefCell::new(HashMap::new()),
             gshell_titles: RefCell::new(HashMap::new()),
+            gshell_working_directories: RefCell::new(HashMap::new()),
+            gshell_commands: RefCell::new(HashMap::new()),
             default_tab_title: default_tab_title(),
             next_gshell_id: Cell::new(0),
         };
@@ -145,12 +149,21 @@ impl WorkspaceServiceState {
 
     pub fn tab_titles(&self) -> Vec<String> {
         let titles = self.gshell_titles.borrow();
+        let commands = self.gshell_commands.borrow();
+        let working_directories = self.gshell_working_directories.borrow();
+        let home_dir = env::var_os("HOME").map(PathBuf::from);
         self.tab_gshells()
             .into_iter()
             .map(|gshell_id| {
                 titles
                     .get(&gshell_id)
                     .cloned()
+                    .or_else(|| commands.get(&gshell_id).cloned())
+                    .or_else(|| {
+                        working_directories
+                            .get(&gshell_id)
+                            .map(|path| pretty_path(path, home_dir.as_deref()))
+                    })
                     .unwrap_or_else(|| self.default_tab_title.clone())
             })
             .collect()
@@ -176,6 +189,21 @@ impl WorkspaceServiceState {
             titles.insert(gshell_id, title);
         } else {
             titles.remove(&gshell_id);
+        }
+    }
+
+    pub fn update_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf) {
+        self.gshell_working_directories
+            .borrow_mut()
+            .insert(gshell_id, working_directory);
+    }
+
+    pub fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>) {
+        let mut commands = self.gshell_commands.borrow_mut();
+        if let Some(command) = command.filter(|command| !command.trim().is_empty()) {
+            commands.insert(gshell_id, command);
+        } else {
+            commands.remove(&gshell_id);
         }
     }
 
@@ -258,6 +286,14 @@ impl WorkspaceServiceState {
             titles.remove(closed_gshell);
         }
         drop(titles);
+        let mut working_directories = self.gshell_working_directories.borrow_mut();
+        let mut commands = self.gshell_commands.borrow_mut();
+        for closed_gshell in &closed_gshells {
+            working_directories.remove(closed_gshell);
+            commands.remove(closed_gshell);
+        }
+        drop(working_directories);
+        drop(commands);
 
         Some(WorkspaceGShellCloseOutcome::Closed {
             closed_gshells,
@@ -512,6 +548,16 @@ where
             .update_gshell_title(gshell_id, title)
     }
 
+    fn update_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf) {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .update_gshell_working_directory(gshell_id, working_directory)
+    }
+
+    fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>) {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .update_gshell_command(gshell_id, command)
+    }
+
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
             .split_focused_gshell(direction)
@@ -764,6 +810,18 @@ mod tests {
 
         state.update_gshell_title(second, None);
         assert_eq!(state.tab_titles(), vec!["nvim", fallback.as_str()]);
+
+        state.update_gshell_working_directory(second, std::path::PathBuf::from("/tmp/project"));
+        assert_eq!(state.tab_titles(), vec!["nvim", "/tmp/project"]);
+
+        state.update_gshell_command(second, Some("cargo test".to_owned()));
+        assert_eq!(state.tab_titles(), vec!["nvim", "cargo test"]);
+
+        state.update_gshell_title(second, Some("explicit title".to_owned()));
+        assert_eq!(state.tab_titles(), vec!["nvim", "explicit title"]);
+        state.update_gshell_title(second, None);
+        state.update_gshell_command(second, None);
+        assert_eq!(state.tab_titles(), vec!["nvim", "/tmp/project"]);
         assert!(!state.tab_titles().iter().any(|title| title == "Shell"));
     }
 

@@ -249,6 +249,14 @@ impl IGShellService for App {
         GShellService::inj_ref(self).gshell_working_directory(gshell_id)
     }
 
+    fn report_gshell_working_directory(
+        &self,
+        gshell_id: GShellId,
+        working_directory: std::path::PathBuf,
+    ) {
+        GShellService::inj_ref(self).report_gshell_working_directory(gshell_id, working_directory)
+    }
+
     fn route_input_to_gshell(&self, input: GShellInput) {
         GShellService::inj_ref(self).route_input_to_gshell(input)
     }
@@ -264,7 +272,6 @@ impl IPtyService for App {
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
         spawn_config: germinal_ports::pty_host::spawn_config::PtySpawnConfig,
-        term_size: TerminalGridSize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
@@ -272,7 +279,6 @@ impl IPtyService for App {
             gshell_id,
             pty_host_id,
             spawn_config,
-            term_size,
             surface_snapshot_tx,
             snapshot_wake_pending,
         )
@@ -290,13 +296,16 @@ impl IPtyService for App {
         PtyService::inj_ref(self).pty_host_working_directory(pty_host_id)
     }
 
-    fn resize_pty_host(
+    fn update_pty_host_working_directory(
         &self,
         pty_host_id: PtyHostId,
-        pty_size: TerminalPtySize,
-        term_size: TerminalGridSize,
+        working_directory: std::path::PathBuf,
     ) {
-        PtyService::inj_ref(self).resize_pty_host(pty_host_id, pty_size, term_size)
+        PtyService::inj_ref(self).update_pty_host_working_directory(pty_host_id, working_directory)
+    }
+
+    fn resize_pty_host(&self, pty_host_id: PtyHostId, pty_size: TerminalPtySize) {
+        PtyService::inj_ref(self).resize_pty_host(pty_host_id, pty_size)
     }
 }
 
@@ -340,7 +349,7 @@ impl IWorkerService for App {
     fn spawn_terminal_worker(
         &self,
         gshell_id: GShellId,
-        initial_size: TerminalGridSize,
+        initial_size: TerminalPtySize,
         surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Option<SyncSender<TerminalWorkerInput>> {
@@ -491,6 +500,19 @@ impl IWorkspaceService for App {
 
     fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>) {
         WorkspaceService::inj_ref(self).update_gshell_title(gshell_id, title)
+    }
+
+    fn update_gshell_working_directory(
+        &self,
+        gshell_id: GShellId,
+        working_directory: std::path::PathBuf,
+    ) {
+        WorkspaceService::inj_ref(self)
+            .update_gshell_working_directory(gshell_id, working_directory)
+    }
+
+    fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>) {
+        WorkspaceService::inj_ref(self).update_gshell_command(gshell_id, command)
     }
 
     fn split_focused_gshell(
