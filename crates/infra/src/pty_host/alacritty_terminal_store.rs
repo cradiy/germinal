@@ -103,7 +103,7 @@ impl Dimensions for AlacrittyTermSize {
 
 #[derive(Clone)]
 struct PtyWriteEventListener {
-    pending_writes: Sender<Vec<u8>>,
+    pending_writes: Sender<PendingPtyWrite>,
     pending_titles: Sender<Option<String>>,
     pending_bells: Sender<()>,
     pending_clipboard_stores: Sender<(TerminalClipboard, String)>,
@@ -111,6 +111,12 @@ struct PtyWriteEventListener {
 }
 
 pub(crate) type TerminalClipboardFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
+type TerminalColorFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
+
+enum PendingPtyWrite {
+    Bytes(Vec<u8>),
+    ColorRequest(usize, TerminalColorFormatter),
+}
 
 pub(crate) struct TerminalClipboardLoad {
     pub clipboard: TerminalClipboard,
@@ -119,7 +125,7 @@ pub(crate) struct TerminalClipboardLoad {
 
 impl PtyWriteEventListener {
     fn new(
-        pending_writes: Sender<Vec<u8>>,
+        pending_writes: Sender<PendingPtyWrite>,
         pending_titles: Sender<Option<String>>,
         pending_bells: Sender<()>,
         pending_clipboard_stores: Sender<(TerminalClipboard, String)>,
@@ -139,7 +145,14 @@ impl EventListener for PtyWriteEventListener {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
-                let _ = self.pending_writes.send(text.into_bytes());
+                let _ = self
+                    .pending_writes
+                    .send(PendingPtyWrite::Bytes(text.into_bytes()));
+            }
+            Event::ColorRequest(index, formatter) => {
+                let _ = self
+                    .pending_writes
+                    .send(PendingPtyWrite::ColorRequest(index, formatter));
             }
             Event::Title(title) => {
                 let _ = self.pending_titles.send(Some(title));
@@ -280,7 +293,9 @@ impl AlacrittyTerminalStore {
                     );
                     let result = state.graphics.handle(command, cursor);
                     if let Some(response) = result.response {
-                        let _ = state.pending_write_tx.send(response);
+                        let _ = state
+                            .pending_write_tx
+                            .send(PendingPtyWrite::Bytes(response));
                     }
                     if let Some(cursor_move) = result.cursor_move {
                         if cursor_move.columns > 0 {
@@ -772,7 +787,7 @@ impl AlacrittyTerminalStore {
             return Vec::new();
         };
 
-        state.take_pending_writes()
+        state.take_pending_writes(&self.color_theme)
     }
 
     pub fn take_title_change(&self, render_target_id: RenderTargetId) -> Option<Option<String>> {
@@ -1215,8 +1230,8 @@ fn select_around_vim_word<T: EventListener>(term: &mut Term<T>) {
 
 pub struct AlacrittyTermState {
     term: Term<PtyWriteEventListener>,
-    pending_write_tx: Sender<Vec<u8>>,
-    pending_write_rx: Receiver<Vec<u8>>,
+    pending_write_tx: Sender<PendingPtyWrite>,
+    pending_write_rx: Receiver<PendingPtyWrite>,
     pending_title_rx: Receiver<Option<String>>,
     pending_bell_rx: Receiver<()>,
     pending_clipboard_store_rx: Receiver<(TerminalClipboard, String)>,
@@ -1304,11 +1319,18 @@ impl AlacrittyTermState {
         self.term.resize(self.size);
     }
 
-    fn take_pending_writes(&mut self) -> Vec<Vec<u8>> {
+    fn take_pending_writes(&mut self, color_theme: &TerminalColorTheme) -> Vec<Vec<u8>> {
         let mut writes = Vec::new();
 
-        while let Ok(bytes) = self.pending_write_rx.try_recv() {
-            writes.push(bytes);
+        while let Ok(write) = self.pending_write_rx.try_recv() {
+            match write {
+                PendingPtyWrite::Bytes(bytes) => writes.push(bytes),
+                PendingPtyWrite::ColorRequest(index, formatter) => {
+                    if let Some(color) = requested_color(index, self.term.colors(), color_theme) {
+                        writes.push(formatter(color).into_bytes());
+                    }
+                }
+            }
         }
 
         writes
@@ -1942,6 +1964,40 @@ fn indexed_color_to_rgb(
     Some(color_theme.palette[index as usize])
 }
 
+fn requested_color(index: usize, colors: &Colors, color_theme: &TerminalColorTheme) -> Option<Rgb> {
+    let color = if index <= NamedColor::DimForeground as usize
+        && let Some(color) = colors[index]
+    {
+        rgb_to_dto(color)
+    } else {
+        match index {
+            0..=255 => color_theme.palette[index],
+            index if index == NamedColor::Foreground as usize => color_theme.foreground,
+            index if index == NamedColor::Background as usize => color_theme.background,
+            index if index == NamedColor::Cursor as usize => color_theme.cursor,
+            index if index == NamedColor::DimBlack as usize => dim_color(color_theme.palette[0]),
+            index if index == NamedColor::DimRed as usize => dim_color(color_theme.palette[1]),
+            index if index == NamedColor::DimGreen as usize => dim_color(color_theme.palette[2]),
+            index if index == NamedColor::DimYellow as usize => dim_color(color_theme.palette[3]),
+            index if index == NamedColor::DimBlue as usize => dim_color(color_theme.palette[4]),
+            index if index == NamedColor::DimMagenta as usize => dim_color(color_theme.palette[5]),
+            index if index == NamedColor::DimCyan as usize => dim_color(color_theme.palette[6]),
+            index if index == NamedColor::DimWhite as usize => dim_color(color_theme.palette[7]),
+            index if index == NamedColor::BrightForeground as usize => color_theme.palette[15],
+            index if index == NamedColor::DimForeground as usize => {
+                dim_color(color_theme.foreground)
+            }
+            _ => return None,
+        }
+    };
+
+    Some(Rgb {
+        r: color.red,
+        g: color.green,
+        b: color.blue,
+    })
+}
+
 fn rgb_to_dto(rgb: Rgb) -> RgbColorDto {
     RgbColorDto::new(rgb.r, rgb.g, rgb.b)
 }
@@ -2219,6 +2275,69 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(2), b"\x1b[<u");
         assert_eq!(store.input_modes(target_id), TerminalInputModes::default());
+    }
+
+    #[test]
+    fn responds_to_codex_terminal_queries_in_order() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(200, 60));
+        let target_id = RenderTargetId::new(47);
+
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c",
+        );
+
+        assert_eq!(
+            store.take_pending_pty_writes(target_id),
+            vec![
+                b"\x1b[1;1R".to_vec(),
+                b"\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\".to_vec(),
+                b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec(),
+                b"\x1b[?0u".to_vec(),
+                b"\x1b[?6c".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_pushed_kitty_keyboard_flags_in_codex_startup_probe() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(200, 60));
+        let target_id = RenderTargetId::new(49);
+
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c",
+        );
+
+        assert_eq!(
+            store.take_pending_pty_writes(target_id),
+            vec![
+                b"\x1b[1;1R".to_vec(),
+                b"\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\".to_vec(),
+                b"\x1b]11;rgb:0000/0000/0000\x1b\\".to_vec(),
+                b"\x1b[?7u".to_vec(),
+                b"\x1b[?6c".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn color_queries_report_dynamic_overrides() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(48);
+
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b]10;#123456\x1b\\\x1b]10;?\x1b\\",
+        );
+
+        assert_eq!(
+            store.take_pending_pty_writes(target_id),
+            vec![b"\x1b]10;rgb:1212/3434/5656\x1b\\".to_vec()]
+        );
     }
 
     #[test]

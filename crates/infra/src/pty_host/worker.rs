@@ -284,6 +284,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     perf: TerminalWorkerPerf,
 
     pty_input_tx: Option<PtyInputSender>,
+    pending_pty_writes: Vec<Vec<u8>>,
     input_modes: Option<TerminalInputModeState>,
     gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
     notification_decoder: TerminalNotificationProtocolDecoder,
@@ -327,6 +328,7 @@ where
             perf: TerminalWorkerPerf::new(),
 
             pty_input_tx: None,
+            pending_pty_writes: Vec::new(),
             input_modes: None,
             gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
             notification_decoder: TerminalNotificationProtocolDecoder::default(),
@@ -446,6 +448,7 @@ where
                 self.pty_input_tx = Some(sender);
                 self.input_modes = Some(input_modes);
                 self.publish_input_modes();
+                self.flush_pending_pty_writes();
             }
         }
     }
@@ -458,21 +461,42 @@ where
         let chunks = std::mem::take(&mut self.pending_chunks);
         self.pending_bytes_len = 0;
 
-        self.unpublished_seq = self.apply_byte_chunks(&chunks);
+        if let Some(seq) = self.apply_byte_chunks(&chunks) {
+            self.unpublished_seq = Some(seq);
+        }
     }
 
-    fn forward_pty_writes(&self, writes: Vec<Vec<u8>>) {
+    fn forward_pty_writes(&mut self, writes: Vec<Vec<u8>>) {
         if writes.is_empty() {
             return;
         }
 
+        if self.pty_input_tx.is_none() {
+            self.pending_pty_writes.extend(writes);
+            return;
+        }
+
+        self.flush_pty_writes(writes);
+    }
+
+    fn flush_pending_pty_writes(&mut self) {
+        let writes = std::mem::take(&mut self.pending_pty_writes);
+        self.flush_pty_writes(writes);
+    }
+
+    fn flush_pty_writes(&self, writes: Vec<Vec<u8>>) {
         let Some(tx) = self.pty_input_tx.as_ref() else {
             return;
         };
-
-        for bytes in writes {
-            let _ = tx.send(PtyInput::Bytes(bytes));
+        if writes.is_empty() {
+            return;
         }
+
+        let mut combined = Vec::new();
+        for bytes in writes {
+            combined.extend(bytes);
+        }
+        let _ = tx.send(PtyInput::Bytes(combined));
     }
 
     fn publish_input_modes(&self) {
@@ -1622,6 +1646,42 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert!(text.contains("replacement"));
+    }
+
+    #[test]
+    fn terminal_worker_forwards_query_responses_after_pty_input_attaches() {
+        let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (pty_tx, pty_rx) = pty_input_channel();
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(11),
+            initial_size: super::AlacrittyTermSize::new(200, 60),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+
+        runtime.apply_byte_chunks(&[
+            b"\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
+                .to_vec(),
+        ]);
+
+        runtime.collect_input(TerminalWorkerInput::SetPtyInput {
+            sender: pty_tx,
+            input_modes: TerminalInputModeState::default(),
+        });
+
+        match pollster::block_on(pty_rx.recv()) {
+            Some(PtyInput::Bytes(bytes)) => assert_eq!(
+                bytes,
+                b"\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c"
+            ),
+            other => panic!("unexpected pty input: {other:?}"),
+        }
     }
 
     #[test]

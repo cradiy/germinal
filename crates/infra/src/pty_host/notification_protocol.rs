@@ -52,6 +52,7 @@ impl Default for PendingNotification {
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalNotificationProtocolDecoder {
     state: DecoderState,
+    utf8_continuations: u8,
     pending: HashMap<String, PendingNotification>,
     pending_anonymous: Option<PendingNotification>,
 }
@@ -60,6 +61,7 @@ impl Default for TerminalNotificationProtocolDecoder {
     fn default() -> Self {
         Self {
             state: DecoderState::Ground,
+            utf8_continuations: 0,
             pending: HashMap::new(),
             pending_anonymous: None,
         }
@@ -72,11 +74,18 @@ impl TerminalNotificationProtocolDecoder {
         let mut visible = Vec::new();
 
         for &byte in input {
+            let utf8_continuation = self.utf8_continuations > 0 && is_utf8_continuation(byte);
+            if utf8_continuation {
+                self.utf8_continuations -= 1;
+            } else {
+                self.utf8_continuations = utf8_continuations_after_lead(byte);
+            }
+
             let state = std::mem::replace(&mut self.state, DecoderState::Ground);
             self.state = match state {
                 DecoderState::Ground => match byte {
                     0x1b => DecoderState::Escape,
-                    0x9d => DecoderState::Osc {
+                    0x9d if !utf8_continuation => DecoderState::Osc {
                         raw: vec![0x9d],
                         data: Vec::new(),
                         escape: false,
@@ -104,7 +113,10 @@ impl TerminalNotificationProtocolDecoder {
                     escape,
                 } => {
                     raw.push(byte);
-                    if byte == 0x07 || byte == 0x9c || (escape && byte == b'\\') {
+                    if byte == 0x07
+                        || (byte == 0x9c && !utf8_continuation)
+                        || (escape && byte == b'\\')
+                    {
                         flush_visible(&mut events, &mut visible);
                         if let Some(protocol_events) = self.parse_osc(&data) {
                             events.extend(protocol_events);
@@ -133,7 +145,10 @@ impl TerminalNotificationProtocolDecoder {
                 }
                 DecoderState::PassthroughOsc { escape } => {
                     visible.push(byte);
-                    if byte == 0x07 || byte == 0x9c || (escape && byte == b'\\') {
+                    if byte == 0x07
+                        || (byte == 0x9c && !utf8_continuation)
+                        || (escape && byte == b'\\')
+                    {
                         DecoderState::Ground
                     } else {
                         DecoderState::PassthroughOsc {
@@ -244,6 +259,19 @@ impl TerminalNotificationProtocolDecoder {
             }
             None => self.pending_anonymous = Some(pending),
         }
+    }
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    matches!(byte, 0x80..=0xbf)
+}
+
+fn utf8_continuations_after_lead(byte: u8) -> u8 {
+    match byte {
+        0xc2..=0xdf => 1,
+        0xe0..=0xef => 2,
+        0xf0..=0xf4 => 3,
+        _ => 0,
     }
 }
 
@@ -400,6 +428,48 @@ mod tests {
         assert_eq!(
             decoder.feed(sequence),
             vec![NotificationProtocolEvent::Bytes(sequence.to_vec())]
+        );
+    }
+
+    #[test]
+    fn preserves_utf8_continuation_bytes_that_match_c1_controls() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+        let text = "before ❯ hello ✔ after";
+
+        assert_eq!(
+            decoder.feed(text.as_bytes()),
+            vec![NotificationProtocolEvent::Bytes(text.as_bytes().to_vec())]
+        );
+    }
+
+    #[test]
+    fn preserves_utf8_continuation_bytes_across_input_chunks() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+        let bytes = "❯ hello".as_bytes();
+
+        assert_eq!(
+            decoder.feed(&bytes[..1]),
+            vec![NotificationProtocolEvent::Bytes(bytes[..1].to_vec())]
+        );
+        assert_eq!(
+            decoder.feed(&bytes[1..]),
+            vec![NotificationProtocolEvent::Bytes(bytes[1..].to_vec())]
+        );
+    }
+
+    #[test]
+    fn preserves_utf8_c1_like_bytes_in_notification_payloads() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert_eq!(
+            decoder.feed("\x1b]99;;build ✔ done\x1b\\".as_bytes()),
+            vec![NotificationProtocolEvent::Notification(
+                TerminalNotification::new(
+                    Some("build ✔ done".to_owned()),
+                    None,
+                    TerminalNotificationOccasion::Always,
+                )
+            )]
         );
     }
 
