@@ -129,7 +129,7 @@ pub(crate) fn to_portable_pty_size(size: TerminalPtySize) -> PtySize {
     }
 }
 
-fn preferred_terminal_term_name() -> &'static str {
+pub(crate) fn preferred_terminal_term_name() -> &'static str {
     preferred_terminal_term_name_with_paths(default_terminfo_search_paths())
 }
 

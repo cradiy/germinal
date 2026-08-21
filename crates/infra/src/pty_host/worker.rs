@@ -42,6 +42,7 @@ use tracing::{debug, error, info};
 use crate::pty_host::alacritty_terminal_store::TerminalClipboardFormatter;
 use crate::{
     gnative::control_sequence::GNativeEnterControlSequenceDecoder,
+    pty::portable_pty_bridge::preferred_terminal_term_name,
     pty_host::{
         alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
         compatibility_protocol::{
@@ -341,6 +342,7 @@ where
             compatibility_decoder: TerminalCompatibilityProtocolDecoder::new(
                 config.initial_size,
                 config.color_theme,
+                preferred_terminal_term_name(),
             ),
             notification_decoder: TerminalNotificationProtocolDecoder::default(),
         }
@@ -1725,7 +1727,7 @@ mod tests {
         });
 
         runtime.apply_byte_chunks(&[
-            b"\x1b[?996n\x1b[14t\x1b[16t\x1b[?2031h\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
+            b"\x1b[>0q\x1bP+q436f\x1b\\\x1b[?996n\x1b[14t\x1b[16t\x1b[?2031h\x1b[?2004h\x1b[>4;0m\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c"
                 .to_vec(),
         ]);
 
@@ -1735,10 +1737,14 @@ mod tests {
         });
 
         match pollster::block_on(pty_rx.recv()) {
-            Some(PtyInput::Bytes(bytes)) => assert_eq!(
-                bytes,
-                b"\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c"
-            ),
+            Some(PtyInput::Bytes(bytes)) => {
+                let mut expected =
+                    format!("\x1bP>|Germinal {}\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes();
+                expected.extend_from_slice(
+                    b"\x1bP1+r436f=323536\x1b\\\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c",
+                );
+                assert_eq!(bytes, expected);
+            }
             other => panic!("unexpected pty input: {other:?}"),
         }
     }
