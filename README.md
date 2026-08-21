@@ -34,6 +34,22 @@ cargo run -p germinal --example kitty_image
 
 File, temporary-file, shared-memory, and animation actions are not supported yet. Unsupported requests receive a protocol error when an image ID is provided.
 
+## Desktop notifications
+
+Terminal applications can request native system notifications through Kitty OSC 99 or the legacy
+OSC 9 sequence. For example:
+
+```sh
+printf '\e]9;Build finished\a'
+printf '\e]99;i=build:d=0;Cargo\e\\'
+printf '\e]99;i=build:p=body;Tests passed\e\\'
+```
+
+OSC 99 title and body payloads, chunking, Base64 encoding, visibility conditions, and capability
+queries are supported. Notifications are delivered asynchronously so a slow desktop notification
+service does not block terminal rendering. Activating a notification switches to and focuses its
+source tab and panel when they are still open.
+
 ## PTY input modes
 
 Germinal tracks terminal modes emitted by PTY applications. Application cursor keys, bracketed paste, focus reporting, and SGR mouse click, drag, motion, and wheel events are encoded according to the active mode.

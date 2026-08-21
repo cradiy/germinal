@@ -64,6 +64,7 @@ gstreamer-audio = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-video = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-allocators = { version = "0.25.2", features = ["v1_28"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
+notify-rust = "4"
 
 [profile.product]
 inherits = "release"

@@ -4,6 +4,7 @@ use germinal_gnative_protocol::{gnative::session::GNativeSessionAccepted, seq::S
 
 use crate::pty_host::hyperlink::TerminalHyperlink;
 use crate::pty_host::terminal_clipboard::TerminalClipboard;
+use crate::pty_host::terminal_notification::TerminalNotification;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -51,6 +52,13 @@ pub enum GShellRuntimeEvent {
         hyperlinks: Vec<TerminalHyperlink>,
     },
     Bell {
+        gshell_id: GShellId,
+    },
+    SystemNotificationRequested {
+        gshell_id: GShellId,
+        notification: TerminalNotification,
+    },
+    SystemNotificationActivated {
         gshell_id: GShellId,
     },
     Osc52ClipboardStore {

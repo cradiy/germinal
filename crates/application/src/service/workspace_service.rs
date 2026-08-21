@@ -67,19 +67,19 @@ impl WorkspaceServiceState {
     }
 
     pub fn focus_gshell(&self, gshell_id: GShellId) -> bool {
-        let active_tab_id = self.workspace.borrow().active_tab_id();
-        let pane_id =
+        let binding =
             self.pane_bindings
                 .borrow()
                 .iter()
                 .find_map(|((tab_id, pane_id), bound_gshell_id)| {
-                    (*tab_id == active_tab_id && *bound_gshell_id == gshell_id).then_some(*pane_id)
+                    (*bound_gshell_id == gshell_id).then_some((*tab_id, *pane_id))
                 });
-        let Some(pane_id) = pane_id else {
+        let Some((tab_id, pane_id)) = binding else {
             return false;
         };
 
-        self.workspace.borrow_mut().set_focused_pane(pane_id)
+        let mut workspace = self.workspace.borrow_mut();
+        workspace.activate_tab(tab_id) && workspace.set_focused_pane(pane_id)
     }
 
     pub fn focus_next_gshell(&self) -> GShellId {
@@ -625,6 +625,18 @@ mod tests {
         assert_eq!(state.focused_gshell(), gshells[0]);
         assert!(!state.focus_gshell(GShellId::new(99)));
         assert_eq!(state.focused_gshell(), gshells[0]);
+    }
+
+    #[test]
+    fn state_focuses_a_gshell_in_an_inactive_tab() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        let second = state.create_tab_gshell();
+
+        assert_eq!(state.focused_gshell(), second);
+        assert!(state.focus_gshell(first));
+        assert_eq!(state.active_tab_index(), 0);
+        assert_eq!(state.focused_gshell(), first);
     }
 
     #[test]

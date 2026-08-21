@@ -41,7 +41,10 @@ use tracing::{debug, error, info};
 use crate::pty_host::alacritty_terminal_store::TerminalClipboardFormatter;
 use crate::{
     gnative::control_sequence::GNativeEnterControlSequenceDecoder,
-    pty_host::alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
+    pty_host::{
+        alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
+        notification_protocol::{NotificationProtocolEvent, TerminalNotificationProtocolDecoder},
+    },
 };
 
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
@@ -283,6 +286,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     pty_input_tx: Option<PtyInputSender>,
     input_modes: Option<TerminalInputModeState>,
     gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
+    notification_decoder: TerminalNotificationProtocolDecoder,
 }
 
 impl<Dispatch> TerminalWorkerRuntime<Dispatch>
@@ -325,6 +329,7 @@ where
             pty_input_tx: None,
             input_modes: None,
             gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
+            notification_decoder: TerminalNotificationProtocolDecoder::default(),
         }
     }
 
@@ -488,16 +493,29 @@ where
             let decode_result = self.gnative_enter_decoder.decode(bytes);
             enter_gnative |= decode_result.enter_gnative;
 
-            if decode_result.visible_bytes.is_empty() {
-                continue;
+            for event in self.notification_decoder.feed(&decode_result.visible_bytes) {
+                match event {
+                    NotificationProtocolEvent::Bytes(bytes) => {
+                        applied_visible_bytes = true;
+                        self.terminal_store.apply_bytes(self.target_id, seq, &bytes);
+
+                        let pending_pty_writes =
+                            self.terminal_store.take_pending_pty_writes(self.target_id);
+                        self.forward_pty_writes(pending_pty_writes);
+                    }
+                    NotificationProtocolEvent::Notification(notification) => {
+                        let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                            GShellRuntimeEvent::SystemNotificationRequested {
+                                gshell_id: self.gshell_id,
+                                notification,
+                            },
+                        ));
+                    }
+                    NotificationProtocolEvent::PtyWrite(bytes) => {
+                        self.forward_pty_writes(vec![bytes]);
+                    }
+                }
             }
-
-            applied_visible_bytes = true;
-            self.terminal_store
-                .apply_bytes(self.target_id, seq, &decode_result.visible_bytes);
-
-            let pending_pty_writes = self.terminal_store.take_pending_pty_writes(self.target_id);
-            self.forward_pty_writes(pending_pty_writes);
         }
         self.publish_input_modes();
         if let Some(title) = self.terminal_store.take_title_change(self.target_id) {
@@ -1114,6 +1132,7 @@ mod tests {
             pty_input::{PtyInput, pty_input_channel},
             terminal_clipboard::TerminalClipboard,
             terminal_input_mode::TerminalInputModeState,
+            terminal_notification::{TerminalNotification, TerminalNotificationOccasion},
             worker_backend::ITerminalWorkerBackend,
             worker_input::{
                 TerminalDisplayScroll, TerminalSelectionKind, TerminalSelectionPoint,
@@ -1397,6 +1416,49 @@ mod tests {
             RuntimeEvent::GShell(GShellRuntimeEvent::FrameReady { gshell_id, .. })
                 if gshell_id == GShellId::new(8)
         ));
+    }
+
+    #[test]
+    fn terminal_worker_dispatches_system_notification_without_redrawing() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(10),
+            TerminalGridSize::new(80, 24),
+            snapshot_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(
+                b"\x1b]99;i=build:d=0;Cargo\x1b\\\x1b]99;i=build:p=body:o=unfocused;Tests passed\x1b\\"
+                    .to_vec(),
+            ))
+            .expect("terminal notification output should send");
+
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("system notification event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::SystemNotificationRequested {
+                gshell_id: GShellId::new(10),
+                notification: TerminalNotification::new(
+                    Some("Cargo".to_owned()),
+                    Some("Tests passed".to_owned()),
+                    TerminalNotificationOccasion::Unfocused,
+                ),
+            })
+        );
+        assert!(
+            snapshot_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
     }
 
     #[test]

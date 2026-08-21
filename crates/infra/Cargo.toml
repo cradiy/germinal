@@ -33,6 +33,7 @@ flume = "0.11"
 base64.workspace = true
 flate2.workspace = true
 png.workspace = true
+notify-rust.workspace = true
 
 
 [target.'cfg(unix)'.dependencies]

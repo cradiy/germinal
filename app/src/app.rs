@@ -39,6 +39,7 @@ use germinal_infra::{
     rendering::pty_surface::window_runtime::{
         WgpuTerminalWindowRuntime, WgpuTerminalWindowRuntimeFactory,
     },
+    system_notification::SystemNotifier,
 };
 use germinal_ports::{
     event::{
@@ -51,7 +52,10 @@ use germinal_ports::{
         },
     },
     pty_host::{
-        hyperlink::TerminalHyperlink, size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig,
+        hyperlink::TerminalHyperlink,
+        size_info::TerminalSizeInfo,
+        spawn_config::PtySpawnConfig,
+        terminal_notification::{TerminalNotification, TerminalNotificationOccasion},
         window_size::TerminalWindowSize,
     },
     rendering::{
@@ -102,6 +106,7 @@ pub struct App {
     wgpu_pane_targets: HashSet<RenderTargetId>,
     render_window_id: Option<WindowId>,
     audible_bell: AudibleBell,
+    system_notifier: SystemNotifier,
     paste_controller: HostPasteController,
     window_input_modifiers: WindowInputModifiers,
     routed_input_modifiers: WindowInputModifiers,
@@ -154,6 +159,12 @@ impl App {
         let runtime_event_dispatcher = AppRuntimeEventDispatcher {
             proxy: runtime_event_proxy,
         };
+        let notification_dispatcher = runtime_event_dispatcher.clone();
+        let system_notifier = SystemNotifier::new(move |gshell_id| {
+            let _ = notification_dispatcher.dispatch(RuntimeEvent::GShell(
+                GShellRuntimeEvent::SystemNotificationActivated { gshell_id },
+            ));
+        });
         let media_dispatcher = {
             let runtime_event_dispatcher = runtime_event_dispatcher.clone();
             std::sync::Arc::new(move |event: RuntimeEvent| runtime_event_dispatcher.dispatch(event))
@@ -208,6 +219,7 @@ impl App {
             wgpu_pane_targets,
             render_window_id: None,
             audible_bell,
+            system_notifier,
             paste_controller: HostPasteController::default(),
             window_input_modifiers: WindowInputModifiers::new(false, false, false, false),
             routed_input_modifiers: WindowInputModifiers::new(false, false, false, false),
@@ -814,6 +826,26 @@ impl App {
         allowed
     }
 
+    fn show_terminal_notification(&self, gshell_id: GShellId, notification: TerminalNotification) {
+        let allowed = match notification.occasion {
+            TerminalNotificationOccasion::Always => true,
+            TerminalNotificationOccasion::Unfocused => {
+                !self.window_focused || self.focused_gshell() != gshell_id
+            }
+            TerminalNotificationOccasion::Invisible => {
+                !self.window_focused || !self.visible_gshells().contains(&gshell_id)
+            }
+        };
+        if allowed {
+            self.system_notifier.show(gshell_id, notification);
+        } else {
+            debug!(
+                gshell_id = gshell_id.value(),
+                "ignored terminal notification because its visibility condition was not met"
+            );
+        }
+    }
+
     fn try_focus_pane_at_cursor(&mut self) -> bool {
         let Some(cursor_position) = self.cursor_position else {
             return false;
@@ -1078,6 +1110,18 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     Duration::from_millis(self.config.bell.duration_ms),
                     self.config.bell.urgent_on_unfocused && !self.window_focused,
                 );
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::SystemNotificationRequested {
+                gshell_id,
+                notification,
+            }) => {
+                self.show_terminal_notification(gshell_id, notification);
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::SystemNotificationActivated { gshell_id }) => {
+                let previous_gshell = self.focused_gshell();
+                if self.focus_gshell(gshell_id) {
+                    self.activate_workspace_tab(previous_gshell, gshell_id);
+                }
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::Osc52ClipboardStore {
                 gshell_id,
