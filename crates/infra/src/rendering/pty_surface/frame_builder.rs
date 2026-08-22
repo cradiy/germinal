@@ -130,6 +130,10 @@ impl WgpuTerminalFrameBuilder {
             if renderer.config() != renderer_config {
                 *renderer = WgpuRendererBackend::new(renderer_config);
             }
+            renderer.set_text_shaping(
+                self.glyph_atlas_frame_builder.source_kind()
+                    == WgpuTerminalGlyphAtlasSourceKind::Crossfont,
+            );
 
             renderer.render_surface(surface_snapshot);
             let render_surface_time = render_surface_started_at.elapsed();
@@ -304,4 +308,59 @@ fn renderer_lines_of(surface_snapshot: &RenderSurfaceSnapshot) -> Vec<String> {
             line
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use germinal_ports::{
+        rendering::{
+            frame_plan_builder::{RgbColorDto, TextStyleDto},
+            render_target_id::RenderTargetId,
+            surface_snapshot::{
+                RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+                RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+            },
+        },
+        seq::Seq,
+    };
+
+    use super::*;
+
+    #[test]
+    fn crossfont_frame_maps_joined_emoji_and_contextual_script_glyphs() {
+        let builder = WgpuTerminalFrameBuilder::default()
+            .with_crossfont_glyph_atlas("monospace", 16.0)
+            .expect("the platform monospace font should load");
+        let snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "👩\u{200d}💻 سلام".to_string(),
+                    style: TextStyleDto::plain(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 3,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: None,
+        };
+
+        let frame = builder.build(&snapshot, WgpuViewportUniform::new(640.0, 480.0));
+
+        assert_eq!(frame.renderer_lines, ["👩\u{200d}💻 سلام"]);
+        assert_eq!(frame.glyph_uv_map_result.missing_vertices, 0);
+        assert!(frame.has_mapped_glyph_uvs());
+        assert!(frame.glyph_atlas_frame.atlas.non_zero_pixel_count() > 0);
+    }
 }

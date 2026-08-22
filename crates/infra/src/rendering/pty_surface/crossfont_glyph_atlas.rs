@@ -1,9 +1,9 @@
-use std::{
-    cell::RefCell,
-    collections::{BTreeSet, HashMap},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+use cosmic_text::{
+    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style as CosmicStyle, SwashCache,
+    Weight as CosmicWeight, Wrap,
+};
 use crossfont::{
     BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
 };
@@ -13,9 +13,12 @@ use germinal_ports::pty_host::{
 };
 use thiserror::Error;
 
-use crate::rendering::pty_surface::glyph_atlas::{
-    WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
-    WgpuTerminalGlyphUvRect,
+use crate::rendering::pty_surface::{
+    glyph_atlas::{
+        WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
+        WgpuTerminalGlyphUvRect,
+    },
+    text_shaping::TerminalTextSegment,
 };
 
 #[derive(Debug, Error)]
@@ -219,17 +222,17 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut glyphs = BTreeSet::new();
-
+        let mut segments = std::collections::BTreeMap::new();
         for text in texts {
-            for c in text.as_ref().chars() {
-                if terminal_char_cell_width(c) > 0 {
-                    glyphs.insert(WgpuTerminalGlyphKey::plain(c));
-                }
+            for segment in crate::rendering::pty_surface::text_shaping::terminal_text_segments(
+                text.as_ref(),
+                germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+            ) {
+                segments.entry(segment.glyph_key).or_insert(segment);
             }
         }
 
-        self.build_for_glyphs(glyphs)
+        self.build_for_segments(segments.values())
     }
 
     pub fn build_for_chars<I>(&self, chars: I) -> WgpuTerminalGlyphAtlas
@@ -245,7 +248,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
     {
         let glyphs: Vec<WgpuTerminalGlyphKey> = glyphs
             .into_iter()
-            .filter(|glyph| terminal_char_cell_width(glyph.c()) > 0)
+            .filter(|glyph| glyph.character().is_some_and(|c| !c.is_control()))
             .collect();
 
         if glyphs.is_empty() {
@@ -268,6 +271,44 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         let glyphs: Vec<RasterizedTerminalGlyph> = glyphs
             .into_iter()
             .map(|glyph| backend.rasterize_terminal_glyph(glyph))
+            .collect();
+
+        build_atlas_from_rasterized_glyphs(
+            glyphs,
+            base_cell_width,
+            base_cell_height,
+            baseline_y_px,
+            self.padding_px,
+            self.columns,
+            self.max_texture_dimension_2d,
+        )
+    }
+
+    pub fn build_for_segments<'a>(
+        &self,
+        segments: impl IntoIterator<Item = &'a TerminalTextSegment>,
+    ) -> WgpuTerminalGlyphAtlas {
+        let segments: Vec<&TerminalTextSegment> = segments.into_iter().collect();
+        if segments.is_empty() {
+            return WgpuTerminalGlyphAtlas::empty();
+        }
+
+        let mut backend_ref = self.backend.borrow_mut();
+        let Some(backend) = backend_ref.as_mut() else {
+            return WgpuTerminalGlyphAtlas::empty();
+        };
+        let base_cell_width = self
+            .cell_width_px
+            .unwrap_or_else(|| backend.base_cell_width_px().max(1));
+        let base_cell_height = self
+            .cell_height_px
+            .unwrap_or_else(|| backend.base_cell_height_px().max(1));
+        let baseline_y_px = backend.baseline_y_px();
+        let glyphs = segments
+            .into_iter()
+            .map(|segment| {
+                backend.rasterize_terminal_segment(segment, base_cell_width, base_cell_height)
+            })
             .collect();
 
         build_atlas_from_rasterized_glyphs(
@@ -338,6 +379,20 @@ impl WgpuCrossfontFontFaces {
             bold_weight: wgpu_font_weight_from_terminal(config.bold_weight()),
         }
     }
+
+    fn face_for_style(&self, bold: bool, italic: bool) -> &WgpuCrossfontFontFace {
+        match (bold, italic) {
+            (false, false) => &self.normal,
+            (true, false) => self.bold.as_ref().unwrap_or(&self.normal),
+            (false, true) => self.italic.as_ref().unwrap_or(&self.normal),
+            (true, true) => self
+                .bold_italic
+                .as_ref()
+                .or(self.bold.as_ref())
+                .or(self.italic.as_ref())
+                .unwrap_or(&self.normal),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +420,8 @@ struct WgpuCrossfontGlyphBackend {
     line_height_px: u32,
     baseline_y_px: i32,
     glyph_cache: HashMap<WgpuTerminalGlyphKey, RasterizedTerminalGlyph>,
+    cluster_rasterizer: Option<CosmicTextClusterRasterizer>,
+    cluster_font_faces: WgpuCrossfontFontFaces,
 }
 
 impl WgpuCrossfontGlyphBackend {
@@ -454,6 +511,8 @@ impl WgpuCrossfontGlyphBackend {
             line_height_px,
             baseline_y_px,
             glyph_cache: HashMap::new(),
+            cluster_rasterizer: None,
+            cluster_font_faces: font_faces,
         })
     }
 
@@ -484,9 +543,38 @@ impl WgpuCrossfontGlyphBackend {
         glyph
     }
 
+    fn rasterize_terminal_segment(
+        &mut self,
+        segment: &TerminalTextSegment,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> RasterizedTerminalGlyph {
+        if let Some(glyph) = self.glyph_cache.get(&segment.glyph_key) {
+            return glyph.clone();
+        }
+
+        let glyph = if segment.shaped {
+            self.cluster_rasterizer
+                .get_or_insert_with(|| {
+                    CosmicTextClusterRasterizer::new(
+                        self.cluster_font_faces.clone(),
+                        self.size.as_px(),
+                    )
+                })
+                .rasterize(segment, cell_width_px, cell_height_px)
+        } else {
+            self.rasterize_terminal_glyph(segment.glyph_key)
+        };
+        self.glyph_cache.insert(segment.glyph_key, glyph.clone());
+        glyph
+    }
+
     fn font_key_for_glyph(&self, glyph: WgpuTerminalGlyphKey) -> FontKey {
+        let character = glyph
+            .character()
+            .expect("character glyph required by the crossfont rasterizer");
         let primary = self.primary.for_glyph(glyph);
-        if is_emoji_presentation_candidate(glyph.c()) {
+        if is_emoji_presentation_candidate(character) {
             return self
                 .fallback_key_for_glyph(glyph)
                 .or(self.emoji_font_key)
@@ -497,7 +585,7 @@ impl WgpuCrossfontGlyphBackend {
             .primary_coverage
             .get(&primary.family)
             .and_then(Option::as_ref)
-            .is_none_or(|coverage| coverage.contains(glyph.c()));
+            .is_none_or(|coverage| coverage.contains(character));
         if primary_has_glyph {
             return primary.key;
         }
@@ -506,9 +594,10 @@ impl WgpuCrossfontGlyphBackend {
     }
 
     fn fallback_key_for_glyph(&self, glyph: WgpuTerminalGlyphKey) -> Option<FontKey> {
+        let character = glyph.character()?;
         self.fallbacks
             .iter()
-            .find(|fallback| fallback.coverage.contains(glyph.c()))
+            .find(|fallback| fallback.coverage.contains(character))
             .map(|fallback| fallback.faces.for_glyph(glyph).key)
     }
 }
@@ -572,6 +661,7 @@ struct RasterizedTerminalGlyph {
     advance_px: i32,
     pixels: Vec<u8>,
     is_color: bool,
+    direct_draw_offset: Option<(i32, i32)>,
 }
 
 fn rasterize_terminal_glyph(
@@ -580,7 +670,9 @@ fn rasterize_terminal_glyph(
     size: Size,
     key: WgpuTerminalGlyphKey,
 ) -> RasterizedTerminalGlyph {
-    let c = key.c();
+    let c = key
+        .character()
+        .expect("character glyph required by the crossfont rasterizer");
     let cell_width = terminal_char_cell_width(c).max(1);
     let glyph_key = GlyphKey {
         character: c,
@@ -599,6 +691,7 @@ fn rasterize_terminal_glyph(
             advance_px: 0,
             pixels: vec![0, 0, 0, 0],
             is_color: false,
+            direct_draw_offset: None,
         };
     };
 
@@ -617,7 +710,236 @@ fn rasterize_terminal_glyph(
         advance_px: glyph.advance.0,
         pixels,
         is_color,
+        direct_draw_offset: None,
     }
+}
+
+struct CosmicTextClusterRasterizer {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    font_faces: WgpuCrossfontFontFaces,
+    font_size_px: f32,
+}
+
+impl CosmicTextClusterRasterizer {
+    fn new(font_faces: WgpuCrossfontFontFaces, font_size_px: f32) -> Self {
+        Self {
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+            font_faces,
+            font_size_px,
+        }
+    }
+
+    fn rasterize(
+        &mut self,
+        segment: &TerminalTextSegment,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> RasterizedTerminalGlyph {
+        let face = self
+            .font_faces
+            .face_for_style(segment.glyph_key.bold(), segment.glyph_key.italic());
+        let primary_family = face.family.clone();
+        let weight = cosmic_weight(segment.glyph_key.bold(), self.font_faces.bold_weight);
+        let style = if segment.glyph_key.italic() {
+            CosmicStyle::Italic
+        } else {
+            CosmicStyle::Normal
+        };
+        let mut drawn_pixels = self.draw_cluster(
+            &segment.text,
+            &primary_family,
+            weight,
+            style,
+            cell_height_px,
+        );
+        if drawn_pixels.is_empty() && is_emoji_text_cluster(&segment.text) {
+            let fallback_families: Vec<String> = self
+                .font_faces
+                .fallbacks
+                .iter()
+                .cloned()
+                .chain(
+                    [
+                        "Noto Emoji",
+                        "Symbola",
+                        "Segoe UI Emoji",
+                        "Apple Color Emoji",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned),
+                )
+                .collect();
+            for family in fallback_families {
+                drawn_pixels =
+                    self.draw_cluster(&segment.text, &family, weight, style, cell_height_px);
+                if !drawn_pixels.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        let is_color = is_emoji_text_cluster(&segment.text)
+            && drawn_pixels
+                .iter()
+                .any(|(_, _, rgba)| rgba[3] > 0 && (rgba[0] != rgba[1] || rgba[1] != rgba[2]));
+        rasterized_cluster_from_pixels(
+            segment,
+            cell_width_px,
+            cell_height_px,
+            is_color,
+            drawn_pixels,
+        )
+    }
+
+    fn draw_cluster(
+        &mut self,
+        text: &str,
+        family: &str,
+        weight: CosmicWeight,
+        style: CosmicStyle,
+        cell_height_px: u32,
+    ) -> Vec<(i32, i32, [u8; 4])> {
+        let attrs = Attrs::new()
+            .family(cosmic_family(family))
+            .weight(weight)
+            .style(style);
+        let metrics = Metrics::new(self.font_size_px, cell_height_px as f32);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        let mut buffer = buffer.borrow_with(&mut self.font_system);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, Some(cell_height_px as f32));
+        buffer.set_text(text, &attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(false);
+
+        let mut drawn_pixels = Vec::new();
+        buffer.draw(
+            &mut self.swash_cache,
+            Color::rgb(255, 255, 255),
+            |x, y, width, height, color| {
+                for offset_y in 0..height as i32 {
+                    for offset_x in 0..width as i32 {
+                        drawn_pixels.push((x + offset_x, y + offset_y, color.as_rgba()));
+                    }
+                }
+            },
+        );
+        drawn_pixels
+    }
+}
+
+fn rasterized_cluster_from_pixels(
+    segment: &TerminalTextSegment,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    is_color: bool,
+    drawn_pixels: Vec<(i32, i32, [u8; 4])>,
+) -> RasterizedTerminalGlyph {
+    let Some(min_x) = drawn_pixels.iter().map(|(x, _, _)| *x).min() else {
+        return empty_cluster_glyph(segment, cell_width_px);
+    };
+    let min_y = drawn_pixels.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+    let max_x = drawn_pixels
+        .iter()
+        .map(|(x, _, _)| *x)
+        .max()
+        .unwrap_or(min_x);
+    let max_y = drawn_pixels
+        .iter()
+        .map(|(_, y, _)| *y)
+        .max()
+        .unwrap_or(min_y);
+    let width_px = (max_x - min_x + 1).max(1) as u32;
+    let height_px = (max_y - min_y + 1).max(1) as u32;
+    let mut pixels = vec![0_u8; (width_px * height_px * 4) as usize];
+
+    for (x, y, rgba) in drawn_pixels {
+        let pixel_x = (x - min_x) as u32;
+        let pixel_y = (y - min_y) as u32;
+        let index = ((pixel_y * width_px + pixel_x) * 4) as usize;
+        let source = if is_color { rgba } else { [0, 0, 0, rgba[3]] };
+        alpha_blend_pixel(&mut pixels[index..index + 4], source);
+    }
+
+    RasterizedTerminalGlyph {
+        key: segment.glyph_key,
+        cell_width: segment.cell_width.max(1),
+        width_px,
+        height_px,
+        left_px: min_x,
+        top_px: 0,
+        advance_px: (segment.cell_width.max(1) * cell_width_px) as i32,
+        pixels,
+        is_color,
+        direct_draw_offset: Some((min_x, min_y.clamp(0, cell_height_px as i32))),
+    }
+}
+
+fn empty_cluster_glyph(
+    segment: &TerminalTextSegment,
+    cell_width_px: u32,
+) -> RasterizedTerminalGlyph {
+    RasterizedTerminalGlyph {
+        key: segment.glyph_key,
+        cell_width: segment.cell_width.max(1),
+        width_px: 1,
+        height_px: 1,
+        left_px: 0,
+        top_px: 0,
+        advance_px: (segment.cell_width.max(1) * cell_width_px) as i32,
+        pixels: vec![0, 0, 0, 0],
+        is_color: false,
+        direct_draw_offset: Some((0, 0)),
+    }
+}
+
+fn alpha_blend_pixel(destination: &mut [u8], source: [u8; 4]) {
+    let source_alpha = u16::from(source[3]);
+    let destination_alpha = u16::from(destination[3]);
+    let inverse_source_alpha = 255 - source_alpha;
+    let output_alpha = source_alpha + destination_alpha * inverse_source_alpha / 255;
+    if output_alpha == 0 {
+        return;
+    }
+
+    for channel in 0..3 {
+        let source_value = u16::from(source[channel]) * source_alpha;
+        let destination_value =
+            u16::from(destination[channel]) * destination_alpha * inverse_source_alpha / 255;
+        destination[channel] = ((source_value + destination_value) / output_alpha) as u8;
+    }
+    destination[3] = output_alpha as u8;
+}
+
+fn cosmic_weight(bold: bool, configured: WgpuTerminalFontWeight) -> CosmicWeight {
+    if !bold {
+        return CosmicWeight::NORMAL;
+    }
+
+    match configured {
+        WgpuTerminalFontWeight::Normal => CosmicWeight::NORMAL,
+        WgpuTerminalFontWeight::Medium => CosmicWeight::MEDIUM,
+        WgpuTerminalFontWeight::Semibold => CosmicWeight::SEMIBOLD,
+        WgpuTerminalFontWeight::Bold => CosmicWeight::BOLD,
+    }
+}
+
+fn cosmic_family(family: &str) -> Family<'_> {
+    match family.to_ascii_lowercase().as_str() {
+        "monospace" => Family::Monospace,
+        "sans-serif" => Family::SansSerif,
+        "serif" => Family::Serif,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        _ => Family::Name(family),
+    }
+}
+
+fn is_emoji_text_cluster(text: &str) -> bool {
+    text.contains('\u{fe0f}')
+        || text.contains('\u{200d}')
+        || text.chars().any(is_emoji_presentation_candidate)
 }
 
 fn build_atlas_from_rasterized_glyphs(
@@ -849,6 +1171,9 @@ fn terminal_glyph_draw_offset(
     base_cell_height: u32,
     baseline_y_px: i32,
 ) -> (i32, i32) {
+    if let Some(offset) = glyph.direct_draw_offset {
+        return offset;
+    }
     let terminal_width = base_cell_width as i32 * glyph.cell_width.max(1) as i32;
 
     // Positive left bearings are honored.  Negative bearings are allowed to
@@ -1147,6 +1472,39 @@ mod tests {
         for glyph in glyphs {
             assert!(atlas.has_glyph_key(glyph));
         }
+    }
+
+    #[test]
+    fn includes_zero_width_glyphs_in_the_atlas() {
+        let builder = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
+            .expect("the platform monospace font should load");
+        let segment = crate::rendering::pty_surface::text_shaping::terminal_text_segments(
+            "中\u{301}",
+            germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+        )
+        .remove(0);
+        let atlas = builder.build_for_texts(["中\u{301}"]);
+
+        assert!(segment.shaped);
+        assert!(atlas.has_glyph_key(segment.glyph_key));
+    }
+
+    #[test]
+    fn shapes_joined_emoji_into_one_atlas_entry() {
+        let builder = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
+            .expect("the platform monospace font should load");
+        let segment = crate::rendering::pty_surface::text_shaping::terminal_text_segments(
+            "👩\u{200d}💻",
+            germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+        )
+        .remove(0);
+        let atlas = builder.build_for_texts([segment.text.as_str()]);
+        let entry = atlas.entry_for_key(segment.glyph_key).unwrap();
+
+        assert!(segment.shaped);
+        assert!(entry.width_px > 1);
+        assert!(entry.height_px > 1);
+        assert!(atlas.non_zero_pixel_count() > 0);
     }
 
     #[test]

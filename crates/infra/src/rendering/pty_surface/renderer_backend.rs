@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
@@ -24,6 +24,13 @@ use germinal_ports::{
     },
     seq::Seq,
 };
+use unicode_normalization::UnicodeNormalization;
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::rendering::pty_surface::{
+    glyph_atlas::WgpuTerminalGlyphKey,
+    text_shaping::{terminal_grapheme_cell_width, terminal_text_segments},
+};
 
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
 const CURSOR_TEXT_COLOR: RgbColorDto = RgbColorDto::new(0, 0, 0);
@@ -33,6 +40,7 @@ const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
+    text_shaping: Cell<bool>,
 }
 
 impl WgpuRendererBackend {
@@ -42,11 +50,16 @@ impl WgpuRendererBackend {
                 config,
                 ..WgpuRendererState::default()
             }),
+            text_shaping: Cell::new(false),
         }
     }
 
     pub fn config(&self) -> WgpuRendererConfig {
         self.inner.borrow().config
+    }
+
+    pub fn set_text_shaping(&self, enabled: bool) {
+        self.text_shaping.set(enabled);
     }
 
     pub fn with_quads<T>(&self, f: impl FnOnce(&[WgpuQuadDrawItem]) -> T) -> T {
@@ -90,7 +103,7 @@ impl RendererBackend for WgpuRendererBackend {
 
         for row_y in dirty_rows {
             if let Some(row) = snapshot_rows.get(&row_y) {
-                let rendered_row = render_row(row, config);
+                let rendered_row = render_row(row, config, self.text_shaping.get());
                 inner
                     .draw_rows
                     .insert(row_y, Arc::clone(&rendered_row.draw_row));
@@ -105,7 +118,13 @@ impl RendererBackend for WgpuRendererBackend {
         let mut cursor_quads = Vec::new();
         let mut cursor_text_quads = Vec::new();
         if let (Some(cursor), Some(preedit)) = (snapshot.cursor, snapshot.ime_preedit.as_ref()) {
-            ime_rows = render_ime_preedit(preedit, cursor, snapshot.default_background, config);
+            ime_rows = render_ime_preedit(
+                preedit,
+                cursor,
+                snapshot.default_background,
+                config,
+                self.text_shaping.get(),
+            );
             if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
             {
                 append_cursor_quads(
@@ -185,6 +204,7 @@ fn render_ime_preedit(
     cursor: RenderSurfaceCursorSnapshot,
     default_background: RgbColorDto,
     config: WgpuRendererConfig,
+    text_shaping: bool,
 ) -> Vec<WgpuRenderedRow> {
     if preedit.text.is_empty() || config.grid_columns == 0 || config.grid_rows == 0 {
         return Vec::new();
@@ -199,10 +219,18 @@ fn render_ime_preedit(
     let mut rows = BTreeMap::<u32, RenderSurfaceRowSnapshot>::new();
     let mut x = cursor.x.min(config.grid_columns - 1);
     let mut y = cursor.y.min(config.grid_rows - 1);
+    let mut last_run = None::<(u32, usize)>;
 
     for (byte_index, character) in preedit.text.char_indices() {
         let width = terminal_char_cell_width(character);
         if width == 0 {
+            if let Some((row_y, run_index)) = last_run
+                && let Some(run) = rows
+                    .get_mut(&row_y)
+                    .and_then(|row| row.runs.get_mut(run_index))
+            {
+                run.text.push(character);
+            }
             continue;
         }
         if x.saturating_add(width) > config.grid_columns {
@@ -233,19 +261,21 @@ fn render_ime_preedit(
                 underline: true,
             }
         };
-        rows.entry(y)
+        let runs = &mut rows
+            .entry(y)
             .or_insert_with(|| RenderSurfaceRowSnapshot {
                 y,
                 runs: Vec::new(),
             })
-            .runs
-            .push(
-                germinal_ports::rendering::surface_snapshot::RenderSurfaceRunSnapshot {
-                    x,
-                    text: character.to_string(),
-                    style,
-                },
-            );
+            .runs;
+        runs.push(
+            germinal_ports::rendering::surface_snapshot::RenderSurfaceRunSnapshot {
+                x,
+                text: character.to_string(),
+                style,
+            },
+        );
+        last_run = Some((y, runs.len() - 1));
 
         x = x.saturating_add(width);
         if x >= config.grid_columns {
@@ -254,7 +284,9 @@ fn render_ime_preedit(
         }
     }
 
-    rows.values().map(|row| render_row(row, config)).collect()
+    rows.values()
+        .map(|row| render_row(row, config, text_shaping))
+        .collect()
 }
 
 fn append_pixel_rect_quads_from_row(
@@ -310,7 +342,15 @@ fn scale_virtual_px(value: u32, actual_content_px: u32, virtual_content_px: u32)
     rounded.min(u64::from(u32::MAX)) as u32
 }
 
-fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> WgpuRenderedRow {
+fn render_row(
+    row: &RenderSurfaceRowSnapshot,
+    config: WgpuRendererConfig,
+    text_shaping: bool,
+) -> WgpuRenderedRow {
+    if text_shaping {
+        return render_shaped_row(row, config);
+    }
+
     let mut draw_row = WgpuDrawRow {
         y: row.y,
         glyphs: Vec::new(),
@@ -321,9 +361,22 @@ fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> Wgp
 
     for run in &row.runs {
         let mut x = run.x;
-        for c in run.text.chars() {
+        let mut previous_glyph_x = None;
+        for c in run.text.nfc() {
             let cell_width = terminal_char_cell_width(c);
             if cell_width == 0 {
+                let Some(glyph_x) = previous_glyph_x else {
+                    continue;
+                };
+                let glyph = WgpuGlyphDrawItem {
+                    x: glyph_x,
+                    y: row.y,
+                    c,
+                    cell_width: 0,
+                    style: run.style,
+                };
+                draw_row.glyphs.push(glyph);
+                glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
                 continue;
             }
             let glyph = WgpuGlyphDrawItem {
@@ -354,9 +407,114 @@ fn render_row(row: &RenderSurfaceRowSnapshot, config: WgpuRendererConfig) -> Wgp
                     x, row.y, cell_width, config, run.style,
                 ));
             }
+            previous_glyph_x = Some(x);
             x += cell_width;
         }
     }
+    WgpuRenderedRow {
+        draw_row: Arc::new(draw_row),
+        background_quads,
+        glyph_quads,
+        underline_quads,
+    }
+}
+
+fn render_shaped_row(
+    row: &RenderSurfaceRowSnapshot,
+    config: WgpuRendererConfig,
+) -> WgpuRenderedRow {
+    let mut draw_row = WgpuDrawRow {
+        y: row.y,
+        glyphs: Vec::new(),
+    };
+    let mut background_quads = Vec::new();
+    let mut glyph_quads = Vec::new();
+    let mut underline_quads = Vec::new();
+
+    for run in &row.runs {
+        let mut x = run.x;
+        let mut previous_glyph_x = None;
+        for segment in terminal_text_segments(&run.text, run.style) {
+            let segment_x = if segment.cell_width == 0 {
+                previous_glyph_x.unwrap_or(x)
+            } else {
+                x
+            };
+
+            if segment.cell_width > 0 {
+                if run.style.background.is_some() {
+                    background_quads.push(WgpuQuadDrawItem::background(
+                        segment_x,
+                        row.y,
+                        segment.cell_width,
+                        config,
+                        run.style,
+                    ));
+                }
+                if run.style.underline {
+                    underline_quads.push(WgpuQuadDrawItem::underline(
+                        segment_x,
+                        row.y,
+                        segment.cell_width,
+                        config,
+                        run.style,
+                    ));
+                }
+            }
+
+            let mut grapheme_x = segment_x;
+            for grapheme in segment.text.graphemes(true) {
+                let grapheme_width = terminal_grapheme_cell_width(grapheme);
+                for (character_index, character) in grapheme.chars().enumerate() {
+                    draw_row.glyphs.push(WgpuGlyphDrawItem {
+                        x: grapheme_x,
+                        y: row.y,
+                        c: character,
+                        cell_width: if character_index == 0 {
+                            grapheme_width
+                        } else {
+                            0
+                        },
+                        style: run.style,
+                    });
+                }
+                if grapheme_width > 0 {
+                    previous_glyph_x = Some(grapheme_x);
+                    grapheme_x += grapheme_width;
+                }
+            }
+
+            let Some(character) = segment.text.chars().next() else {
+                continue;
+            };
+            let glyph = WgpuGlyphDrawItem {
+                x: segment_x,
+                y: row.y,
+                c: character,
+                cell_width: segment.cell_width,
+                style: run.style,
+            };
+            if segment.shaped {
+                glyph_quads.push(WgpuQuadDrawItem::glyph_with_key(
+                    glyph,
+                    segment.glyph_key,
+                    config,
+                ));
+            } else if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(character) {
+                append_terminal_geometric_glyph_quads(
+                    &mut glyph_quads,
+                    glyph,
+                    config,
+                    geometric_glyph,
+                );
+            } else if character != ' ' {
+                glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+            }
+
+            x = x.saturating_add(segment.cell_width);
+        }
+    }
+
     WgpuRenderedRow {
         draw_row: Arc::new(draw_row),
         background_quads,
@@ -758,19 +916,21 @@ impl WgpuDrawRow {
     }
 
     pub fn text(&self) -> String {
-        let mut chars = Vec::new();
+        let mut text = String::new();
+        let mut next_x = 0_u32;
         for glyph in &self.glyphs {
-            let index = glyph.x as usize;
-            while chars.len() < index {
-                chars.push(' ');
+            if glyph.cell_width == 0 {
+                text.push(glyph.c);
+                continue;
             }
-            if index < chars.len() {
-                chars[index] = glyph.c;
-            } else {
-                chars.push(glyph.c);
+            while next_x < glyph.x {
+                text.push(' ');
+                next_x += 1;
             }
+            text.push(glyph.c);
+            next_x = glyph.x.saturating_add(glyph.cell_width.max(1));
         }
-        chars.into_iter().collect()
+        text
     }
 }
 
@@ -827,12 +987,20 @@ impl WgpuQuadDrawItem {
     }
 
     pub fn glyph(glyph: WgpuGlyphDrawItem, config: WgpuRendererConfig) -> Self {
+        Self::glyph_with_key(
+            glyph,
+            WgpuTerminalGlyphKey::styled(glyph.c, glyph.style.bold, glyph.style.italic),
+            config,
+        )
+    }
+
+    fn glyph_with_key(
+        glyph: WgpuGlyphDrawItem,
+        glyph_key: WgpuTerminalGlyphKey,
+        config: WgpuRendererConfig,
+    ) -> Self {
         Self {
-            kind: WgpuQuadKind::Glyph {
-                c: glyph.c,
-                bold: glyph.style.bold,
-                italic: glyph.style.italic,
-            },
+            kind: WgpuQuadKind::Glyph { glyph_key },
             x_px: glyph.pixel_x(config),
             y_px: glyph.pixel_y(config),
             width_px: glyph.pixel_width(config),
@@ -920,7 +1088,7 @@ impl WgpuQuadDrawItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuQuadKind {
     Background,
-    Glyph { c: char, bold: bool, italic: bool },
+    Glyph { glyph_key: WgpuTerminalGlyphKey },
     Underline,
     Geometric,
     PixelRect { color: RgbaColorDto },
@@ -955,6 +1123,7 @@ mod tests {
         CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
         append_pixel_rect_quads_from_row,
     };
+    use crate::rendering::pty_surface::glyph_atlas::WgpuTerminalGlyphKey;
 
     fn pixel_row(command: RenderCommandDto) -> RenderSurfaceRowSnapshot {
         let text = encode_pixel_fill_rect_command(&command).expect("pixel command should encode");
@@ -1219,6 +1388,100 @@ mod tests {
     }
 
     #[test]
+    fn zero_width_glyphs_overlay_their_base_character_without_advancing() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        let text = "e\u{301}中\u{301}x";
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: text.to_string(),
+                    style: TextStyleDto::plain(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        });
+
+        let state = backend.state();
+        let glyphs = state.glyphs();
+        assert_eq!(state.line_texts(), vec!["é中\u{301}x"]);
+        assert_eq!(glyphs.len(), 4);
+        assert_eq!(
+            (glyphs[0].c, glyphs[0].x, glyphs[0].cell_width),
+            ('é', 0, 1)
+        );
+        assert_eq!(
+            (glyphs[1].c, glyphs[1].x, glyphs[1].cell_width),
+            ('中', 1, 2)
+        );
+        assert_eq!(
+            (glyphs[2].c, glyphs[2].x, glyphs[2].cell_width),
+            ('\u{301}', 1, 0)
+        );
+        assert_eq!(
+            (glyphs[3].c, glyphs[3].x, glyphs[3].cell_width),
+            ('x', 3, 1)
+        );
+    }
+
+    #[test]
+    fn shaped_segments_keep_terminal_cell_positions_and_use_cluster_glyphs() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        backend.set_text_shaping(true);
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "👩\u{200d}💻سلامx".to_string(),
+                    style: TextStyleDto::plain(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        });
+
+        let state = backend.state();
+        assert_eq!(state.line_texts(), ["👩\u{200d}💻سلامx"]);
+        let row = state.row(0).unwrap();
+        assert_eq!(row.glyphs()[0].x, 0);
+        assert_eq!(row.glyphs()[0].cell_width, 2);
+        assert_eq!(row.glyphs()[3].x, 2);
+        assert_eq!(row.glyphs()[4].x, 3);
+        assert_eq!(row.glyphs()[5].x, 4);
+        assert_eq!(row.glyphs()[6].x, 5);
+        assert_eq!(row.glyphs()[7].x, 6);
+
+        let glyph_quads = state.glyph_quads();
+        assert_eq!(glyph_quads.len(), 3);
+        assert!(matches!(
+            glyph_quads[0].kind,
+            WgpuQuadKind::Glyph { glyph_key } if glyph_key.is_cluster()
+        ));
+        assert!(matches!(
+            glyph_quads[1].kind,
+            WgpuQuadKind::Glyph { glyph_key } if glyph_key.is_cluster()
+        ));
+        assert_eq!(glyph_quads[0].width_px, 16);
+        assert_eq!(glyph_quads[1].x_px, 16);
+        assert_eq!(glyph_quads[1].width_px, 32);
+    }
+
+    #[test]
     fn renders_beam_underline_hollow_and_hidden_cursor_shapes() {
         let render = |shape| {
             let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
@@ -1350,9 +1613,7 @@ mod tests {
         assert_eq!(
             glyphs[0].kind,
             WgpuQuadKind::Glyph {
-                c: '你',
-                bold: false,
-                italic: false,
+                glyph_key: WgpuTerminalGlyphKey::styled('你', false, false),
             }
         );
         assert_eq!(
@@ -1362,9 +1623,7 @@ mod tests {
         assert_eq!(
             glyphs[1].kind,
             WgpuQuadKind::Glyph {
-                c: 'a',
-                bold: false,
-                italic: false,
+                glyph_key: WgpuTerminalGlyphKey::styled('a', false, false),
             }
         );
         assert_eq!(

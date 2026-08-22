@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use crate::rendering::pty_surface::{
-    glyph_atlas::{
-        WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
-        WgpuTerminalGlyphUvRect,
-    },
+    glyph_atlas::{WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphUvRect},
     quad_vertex_buffer_builder::{WGPU_VERTEX_KIND_GLYPH, WgpuGpuVertex, WgpuVertexBuffer},
 };
 
@@ -37,15 +34,7 @@ impl WgpuTerminalGlyphUvMapper {
 
             glyph_vertices += 4;
 
-            let Some(glyph_key) =
-                WgpuTerminalGlyphKey::from_packed_id(vertices[index].glyph_codepoint)
-            else {
-                missing_vertices += 4;
-                index += 4;
-                continue;
-            };
-
-            let Some(entry) = atlas.entry_for_key(glyph_key) else {
+            let Some(entry) = atlas.entry_for_packed_id(vertices[index].glyph_codepoint) else {
                 missing_vertices += 4;
                 index += 4;
                 continue;

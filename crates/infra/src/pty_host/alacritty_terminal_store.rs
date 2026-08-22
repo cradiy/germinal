@@ -1393,6 +1393,7 @@ pub struct AlacrittyTermApplyStats {
 struct StyledCell {
     col: u32,
     c: char,
+    zerowidth: Vec<char>,
     style: TextStyleDto,
 }
 
@@ -1425,6 +1426,7 @@ fn visible_lines_and_runs(
         cells_by_row.entry(row).or_default().push(StyledCell {
             col,
             c: cell.c,
+            zerowidth: cell.zerowidth().unwrap_or_default().to_vec(),
             style: if selected {
                 selected_style(style, color_theme)
             } else {
@@ -1600,7 +1602,10 @@ fn visible_surface_rows(
         } else {
             style
         };
-        if cell.c == ' ' && !style_has_visible_content(style) {
+        if cell.c == ' '
+            && cell.zerowidth().is_none_or(<[char]>::is_empty)
+            && !style_has_visible_content(style)
+        {
             continue;
         }
 
@@ -1611,11 +1616,19 @@ fn visible_surface_rows(
             None => {
                 current_x = col;
                 current_next_x = col + cell_width;
-                current_text.push(cell.c);
+                push_cell_characters(
+                    &mut current_text,
+                    cell.c,
+                    cell.zerowidth().unwrap_or_default(),
+                );
                 current_style = Some(style);
             }
             Some(existing_style) if existing_style == style && is_contiguous => {
-                current_text.push(cell.c);
+                push_cell_characters(
+                    &mut current_text,
+                    cell.c,
+                    cell.zerowidth().unwrap_or_default(),
+                );
                 current_next_x = col + cell_width;
             }
             Some(existing_style) => {
@@ -1629,7 +1642,11 @@ fn visible_surface_rows(
                 current_x = col;
                 current_next_x = col + cell_width;
                 current_text.clear();
-                current_text.push(cell.c);
+                push_cell_characters(
+                    &mut current_text,
+                    cell.c,
+                    cell.zerowidth().unwrap_or_default(),
+                );
                 current_style = Some(style);
             }
         }
@@ -1725,7 +1742,7 @@ fn line_text_from_cells(cells: &[StyledCell]) -> String {
             next_col += 1;
         }
 
-        text.push(cell.c);
+        push_cell_characters(&mut text, cell.c, &cell.zerowidth);
         next_col = cell.col + terminal_char_cell_width(cell.c).max(1);
     }
 
@@ -1743,7 +1760,7 @@ fn styled_runs_from_cells(row: u32, cells: &[StyledCell]) -> Vec<TerminalTextRun
     for cell in cells {
         let style = cell.style;
 
-        if cell.c == ' ' && !style_has_visible_content(style) {
+        if cell.c == ' ' && cell.zerowidth.is_empty() && !style_has_visible_content(style) {
             continue;
         }
 
@@ -1754,11 +1771,11 @@ fn styled_runs_from_cells(row: u32, cells: &[StyledCell]) -> Vec<TerminalTextRun
             None => {
                 current_x = cell.col;
                 current_next_x = cell.col + cell_width;
-                current_text.push(cell.c);
+                push_cell_characters(&mut current_text, cell.c, &cell.zerowidth);
                 current_style = Some(style);
             }
             Some(existing_style) if existing_style == style && is_contiguous => {
-                current_text.push(cell.c);
+                push_cell_characters(&mut current_text, cell.c, &cell.zerowidth);
                 current_next_x = cell.col + cell_width;
             }
             Some(existing_style) => {
@@ -1767,7 +1784,7 @@ fn styled_runs_from_cells(row: u32, cells: &[StyledCell]) -> Vec<TerminalTextRun
                 current_x = cell.col;
                 current_next_x = cell.col + cell_width;
                 current_text.clear();
-                current_text.push(cell.c);
+                push_cell_characters(&mut current_text, cell.c, &cell.zerowidth);
                 current_style = Some(style);
             }
         }
@@ -1778,6 +1795,11 @@ fn styled_runs_from_cells(row: u32, cells: &[StyledCell]) -> Vec<TerminalTextRun
     }
 
     runs
+}
+
+fn push_cell_characters(text: &mut String, c: char, zerowidth: &[char]) {
+    text.push(c);
+    text.extend(zerowidth.iter().copied());
 }
 
 fn push_run_if_not_blank(
@@ -3161,6 +3183,22 @@ mod tests {
         assert!(texts.iter().any(|line| line == "world"));
         assert!(!snapshot.dirty_rows.is_empty());
         assert!(!snapshot.text_runs.is_empty());
+    }
+
+    #[test]
+    fn preserves_combining_marks_variation_selectors_and_zwj_sequences() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(1);
+        let text = "e\u{301}❤\u{fe0f}👩\u{200d}💻";
+
+        store.apply_bytes(target_id, Seq::new(1), text.as_bytes());
+
+        let snapshot = store.snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.lines[0].text, text);
+        assert_eq!(snapshot.text_runs[0].text, text);
+
+        let surface = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(surface.rows[0].runs[0].text, text);
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub mod render_target_plan;
 pub mod renderer_backend;
 pub mod shader;
 pub mod surface_frame_presenter;
+mod text_shaping;
 pub mod video_surface_dmabuf_importer;
 pub mod video_surface_frame;
 pub mod video_surface_registry;

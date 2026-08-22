@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
 };
 
 use germinal_ports::{
@@ -14,6 +14,7 @@ use crate::rendering::pty_surface::{
     glyph_atlas_texture::{
         WgpuTerminalGlyphAtlasTextureFactory, WgpuTerminalGlyphAtlasUploadBytes,
     },
+    text_shaping::{TerminalTextSegment, cursor_fallback_segments, terminal_text_segments},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,13 +115,18 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         let run_count = texts.len();
         let char_count = texts.iter().map(|text| text.chars().count()).sum();
 
-        let glyphs = collect_glyphs(surface_snapshot);
+        let segments = collect_text_segments(surface_snapshot);
+        let glyphs = match self.source.kind() {
+            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => collect_glyphs(surface_snapshot),
+            WgpuTerminalGlyphAtlasSourceKind::Crossfont => segments.keys().copied().collect(),
+        };
         let cache_key = WgpuTerminalGlyphAtlasCacheKey {
             source: self.source.kind(),
             glyphs: glyphs.iter().copied().collect(),
         };
 
-        let (atlas, cache_hit) = self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key);
+        let (atlas, cache_hit) =
+            self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key, segments.values());
 
         let upload_bytes = self.texture_factory.build_upload_bytes(&atlas);
 
@@ -136,10 +142,11 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         }
     }
 
-    fn cached_or_build_atlas(
+    fn cached_or_build_atlas<'a>(
         &self,
         target_id: RenderTargetId,
         cache_key: &WgpuTerminalGlyphAtlasCacheKey,
+        segments: impl IntoIterator<Item = &'a TerminalTextSegment>,
     ) -> (WgpuTerminalGlyphAtlas, bool) {
         {
             let cache = self.cache.borrow();
@@ -152,9 +159,12 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             }
         }
 
-        let atlas = self
-            .source
-            .build_for_glyphs(cache_key.glyphs.iter().copied());
+        let atlas = match self.source.kind() {
+            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => self
+                .source
+                .build_for_glyphs(cache_key.glyphs.iter().copied()),
+            WgpuTerminalGlyphAtlasSourceKind::Crossfont => self.source.build_for_segments(segments),
+        };
 
         {
             let mut cache = self.cache.borrow_mut();
@@ -222,6 +232,18 @@ impl WgpuTerminalGlyphAtlasSource {
             Self::Crossfont(builder) => builder.build_for_texts(texts),
         }
     }
+
+    fn build_for_segments<'a>(
+        &self,
+        segments: impl IntoIterator<Item = &'a TerminalTextSegment>,
+    ) -> WgpuTerminalGlyphAtlas {
+        match self {
+            Self::Debug5x7(builder) => {
+                builder.build_for_glyphs(segments.into_iter().map(|segment| segment.glyph_key))
+            }
+            Self::Crossfont(builder) => builder.build_for_segments(segments),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +285,38 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
     }
 
     glyphs
+}
+
+fn collect_text_segments(
+    surface_snapshot: &RenderSurfaceSnapshot,
+) -> BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment> {
+    let mut segments = BTreeMap::new();
+    for row in &surface_snapshot.rows {
+        for run in &row.runs {
+            for segment in terminal_text_segments(&run.text, run.style) {
+                insert_text_segment(&mut segments, segment);
+            }
+        }
+    }
+    if let Some(preedit) = surface_snapshot.ime_preedit.as_ref() {
+        for segment in terminal_text_segments(
+            &preedit.text,
+            germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+        ) {
+            insert_text_segment(&mut segments, segment);
+        }
+    }
+    segments
+}
+
+fn insert_text_segment(
+    segments: &mut BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment>,
+    segment: TerminalTextSegment,
+) {
+    for fallback in cursor_fallback_segments(&segment) {
+        segments.entry(fallback.glyph_key).or_insert(fallback);
+    }
+    segments.entry(segment.glyph_key).or_insert(segment);
 }
 
 #[cfg(test)]

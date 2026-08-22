@@ -199,7 +199,7 @@ impl WgpuVertexColor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WgpuVertexKind {
     Background,
-    Glyph { c: char, bold: bool, italic: bool },
+    Glyph { glyph_key: WgpuTerminalGlyphKey },
     Underline,
     Geometric,
 }
@@ -256,11 +256,11 @@ fn glyph_quad_geometry_and_uv(
     atlas: &WgpuTerminalGlyphAtlas,
     glyph_uv_map_result: &mut WgpuTerminalGlyphUvMapResult,
 ) -> Option<(f32, f32, f32, f32, [f32; 4])> {
-    let WgpuQuadKind::Glyph { c, bold, italic } = quad.kind else {
+    let WgpuQuadKind::Glyph { glyph_key } = quad.kind else {
         return None;
     };
     glyph_uv_map_result.glyph_vertices += 4;
-    let Some(entry) = atlas.entry_for_key(WgpuTerminalGlyphKey::styled(c, bold, italic)) else {
+    let Some(entry) = atlas.entry_for_key(glyph_key) else {
         glyph_uv_map_result.missing_vertices += 4;
         return None;
     };
@@ -294,7 +294,7 @@ fn default_uv() -> [f32; 4] {
 fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
     match kind {
         WgpuQuadKind::Background | WgpuQuadKind::PixelRect { .. } => WgpuVertexKind::Background,
-        WgpuQuadKind::Glyph { c, bold, italic } => WgpuVertexKind::Glyph { c, bold, italic },
+        WgpuQuadKind::Glyph { glyph_key } => WgpuVertexKind::Glyph { glyph_key },
         WgpuQuadKind::Underline => WgpuVertexKind::Underline,
         WgpuQuadKind::Geometric => WgpuVertexKind::Geometric,
     }
@@ -302,10 +302,7 @@ fn kind_of_quad(kind: WgpuQuadKind) -> WgpuVertexKind {
 fn gpu_kind_and_codepoint(kind: WgpuVertexKind) -> (u32, u32) {
     match kind {
         WgpuVertexKind::Background => (WGPU_VERTEX_KIND_BACKGROUND, 0),
-        WgpuVertexKind::Glyph { c, bold, italic } => (
-            WGPU_VERTEX_KIND_GLYPH,
-            WgpuTerminalGlyphKey::styled(c, bold, italic).packed_id(),
-        ),
+        WgpuVertexKind::Glyph { glyph_key } => (WGPU_VERTEX_KIND_GLYPH, glyph_key.packed_id()),
         WgpuVertexKind::Underline => (WGPU_VERTEX_KIND_UNDERLINE, 0),
         WgpuVertexKind::Geometric => (WGPU_VERTEX_KIND_UNDERLINE, 0),
     }

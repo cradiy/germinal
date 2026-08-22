@@ -153,6 +153,7 @@ mod tests {
 
     use super::*;
     use crate::rendering::pty_surface::{
+        glyph_atlas::WgpuTerminalGlyphKey,
         quad_vertex_buffer_builder::WgpuQuadVertexBufferBuilder,
         renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind},
     };
@@ -171,9 +172,7 @@ mod tests {
 
         let vertex_buffer = quad_builder.build(&[WgpuQuadDrawItem {
             kind: WgpuQuadKind::Glyph {
-                c: 'r',
-                bold: true,
-                italic: false,
+                glyph_key: WgpuTerminalGlyphKey::styled('r', true, false),
             },
             x_px: 10,
             y_px: 20,

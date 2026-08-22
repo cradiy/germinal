@@ -2,9 +2,15 @@ use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WgpuTerminalGlyphKey {
-    c: char,
+    identity: WgpuTerminalGlyphIdentity,
     bold: bool,
     italic: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum WgpuTerminalGlyphIdentity {
+    Character(char),
+    Cluster(u64),
 }
 
 impl WgpuTerminalGlyphKey {
@@ -17,15 +23,34 @@ impl WgpuTerminalGlyphKey {
     }
 
     pub const fn styled(c: char, bold: bool, italic: bool) -> Self {
-        Self { c, bold, italic }
+        Self {
+            identity: WgpuTerminalGlyphIdentity::Character(c),
+            bold,
+            italic,
+        }
+    }
+
+    pub const fn cluster(id: u64, bold: bool, italic: bool) -> Self {
+        Self {
+            identity: WgpuTerminalGlyphIdentity::Cluster(id),
+            bold,
+            italic,
+        }
     }
 
     pub const fn plain(c: char) -> Self {
         Self::new(c, false)
     }
 
-    pub const fn c(self) -> char {
-        self.c
+    pub const fn character(self) -> Option<char> {
+        match self.identity {
+            WgpuTerminalGlyphIdentity::Character(c) => Some(c),
+            WgpuTerminalGlyphIdentity::Cluster(_) => None,
+        }
+    }
+
+    pub const fn is_cluster(self) -> bool {
+        matches!(self.identity, WgpuTerminalGlyphIdentity::Cluster(_))
     }
 
     pub const fn bold(self) -> bool {
@@ -37,12 +62,20 @@ impl WgpuTerminalGlyphKey {
     }
 
     pub const fn packed_id(self) -> u32 {
-        (self.c as u32 & Self::CODEPOINT_MASK)
-            | if self.bold { Self::BOLD_BIT } else { 0 }
-            | if self.italic { Self::ITALIC_BIT } else { 0 }
+        match self.identity {
+            WgpuTerminalGlyphIdentity::Character(c) => {
+                (c as u32 & Self::CODEPOINT_MASK)
+                    | if self.bold { Self::BOLD_BIT } else { 0 }
+                    | if self.italic { Self::ITALIC_BIT } else { 0 }
+            }
+            WgpuTerminalGlyphIdentity::Cluster(id) => 0x8000_0000 | id as u32 & 0x7fff_ffff,
+        }
     }
 
     pub fn from_packed_id(packed_id: u32) -> Option<Self> {
+        if packed_id & 0x8000_0000 != 0 {
+            return None;
+        }
         let c = char::from_u32(packed_id & Self::CODEPOINT_MASK)?;
         let bold = (packed_id & Self::BOLD_BIT) != 0;
         let italic = (packed_id & Self::ITALIC_BIT) != 0;
@@ -75,6 +108,16 @@ impl WgpuTerminalGlyphAtlas {
 
     pub fn entry_for_key(&self, key: WgpuTerminalGlyphKey) -> Option<&WgpuTerminalGlyphAtlasEntry> {
         self.entries.get(&key)
+    }
+
+    pub fn entry_for_packed_id(&self, packed_id: u32) -> Option<&WgpuTerminalGlyphAtlasEntry> {
+        WgpuTerminalGlyphKey::from_packed_id(packed_id)
+            .and_then(|key| self.entry_for_key(key))
+            .or_else(|| {
+                self.entries
+                    .values()
+                    .find(|entry| entry.codepoint == packed_id)
+            })
     }
 
     pub fn has_glyph(&self, c: char) -> bool {
@@ -208,7 +251,10 @@ impl WgpuDebugGlyphAtlasBuilder {
             let x = self.padding_px + col * cell_width;
             let y = self.padding_px + row * cell_height;
 
-            self.write_glyph_pixels(glyph.c(), x, y, atlas_width, &mut pixels);
+            let Some(character) = glyph.character() else {
+                continue;
+            };
+            self.write_glyph_pixels(character, x, y, atlas_width, &mut pixels);
 
             let uv = WgpuTerminalGlyphUvRect {
                 min_u: x as f32 / atlas_width as f32,
