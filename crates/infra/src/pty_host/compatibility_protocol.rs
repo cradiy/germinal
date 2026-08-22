@@ -1,4 +1,8 @@
-use germinal_ports::pty_host::{color_theme::TerminalColorTheme, terminal_size::TerminalPtySize};
+use germinal_ports::pty_host::{
+    color_theme::TerminalColorTheme,
+    cursor_style::{TerminalCursorShape, TerminalCursorStyle},
+    terminal_size::TerminalPtySize,
+};
 
 const MAX_CSI_BYTES: usize = 64;
 const MAX_DCS_BYTES: usize = 4 * 1024;
@@ -29,12 +33,30 @@ pub(crate) struct TerminalCompatibilityProtocolDecoder {
     terminal_name: String,
     dark_color_scheme: bool,
     color_scheme_updates_enabled: bool,
+    default_cursor_style: TerminalCursorStyle,
+    cursor_style: TerminalCursorStyle,
+    urxvt_mouse_enabled: bool,
 }
 
 impl TerminalCompatibilityProtocolDecoder {
+    #[cfg(test)]
     pub(crate) fn new(
         size: TerminalPtySize,
         color_theme: TerminalColorTheme,
+        terminal_name: impl Into<String>,
+    ) -> Self {
+        Self::with_cursor_style(
+            size,
+            color_theme,
+            TerminalCursorStyle::default(),
+            terminal_name,
+        )
+    }
+
+    pub(crate) fn with_cursor_style(
+        size: TerminalPtySize,
+        color_theme: TerminalColorTheme,
+        cursor_style: TerminalCursorStyle,
         terminal_name: impl Into<String>,
     ) -> Self {
         Self {
@@ -44,11 +66,18 @@ impl TerminalCompatibilityProtocolDecoder {
             terminal_name: terminal_name.into(),
             dark_color_scheme: is_dark_color_scheme(color_theme),
             color_scheme_updates_enabled: false,
+            default_cursor_style: cursor_style,
+            cursor_style,
+            urxvt_mouse_enabled: false,
         }
     }
 
     pub(crate) fn resize(&mut self, size: TerminalPtySize) {
         self.size = size;
+    }
+
+    pub(crate) fn urxvt_mouse_enabled(&self) -> bool {
+        self.urxvt_mouse_enabled
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<CompatibilityProtocolEvent> {
@@ -100,6 +129,10 @@ impl TerminalCompatibilityProtocolDecoder {
                         visible.extend_from_slice(&[0x1b, byte]);
                         DecoderState::StringControl { escape: false }
                     } else {
+                        if byte == b'c' {
+                            self.cursor_style = self.default_cursor_style;
+                            self.urxvt_mouse_enabled = false;
+                        }
                         visible.extend_from_slice(&[0x1b, byte]);
                         DecoderState::Ground
                     }
@@ -175,6 +208,25 @@ impl TerminalCompatibilityProtocolDecoder {
             &raw[1..]
         };
 
+        if let Some(cursor_style) = parse_cursor_style(sequence, self.default_cursor_style) {
+            self.cursor_style = cursor_style;
+            visible.extend_from_slice(&raw);
+            return;
+        }
+
+        if let Some((enabled, remaining)) = consume_private_mode(sequence, 1015) {
+            self.urxvt_mouse_enabled = enabled;
+            if !remaining.is_empty() {
+                visible.extend_from_slice(if raw.starts_with(b"\x1b[") {
+                    b"\x1b["
+                } else {
+                    b"\x9b"
+                });
+                visible.extend_from_slice(&remaining);
+            }
+            return;
+        }
+
         let response = match sequence {
             b">q" | b">0q" => Some(terminal_version_response()),
             b"?996n" => Some(color_scheme_response(self.dark_color_scheme)),
@@ -210,6 +262,13 @@ impl TerminalCompatibilityProtocolDecoder {
             visible.extend_from_slice(&raw);
             return;
         };
+        if let Some(request) = payload.strip_prefix(b"$q") {
+            flush_visible(events, visible);
+            events.push(CompatibilityProtocolEvent::PtyWrite(
+                self.decrqss_response(request),
+            ));
+            return;
+        }
         let Some(capabilities) = payload.strip_prefix(b"+q") else {
             visible.extend_from_slice(&raw);
             return;
@@ -219,6 +278,18 @@ impl TerminalCompatibilityProtocolDecoder {
         events.push(CompatibilityProtocolEvent::PtyWrite(
             self.xtgettcap_response(capabilities),
         ));
+    }
+
+    fn decrqss_response(&self, request: &[u8]) -> Vec<u8> {
+        if request == b" q" {
+            format!(
+                "\x1bP1$r{} q\x1b\\",
+                cursor_style_parameter(self.cursor_style)
+            )
+            .into_bytes()
+        } else {
+            b"\x1bP0$r\x1b\\".to_vec()
+        }
     }
 
     fn xtgettcap_response(&self, capabilities: &[u8]) -> Vec<u8> {
@@ -263,6 +334,81 @@ impl TerminalCompatibilityProtocolDecoder {
             _ => None,
         }
     }
+}
+
+fn parse_cursor_style(
+    sequence: &[u8],
+    default_style: TerminalCursorStyle,
+) -> Option<TerminalCursorStyle> {
+    let parameter = sequence.strip_suffix(b" q")?;
+    let parameter = if parameter.is_empty() {
+        0
+    } else {
+        std::str::from_utf8(parameter).ok()?.parse::<u8>().ok()?
+    };
+
+    match parameter {
+        0 => Some(default_style),
+        1 => Some(TerminalCursorStyle::new(TerminalCursorShape::Block, true)),
+        2 => Some(TerminalCursorStyle::new(TerminalCursorShape::Block, false)),
+        3 => Some(TerminalCursorStyle::new(
+            TerminalCursorShape::Underline,
+            true,
+        )),
+        4 => Some(TerminalCursorStyle::new(
+            TerminalCursorShape::Underline,
+            false,
+        )),
+        5 => Some(TerminalCursorStyle::new(TerminalCursorShape::Beam, true)),
+        6 => Some(TerminalCursorStyle::new(TerminalCursorShape::Beam, false)),
+        _ => None,
+    }
+}
+
+fn cursor_style_parameter(style: TerminalCursorStyle) -> u8 {
+    match (style.shape, style.blinking) {
+        (TerminalCursorShape::Block, true) => 1,
+        (TerminalCursorShape::Block, false) => 2,
+        (TerminalCursorShape::Underline, true) => 3,
+        (TerminalCursorShape::Underline, false) => 4,
+        (TerminalCursorShape::Beam, true) => 5,
+        (TerminalCursorShape::Beam, false) => 6,
+    }
+}
+
+fn consume_private_mode(sequence: &[u8], mode: u16) -> Option<(bool, Vec<u8>)> {
+    let (&final_byte, body) = sequence.split_last()?;
+    let enabled = match final_byte {
+        b'h' => true,
+        b'l' => false,
+        _ => return None,
+    };
+    let parameters = body.strip_prefix(b"?")?;
+    let mut remaining = Vec::new();
+    let mut found = false;
+
+    for parameter in parameters.split(|byte| *byte == b';') {
+        let parsed = std::str::from_utf8(parameter)
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok());
+        if parsed == Some(mode) {
+            found = true;
+        } else {
+            if !remaining.is_empty() {
+                remaining.push(b';');
+            }
+            remaining.extend_from_slice(parameter);
+        }
+    }
+
+    if !found {
+        return None;
+    }
+    if !remaining.is_empty() {
+        remaining.insert(0, b'?');
+        remaining.push(final_byte);
+    }
+    Some((enabled, remaining))
 }
 
 fn color_scheme_response(dark: bool) -> Vec<u8> {
@@ -396,7 +542,11 @@ fn flush_visible(events: &mut Vec<CompatibilityProtocolEvent>, visible: &mut Vec
 #[cfg(test)]
 mod tests {
     use germinal_ports::{
-        pty_host::{color_theme::TerminalColorTheme, terminal_size::TerminalPtySize},
+        pty_host::{
+            color_theme::TerminalColorTheme,
+            cursor_style::{TerminalCursorShape, TerminalCursorStyle},
+            terminal_size::TerminalPtySize,
+        },
         rendering::frame_plan_builder::RgbColorDto,
     };
 
@@ -483,6 +633,69 @@ mod tests {
                 CompatibilityProtocolEvent::PtyWrite(b"\x1bP0+r\x1b\\".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn answers_cursor_style_queries_and_tracks_decsusr_updates() {
+        let default_style = TerminalCursorStyle::new(TerminalCursorShape::Beam, true);
+        let mut decoder = TerminalCompatibilityProtocolDecoder::with_cursor_style(
+            TerminalPtySize::new(24, 80, 960, 576),
+            TerminalColorTheme::default(),
+            default_style,
+            "xterm-256color",
+        );
+
+        assert!(decoder.feed(b"\x1bP$q ").is_empty());
+        assert_eq!(
+            decoder.feed(b"q\x1b\\"),
+            vec![CompatibilityProtocolEvent::PtyWrite(
+                b"\x1bP1$r5 q\x1b\\".to_vec()
+            )]
+        );
+        assert_eq!(
+            decoder.feed(b"\x1b[4 q\x1bP$q q\x1b\\"),
+            vec![
+                CompatibilityProtocolEvent::Bytes(b"\x1b[4 q".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(b"\x1bP1$r4 q\x1b\\".to_vec()),
+            ]
+        );
+        assert_eq!(
+            decoder.feed(b"\x1b[0 q\x1bP$q q\x1b\\"),
+            vec![
+                CompatibilityProtocolEvent::Bytes(b"\x1b[0 q".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(b"\x1bP1$r5 q\x1b\\".to_vec()),
+            ]
+        );
+        assert_eq!(
+            decoder.feed(b"\x1bP$qm\x1b\\"),
+            vec![CompatibilityProtocolEvent::PtyWrite(
+                b"\x1bP0$r\x1b\\".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn consumes_urxvt_mouse_mode_and_preserves_combined_modes() {
+        let mut decoder = TerminalCompatibilityProtocolDecoder::new(
+            TerminalPtySize::new(24, 80, 960, 576),
+            TerminalColorTheme::default(),
+            "xterm-256color",
+        );
+
+        assert_eq!(
+            decoder.feed(b"before\x1b[?1000;1015hafter"),
+            vec![CompatibilityProtocolEvent::Bytes(
+                b"before\x1b[?1000hafter".to_vec()
+            )]
+        );
+        assert!(decoder.urxvt_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1bc"),
+            vec![CompatibilityProtocolEvent::Bytes(b"\x1bc".to_vec())]
+        );
+        assert!(!decoder.urxvt_mouse_enabled());
+        assert!(decoder.feed(b"\x1b[?1015h\x9b?1015l").is_empty());
+        assert!(!decoder.urxvt_mouse_enabled());
     }
 
     #[test]

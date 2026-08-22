@@ -339,9 +339,10 @@ where
             pending_pty_writes: Vec::new(),
             input_modes: None,
             gnative_enter_decoder: GNativeEnterControlSequenceDecoder::default(),
-            compatibility_decoder: TerminalCompatibilityProtocolDecoder::new(
+            compatibility_decoder: TerminalCompatibilityProtocolDecoder::with_cursor_style(
                 config.initial_size,
                 config.color_theme,
+                config.cursor_style,
                 preferred_terminal_term_name(),
             ),
             notification_decoder: TerminalNotificationProtocolDecoder::default(),
@@ -515,7 +516,11 @@ where
 
     fn publish_input_modes(&self) {
         if let Some(input_modes) = &self.input_modes {
-            input_modes.store(self.terminal_store.input_modes(self.target_id));
+            input_modes.store(
+                self.terminal_store
+                    .input_modes(self.target_id)
+                    .with_urxvt_mouse(self.compatibility_decoder.urxvt_mouse_enabled()),
+            );
         }
     }
 
@@ -1398,7 +1403,7 @@ mod tests {
             .expect("PTY input state should send");
         input
             .send(TerminalWorkerInput::Bytes(
-                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[>3u".to_vec(),
+                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?1015h\x1b[>3u".to_vec(),
             ))
             .expect("terminal mode sequences should send");
 
@@ -1410,6 +1415,7 @@ mod tests {
         assert!(modes.bracketed_paste());
         assert!(modes.focus_in_out());
         assert!(modes.sgr_mouse());
+        assert!(modes.urxvt_mouse());
         assert!(modes.mouse_report_click());
         assert!(modes.kitty_disambiguate_esc_codes());
         assert!(modes.kitty_report_event_types());

@@ -165,7 +165,8 @@ impl PtyMouseEncoder {
         } else {
             None
         }?;
-        Some(sgr_mouse_report(
+        Some(mouse_report(
+            modes,
             report + 32 + modifier_code(modifiers),
             cell,
             false,
@@ -197,7 +198,8 @@ impl PtyMouseEncoder {
             return None;
         }
 
-        Some(sgr_mouse_report(
+        Some(mouse_report(
+            modes,
             button_code + modifier_code(modifiers),
             cell,
             state == WindowInputElementState::Released,
@@ -234,14 +236,14 @@ impl PtyMouseEncoder {
         self.last_pointer_cell = Some(cell);
         let modifiers = modifier_code(modifiers);
         let mut reports = Vec::with_capacity((x_steps.abs() + y_steps.abs()) as usize);
-        append_scroll_reports(&mut reports, y_steps, 64, 65, modifiers, cell);
-        append_scroll_reports(&mut reports, x_steps, 67, 66, modifiers, cell);
+        append_scroll_reports(&mut reports, modes, y_steps, 64, 65, modifiers, cell);
+        append_scroll_reports(&mut reports, modes, x_steps, 67, 66, modifiers, cell);
         PtyScrollAction::ReportToPty(reports)
     }
 }
 
 pub(super) fn mouse_reporting_enabled(modes: TerminalInputModes) -> bool {
-    modes.sgr_mouse() && modes.mouse_tracking()
+    (modes.sgr_mouse() || modes.urxvt_mouse()) && modes.mouse_tracking()
 }
 
 fn terminal_cell_at(position: WindowPointerPosition, size: TerminalPtySize) -> Option<(u16, u16)> {
@@ -278,15 +280,20 @@ fn terminal_selection_point_at(
     Some(TerminalSelectionPoint::new(column, row, side))
 }
 
-fn sgr_mouse_report(code: u8, cell: (u16, u16), released: bool) -> Vec<u8> {
-    format!(
-        "\x1b[<{};{};{}{}",
-        code,
-        cell.0,
-        cell.1,
-        if released { 'm' } else { 'M' }
-    )
-    .into_bytes()
+fn mouse_report(modes: TerminalInputModes, code: u8, cell: (u16, u16), released: bool) -> Vec<u8> {
+    if modes.sgr_mouse() {
+        format!(
+            "\x1b[<{};{};{}{}",
+            code,
+            cell.0,
+            cell.1,
+            if released { 'm' } else { 'M' }
+        )
+        .into_bytes()
+    } else {
+        let code = if released { (code & !0b11) | 3 } else { code } + 32;
+        format!("\x1b[{};{};{}M", code, cell.0, cell.1).into_bytes()
+    }
 }
 
 fn mouse_button_code(button: WindowPointerButton) -> Option<u8> {
@@ -321,6 +328,7 @@ fn take_scroll_steps(remainder: &mut f64, delta: f64) -> i32 {
 
 fn append_scroll_reports(
     reports: &mut Vec<Vec<u8>>,
+    modes: TerminalInputModes,
     steps: i32,
     positive_code: u8,
     negative_code: u8,
@@ -333,7 +341,7 @@ fn append_scroll_reports(
         negative_code
     }) + modifiers;
     for _ in 0..steps.unsigned_abs() {
-        reports.push(sgr_mouse_report(code, cell, false));
+        reports.push(mouse_report(modes, code, cell, false));
     }
 }
 
@@ -1146,6 +1154,62 @@ mod tests {
                 modifiers,
             ),
             Some(b"\x1b[<20;4;5m".to_vec())
+        );
+    }
+
+    #[test]
+    fn urxvt_mouse_encodes_decimal_click_drag_and_release_reports() {
+        let size = TerminalPtySize::new(10, 20, 200, 100);
+        let mut encoder = PtyMouseEncoder::new(size);
+        let mouse_modes = TerminalInputModes::new(false, false, false, false, false, true, false)
+            .with_urxvt_mouse(true);
+        let modifiers = WindowInputModifiers::new(true, false, true, false);
+        let position = WindowPointerPosition::new(25.0, 35.0);
+
+        assert_eq!(
+            encoder.button(
+                mouse_modes,
+                WindowInputElementState::Pressed,
+                WindowPointerButton::Primary,
+                position,
+                modifiers,
+            ),
+            Some(b"\x1b[52;3;4M".to_vec())
+        );
+        assert_eq!(
+            encoder.moved(
+                mouse_modes,
+                WindowPointerPosition::new(35.0, 45.0),
+                modifiers,
+            ),
+            Some(b"\x1b[84;4;5M".to_vec())
+        );
+        assert_eq!(
+            encoder.button(
+                mouse_modes,
+                WindowInputElementState::Released,
+                WindowPointerButton::Primary,
+                WindowPointerPosition::new(35.0, 45.0),
+                modifiers,
+            ),
+            Some(b"\x1b[55;4;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_encoding_takes_precedence_over_urxvt_encoding() {
+        let mut encoder = PtyMouseEncoder::new(TerminalPtySize::new(10, 20, 200, 100));
+        let mouse_modes = modes(false, false, false, true, false, false).with_urxvt_mouse(true);
+
+        assert_eq!(
+            encoder.button(
+                mouse_modes,
+                WindowInputElementState::Pressed,
+                WindowPointerButton::Primary,
+                WindowPointerPosition::new(5.0, 5.0),
+                WindowInputModifiers::new(false, false, false, false),
+            ),
+            Some(b"\x1b[<0;1;1M".to_vec())
         );
     }
 
