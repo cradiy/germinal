@@ -193,6 +193,9 @@ impl TerminalNotificationProtocolDecoder {
         }
 
         if let Some(payload) = data.strip_prefix(b"9;") {
+            if is_osc_9_progress_control(payload) {
+                return Some(Vec::new());
+            }
             return Some(self.parse_legacy_notification(payload));
         }
 
@@ -296,6 +299,27 @@ fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
     let decoded = percent_decode(&file_url[path_start..])?;
     let path = String::from_utf8(decoded).ok()?;
     (!path.is_empty() && !path.contains('\0')).then(|| PathBuf::from(platform_file_url_path(path)))
+}
+
+fn is_osc_9_progress_control(payload: &[u8]) -> bool {
+    let mut fields = payload.split(|byte| *byte == b';');
+    if fields.next() != Some(b"4") {
+        return false;
+    }
+
+    let parse_number = |field: &[u8]| {
+        std::str::from_utf8(field)
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok())
+    };
+    let Some(state) = fields.next().and_then(parse_number) else {
+        return false;
+    };
+    let Some(progress) = fields.next().and_then(parse_number) else {
+        return false;
+    };
+
+    fields.next().is_none() && state <= 4 && progress <= 100
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -471,6 +495,21 @@ mod tests {
                     Some("build finished".to_owned()),
                     TerminalNotificationOccasion::Always,
                 )),
+                NotificationProtocolEvent::Bytes(b"after".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn consumes_osc_9_progress_controls_without_creating_notifications() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+        let events = decoder.feed(b"before\x1b]9;4;1;0\x07middle\x1b]9;4;0;0\x07after");
+
+        assert_eq!(
+            events,
+            vec![
+                NotificationProtocolEvent::Bytes(b"before".to_vec()),
+                NotificationProtocolEvent::Bytes(b"middle".to_vec()),
                 NotificationProtocolEvent::Bytes(b"after".to_vec()),
             ]
         );
