@@ -299,6 +299,7 @@ impl App {
     fn current_tab_bar_snapshot(&self) -> Option<TabBarSnapshot> {
         (self.tab_count() > 1).then(|| TabBarSnapshot {
             titles: self.tab_titles(),
+            progresses: self.tab_progresses(),
             render_target_ids: self
                 .tab_gshells()
                 .into_iter()
@@ -1287,6 +1288,14 @@ impl ApplicationHandler<RuntimeEvent> for App {
             RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged { gshell_id, command }) => {
                 self.update_gshell_command(gshell_id, command);
                 self.sync_current_terminal_window_title();
+                self.set_tab_bar(self.current_tab_bar_snapshot());
+                self.request_redraw();
+            }
+            RuntimeEvent::GShell(GShellRuntimeEvent::ProgressChanged {
+                gshell_id,
+                progress,
+            }) => {
+                self.update_gshell_progress(gshell_id, progress);
                 self.set_tab_bar(self.current_tab_bar_snapshot());
                 self.request_redraw();
             }

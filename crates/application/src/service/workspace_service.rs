@@ -19,7 +19,7 @@ use germinal_domain::{
     },
 };
 use germinal_ports::{
-    pty_host::window_size::TerminalWindowSize,
+    pty_host::{terminal_progress::TerminalProgress, window_size::TerminalWindowSize},
     rendering::{render_target_id::RenderTargetId, workspace_layout::RenderSurfacePlacement},
     repository::IRepository,
     service::workspace_service::{
@@ -36,6 +36,7 @@ pub struct WorkspaceServiceState {
     gshell_titles: RefCell<HashMap<GShellId, String>>,
     gshell_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
     gshell_commands: RefCell<HashMap<GShellId, String>>,
+    gshell_progresses: RefCell<HashMap<GShellId, TerminalProgress>>,
     default_tab_title: String,
     next_gshell_id: Cell<u64>,
 }
@@ -53,6 +54,7 @@ impl WorkspaceServiceState {
             gshell_titles: RefCell::new(HashMap::new()),
             gshell_working_directories: RefCell::new(HashMap::new()),
             gshell_commands: RefCell::new(HashMap::new()),
+            gshell_progresses: RefCell::new(HashMap::new()),
             default_tab_title: default_tab_title(),
             next_gshell_id: Cell::new(0),
         };
@@ -183,6 +185,24 @@ impl WorkspaceServiceState {
             .collect()
     }
 
+    pub fn tab_progresses(&self) -> Vec<Option<TerminalProgress>> {
+        let workspace = self.workspace.borrow();
+        let bindings = self.pane_bindings.borrow();
+        let progresses = self.gshell_progresses.borrow();
+        workspace
+            .tabs()
+            .iter()
+            .map(|tab| {
+                tab.pane_tree()
+                    .pane_ids()
+                    .into_iter()
+                    .filter_map(|pane_id| bindings.get(&(tab.tab_id(), pane_id)))
+                    .filter_map(|gshell_id| progresses.get(gshell_id).copied())
+                    .reduce(preferred_tab_progress)
+            })
+            .collect()
+    }
+
     pub fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>) {
         let mut titles = self.gshell_titles.borrow_mut();
         if let Some(title) = title {
@@ -204,6 +224,15 @@ impl WorkspaceServiceState {
             commands.insert(gshell_id, command);
         } else {
             commands.remove(&gshell_id);
+        }
+    }
+
+    pub fn update_gshell_progress(&self, gshell_id: GShellId, progress: Option<TerminalProgress>) {
+        let mut progresses = self.gshell_progresses.borrow_mut();
+        if let Some(progress) = progress {
+            progresses.insert(gshell_id, progress);
+        } else {
+            progresses.remove(&gshell_id);
         }
     }
 
@@ -288,12 +317,15 @@ impl WorkspaceServiceState {
         drop(titles);
         let mut working_directories = self.gshell_working_directories.borrow_mut();
         let mut commands = self.gshell_commands.borrow_mut();
+        let mut progresses = self.gshell_progresses.borrow_mut();
         for closed_gshell in &closed_gshells {
             working_directories.remove(closed_gshell);
             commands.remove(closed_gshell);
+            progresses.remove(closed_gshell);
         }
         drop(working_directories);
         drop(commands);
+        drop(progresses);
 
         Some(WorkspaceGShellCloseOutcome::Closed {
             closed_gshells,
@@ -383,6 +415,25 @@ fn default_tab_title() -> String {
     };
     let home_dir = env::var_os("HOME").map(std::path::PathBuf::from);
     pretty_path(&current_dir, home_dir.as_deref())
+}
+
+fn preferred_tab_progress(
+    current: TerminalProgress,
+    candidate: TerminalProgress,
+) -> TerminalProgress {
+    let priority = |progress| match progress {
+        TerminalProgress::Normal(_) => 0,
+        TerminalProgress::Indeterminate => 1,
+        TerminalProgress::Warning(_) => 2,
+        TerminalProgress::Error(_) => 3,
+    };
+
+    match priority(candidate).cmp(&priority(current)) {
+        std::cmp::Ordering::Greater => candidate,
+        std::cmp::Ordering::Less => current,
+        std::cmp::Ordering::Equal if candidate.percentage() > current.percentage() => candidate,
+        std::cmp::Ordering::Equal => current,
+    }
 }
 
 fn pretty_path(path: &Path, home_dir: Option<&Path>) -> String {
@@ -539,6 +590,10 @@ where
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_titles()
     }
 
+    fn tab_progresses(&self) -> Vec<Option<TerminalProgress>> {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_progresses()
+    }
+
     fn tab_gshells(&self) -> Vec<GShellId> {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref()).tab_gshells()
     }
@@ -556,6 +611,11 @@ where
     fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>) {
         <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
             .update_gshell_command(gshell_id, command)
+    }
+
+    fn update_gshell_progress(&self, gshell_id: GShellId, progress: Option<TerminalProgress>) {
+        <Deps as AsRef<WorkspaceServiceState>>::as_ref(self.prj_ref())
+            .update_gshell_progress(gshell_id, progress)
     }
 
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId {
@@ -635,7 +695,7 @@ mod tests {
         },
     };
     use germinal_ports::{
-        pty_host::window_size::TerminalWindowSize,
+        pty_host::{terminal_progress::TerminalProgress, window_size::TerminalWindowSize},
         service::workspace_service::WorkspaceGShellCloseOutcome,
     };
 
@@ -823,6 +883,42 @@ mod tests {
         state.update_gshell_command(second, None);
         assert_eq!(state.tab_titles(), vec!["nvim", "/tmp/project"]);
         assert!(!state.tab_titles().iter().any(|title| title == "Shell"));
+    }
+
+    #[test]
+    fn tab_progresses_aggregate_all_panes_by_severity_and_percentage() {
+        let state = WorkspaceServiceState::new();
+        let first = state.focused_gshell();
+        let second = state.split_focused_gshell(PaneSplitDirection::Horizontal);
+
+        state.update_gshell_progress(first, Some(TerminalProgress::Normal(75)));
+        state.update_gshell_progress(second, Some(TerminalProgress::Warning(20)));
+        assert_eq!(
+            state.tab_progresses(),
+            vec![Some(TerminalProgress::Warning(20))]
+        );
+
+        state.update_gshell_progress(first, Some(TerminalProgress::Warning(60)));
+        assert_eq!(
+            state.tab_progresses(),
+            vec![Some(TerminalProgress::Warning(60))]
+        );
+
+        let third = state.create_tab_gshell();
+        state.update_gshell_progress(third, Some(TerminalProgress::Indeterminate));
+        assert_eq!(
+            state.tab_progresses(),
+            vec![
+                Some(TerminalProgress::Warning(60)),
+                Some(TerminalProgress::Indeterminate),
+            ]
+        );
+
+        state.update_gshell_progress(third, None);
+        assert_eq!(
+            state.tab_progresses(),
+            vec![Some(TerminalProgress::Warning(60)), None]
+        );
     }
 
     #[test]

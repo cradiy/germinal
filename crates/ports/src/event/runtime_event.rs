@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::pty_host::hyperlink::TerminalHyperlink;
 use crate::pty_host::terminal_clipboard::TerminalClipboard;
 use crate::pty_host::terminal_notification::TerminalNotification;
+use crate::pty_host::terminal_progress::TerminalProgress;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -55,6 +56,10 @@ pub enum GShellRuntimeEvent {
     CommandChanged {
         gshell_id: GShellId,
         command: Option<String>,
+    },
+    ProgressChanged {
+        gshell_id: GShellId,
+        progress: Option<TerminalProgress>,
     },
     HyperlinksChanged {
         gshell_id: GShellId,

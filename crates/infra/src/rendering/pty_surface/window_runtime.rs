@@ -12,6 +12,7 @@ use germinal_ports::{
         profile::TerminalProfile,
         scale_factor::TerminalScaleFactor,
         size_info::TerminalSizeInfo,
+        terminal_progress::TerminalProgress,
         width::{terminal_char_cell_width, terminal_text_cell_width},
         window_metrics::TerminalWindowMetrics,
         window_size::TerminalWindowSize,
@@ -919,9 +920,14 @@ fn build_tab_bar_surface(
 
     for (index, title) in tab_bar.titles.iter().enumerate() {
         let active = index == tab_bar.active_tab_index;
+        let progress = tab_bar.progresses.get(index).copied().flatten();
+        let progress_label = progress.map(tab_progress_label).unwrap_or_default();
+        let progress_width =
+            terminal_text_cell_width(&progress_label).saturating_add(u32::from(progress.is_some()));
         let edge_width = u32::from(active).saturating_mul(2);
         let reserved_width = edge_width
             .saturating_add(TAB_BAR_TITLE_PADDING.saturating_mul(2))
+            .saturating_add(progress_width)
             .saturating_add(TAB_BAR_TAB_GAP);
         let available_width = columns.saturating_sub(x);
         let title_budget = max_tab_width
@@ -932,8 +938,13 @@ fn build_tab_bar_surface(
         }
 
         let title = truncate_title_to_cells(title, title_budget);
-        let content = format!("  {title}  ");
+        let content = format!("  {title}");
         let content_width = terminal_text_cell_width(&content);
+        let tab_background = if active {
+            palette.active_background
+        } else {
+            palette.inactive_background
+        };
 
         if active {
             runs.push(RenderSurfaceRunSnapshot {
@@ -958,6 +969,36 @@ fn build_tab_bar_surface(
             },
         });
         x = x.saturating_add(content_width);
+
+        if let Some(progress) = progress {
+            let text = format!(" {progress_label}");
+            let text_width = terminal_text_cell_width(&text);
+            runs.push(RenderSurfaceRunSnapshot {
+                x,
+                text,
+                style: tab_bar_style(
+                    tab_progress_color(progress, color_theme),
+                    tab_background,
+                    true,
+                ),
+            });
+            x = x.saturating_add(text_width);
+        }
+
+        runs.push(RenderSurfaceRunSnapshot {
+            x,
+            text: "  ".to_owned(),
+            style: tab_bar_style(
+                if active {
+                    palette.active_foreground
+                } else {
+                    palette.inactive_foreground
+                },
+                tab_background,
+                active,
+            ),
+        });
+        x = x.saturating_add(TAB_BAR_TITLE_PADDING);
 
         if active {
             runs.push(RenderSurfaceRunSnapshot {
@@ -991,6 +1032,24 @@ fn build_tab_bar_surface(
             ime_preedit: None,
         },
     })
+}
+
+fn tab_progress_label(progress: TerminalProgress) -> String {
+    match progress {
+        TerminalProgress::Normal(percentage) => format!("{percentage}%"),
+        TerminalProgress::Error(percentage) => format!("×{percentage}%"),
+        TerminalProgress::Indeterminate => "…".to_owned(),
+        TerminalProgress::Warning(percentage) => format!("!{percentage}%"),
+    }
+}
+
+fn tab_progress_color(progress: TerminalProgress, color_theme: TerminalColorTheme) -> RgbColorDto {
+    match progress {
+        TerminalProgress::Normal(_) => color_theme.palette[14],
+        TerminalProgress::Error(_) => color_theme.palette[9],
+        TerminalProgress::Indeterminate => color_theme.palette[13],
+        TerminalProgress::Warning(_) => color_theme.palette[11],
+    }
 }
 
 fn tab_bar_style(foreground: RgbColorDto, background: RgbColorDto, bold: bool) -> TextStyleDto {
@@ -1456,7 +1515,9 @@ mod tests {
         TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
         ime_cursor_area, normalized_opacity, transparent_surface_alpha_mode,
     };
-    use germinal_ports::pty_host::color_theme::TerminalColorTheme;
+    use germinal_ports::pty_host::{
+        color_theme::TerminalColorTheme, terminal_progress::TerminalProgress,
+    };
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
 
     #[test]
@@ -1547,6 +1608,7 @@ mod tests {
         let surface = build_tab_bar_surface(
             &TabBarSnapshot {
                 titles: vec!["shell".to_string(), "nvim".to_string()],
+                progresses: vec![None, None],
                 render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
                 active_tab_index: 1,
                 position: TabBarPosition::Bottom,
@@ -1591,6 +1653,7 @@ mod tests {
         let surface = build_tab_bar_surface(
             &TabBarSnapshot {
                 titles: vec!["shell".to_string(), "nvim".to_string()],
+                progresses: vec![None, None],
                 render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
                 active_tab_index: 0,
                 position: TabBarPosition::Top,
@@ -1620,6 +1683,7 @@ mod tests {
         let surface = build_tab_bar_surface(
             &TabBarSnapshot {
                 titles: vec!["~/one".to_string(), "nvim".to_string()],
+                progresses: vec![None, None],
                 render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
                 active_tab_index: 1,
                 position: TabBarPosition::Bottom,
@@ -1647,5 +1711,44 @@ mod tests {
             Some(color_theme.active_tab_background)
         );
         assert!(surface.snapshot.rows[0].runs.len() > 10);
+    }
+
+    #[test]
+    fn tab_bar_renders_themed_progress_states_separately_from_titles() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(800, 100),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let color_theme = TerminalColorTheme::default();
+        let surface = build_tab_bar_surface(
+            &TabBarSnapshot {
+                titles: vec!["cargo".to_string(), "download".to_string()],
+                progresses: vec![
+                    Some(TerminalProgress::Normal(42)),
+                    Some(TerminalProgress::Warning(7)),
+                ],
+                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                active_tab_index: 0,
+                position: TabBarPosition::Bottom,
+            },
+            size_info,
+            color_theme,
+        )
+        .expect("multiple tabs should produce a tab bar");
+
+        let runs = &surface.snapshot.rows[0].runs;
+        let normal = runs
+            .iter()
+            .find(|run| run.text.trim() == "42%")
+            .expect("normal progress should be rendered");
+        let warning = runs
+            .iter()
+            .find(|run| run.text.trim() == "!7%")
+            .expect("warning progress should be rendered");
+        assert_eq!(normal.style.foreground, Some(color_theme.palette[14]));
+        assert_eq!(warning.style.foreground, Some(color_theme.palette[11]));
+        assert!(runs.iter().any(|run| run.text.trim() == "cargo"));
+        assert!(runs.iter().any(|run| run.text.trim() == "download"));
     }
 }

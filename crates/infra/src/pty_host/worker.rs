@@ -609,6 +609,14 @@ where
                 NotificationProtocolEvent::PtyWrite(bytes) => {
                     self.forward_pty_writes(vec![bytes]);
                 }
+                NotificationProtocolEvent::Progress(progress) => {
+                    let _ = self.proxy.dispatch(RuntimeEvent::GShell(
+                        GShellRuntimeEvent::ProgressChanged {
+                            gshell_id: self.gshell_id,
+                            progress,
+                        },
+                    ));
+                }
                 NotificationProtocolEvent::WorkingDirectory(working_directory) => {
                     let _ = self.proxy.dispatch(RuntimeEvent::GShell(
                         GShellRuntimeEvent::WorkingDirectoryChanged {
@@ -1223,6 +1231,7 @@ mod tests {
             terminal_clipboard::TerminalClipboard,
             terminal_input_mode::TerminalInputModeState,
             terminal_notification::{TerminalNotification, TerminalNotificationOccasion},
+            terminal_progress::TerminalProgress,
             terminal_size::TerminalPtySize,
             worker_backend::ITerminalWorkerBackend,
             worker_input::{
@@ -1759,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_worker_dispatches_osc_7_and_osc_133_metadata() {
+    fn terminal_worker_dispatches_osc_metadata_and_progress() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
         let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
@@ -1776,7 +1785,7 @@ mod tests {
 
         assert_eq!(
             runtime.apply_byte_chunks(&[
-                b"\x1b]7;file://host/home/user/project\x1b\\\x1b]133;C;cmdline_url=cargo%20test\x1b\\\x1b]133;D;0\x1b\\"
+                b"\x1b]7;file://host/home/user/project\x1b\\\x1b]133;C;cmdline_url=cargo%20test\x1b\\\x1b]9;4;1;42\x07\x1b]133;D;0\x1b\\\x1b]9;4;0;0\x07"
                     .to_vec(),
             ]),
             None
@@ -1793,9 +1802,17 @@ mod tests {
                     gshell_id: GShellId::new(12),
                     command: Some("cargo test".to_owned()),
                 }),
+                RuntimeEvent::GShell(GShellRuntimeEvent::ProgressChanged {
+                    gshell_id: GShellId::new(12),
+                    progress: Some(TerminalProgress::Normal(42)),
+                }),
                 RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged {
                     gshell_id: GShellId::new(12),
                     command: None,
+                }),
+                RuntimeEvent::GShell(GShellRuntimeEvent::ProgressChanged {
+                    gshell_id: GShellId::new(12),
+                    progress: None,
                 }),
             ]
         );

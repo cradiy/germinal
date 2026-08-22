@@ -494,6 +494,12 @@ impl IWorkspaceService for App {
         WorkspaceService::inj_ref(self).tab_titles()
     }
 
+    fn tab_progresses(
+        &self,
+    ) -> Vec<Option<germinal_ports::pty_host::terminal_progress::TerminalProgress>> {
+        WorkspaceService::inj_ref(self).tab_progresses()
+    }
+
     fn tab_gshells(&self) -> Vec<GShellId> {
         WorkspaceService::inj_ref(self).tab_gshells()
     }
@@ -513,6 +519,14 @@ impl IWorkspaceService for App {
 
     fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>) {
         WorkspaceService::inj_ref(self).update_gshell_command(gshell_id, command)
+    }
+
+    fn update_gshell_progress(
+        &self,
+        gshell_id: GShellId,
+        progress: Option<germinal_ports::pty_host::terminal_progress::TerminalProgress>,
+    ) {
+        WorkspaceService::inj_ref(self).update_gshell_progress(gshell_id, progress)
     }
 
     fn split_focused_gshell(

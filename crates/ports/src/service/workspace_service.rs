@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::{
-    pty_host::window_size::TerminalWindowSize, rendering::workspace_layout::RenderSurfacePlacement,
+    pty_host::{terminal_progress::TerminalProgress, window_size::TerminalWindowSize},
+    rendering::workspace_layout::RenderSurfacePlacement,
     repository::RepositoryError,
 };
 
@@ -45,10 +46,12 @@ pub trait IWorkspaceService {
     fn tab_count(&self) -> usize;
     fn active_tab_index(&self) -> usize;
     fn tab_titles(&self) -> Vec<String>;
+    fn tab_progresses(&self) -> Vec<Option<TerminalProgress>>;
     fn tab_gshells(&self) -> Vec<GShellId>;
     fn update_gshell_title(&self, gshell_id: GShellId, title: Option<String>);
     fn update_gshell_working_directory(&self, gshell_id: GShellId, working_directory: PathBuf);
     fn update_gshell_command(&self, gshell_id: GShellId, command: Option<String>);
+    fn update_gshell_progress(&self, gshell_id: GShellId, progress: Option<TerminalProgress>);
     fn split_focused_gshell(&self, direction: PaneSplitDirection) -> GShellId;
     fn swap_focused_gshell_with(&self, other: GShellId) -> bool;
     fn resize_focused_gshell(&self, direction: PaneResizeDirection) -> bool;

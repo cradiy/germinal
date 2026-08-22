@@ -4,6 +4,7 @@ use base64::{Engine as _, engine::general_purpose};
 use germinal_ports::pty_host::terminal_notification::{
     TerminalNotification, TerminalNotificationOccasion,
 };
+use germinal_ports::pty_host::terminal_progress::TerminalProgress;
 
 const MAX_CONTROL_SEQUENCE_BYTES: usize = 16 * 1024;
 const MAX_NOTIFICATION_TEXT_BYTES: usize = 16 * 1024;
@@ -14,6 +15,7 @@ pub(crate) enum NotificationProtocolEvent {
     Bytes(Vec<u8>),
     Notification(TerminalNotification),
     PtyWrite(Vec<u8>),
+    Progress(Option<TerminalProgress>),
     WorkingDirectory(PathBuf),
     ShellIntegration(ShellIntegrationEvent),
 }
@@ -38,6 +40,12 @@ enum DecoderState {
     PassthroughOsc {
         escape: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc9ProgressControl {
+    Changed(Option<TerminalProgress>),
+    Ignored,
 }
 
 #[derive(Debug, Clone)]
@@ -193,8 +201,12 @@ impl TerminalNotificationProtocolDecoder {
         }
 
         if let Some(payload) = data.strip_prefix(b"9;") {
-            if is_osc_9_progress_control(payload) {
-                return Some(Vec::new());
+            match parse_osc_9_progress_control(payload) {
+                Some(Osc9ProgressControl::Changed(progress)) => {
+                    return Some(vec![NotificationProtocolEvent::Progress(progress)]);
+                }
+                Some(Osc9ProgressControl::Ignored) => return Some(Vec::new()),
+                None => {}
             }
             return Some(self.parse_legacy_notification(payload));
         }
@@ -301,10 +313,10 @@ fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
     (!path.is_empty() && !path.contains('\0')).then(|| PathBuf::from(platform_file_url_path(path)))
 }
 
-fn is_osc_9_progress_control(payload: &[u8]) -> bool {
+fn parse_osc_9_progress_control(payload: &[u8]) -> Option<Osc9ProgressControl> {
     let mut fields = payload.split(|byte| *byte == b';');
     if fields.next() != Some(b"4") {
-        return false;
+        return None;
     }
 
     let parse_number = |field: &[u8]| {
@@ -313,13 +325,23 @@ fn is_osc_9_progress_control(payload: &[u8]) -> bool {
             .and_then(|value| value.parse::<u8>().ok())
     };
     let Some(state) = fields.next().and_then(parse_number) else {
-        return false;
+        return Some(Osc9ProgressControl::Ignored);
     };
-    let Some(progress) = fields.next().and_then(parse_number) else {
-        return false;
+    let Some(percentage) = fields.next().and_then(parse_number) else {
+        return Some(Osc9ProgressControl::Ignored);
     };
+    if fields.next().is_some() || percentage > 100 {
+        return Some(Osc9ProgressControl::Ignored);
+    }
 
-    fields.next().is_none() && state <= 4 && progress <= 100
+    Some(match state {
+        0 => Osc9ProgressControl::Changed(None),
+        1 => Osc9ProgressControl::Changed(Some(TerminalProgress::Normal(percentage))),
+        2 => Osc9ProgressControl::Changed(Some(TerminalProgress::Error(percentage))),
+        3 => Osc9ProgressControl::Changed(Some(TerminalProgress::Indeterminate)),
+        4 => Osc9ProgressControl::Changed(Some(TerminalProgress::Warning(percentage))),
+        _ => Osc9ProgressControl::Ignored,
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -501,18 +523,32 @@ mod tests {
     }
 
     #[test]
-    fn consumes_osc_9_progress_controls_without_creating_notifications() {
+    fn decodes_osc_9_progress_controls_without_creating_notifications() {
         let mut decoder = TerminalNotificationProtocolDecoder::default();
-        let events = decoder.feed(b"before\x1b]9;4;1;0\x07middle\x1b]9;4;0;0\x07after");
+        let events = decoder.feed(
+            b"before\x1b]9;4;1;42\x07\x1b]9;4;2;7\x07\x1b]9;4;3;0\x07\x1b]9;4;4;81\x07\x1b]9;4;0;0\x07after",
+        );
 
         assert_eq!(
             events,
             vec![
                 NotificationProtocolEvent::Bytes(b"before".to_vec()),
-                NotificationProtocolEvent::Bytes(b"middle".to_vec()),
+                NotificationProtocolEvent::Progress(Some(TerminalProgress::Normal(42))),
+                NotificationProtocolEvent::Progress(Some(TerminalProgress::Error(7))),
+                NotificationProtocolEvent::Progress(Some(TerminalProgress::Indeterminate)),
+                NotificationProtocolEvent::Progress(Some(TerminalProgress::Warning(81))),
+                NotificationProtocolEvent::Progress(None),
                 NotificationProtocolEvent::Bytes(b"after".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn consumes_invalid_osc_9_progress_controls_without_creating_notifications() {
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert!(decoder.feed(b"\x1b]9;4;1;101\x07").is_empty());
+        assert!(decoder.feed(b"\x1b]9;4;broken\x07").is_empty());
     }
 
     #[test]

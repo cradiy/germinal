@@ -22,6 +22,7 @@ pub mod terminal_clipboard;
 pub mod terminal_geometric_glyph;
 pub mod terminal_input_mode;
 pub mod terminal_notification;
+pub mod terminal_progress;
 pub mod terminal_size;
 pub mod width;
 pub mod window_metrics;
