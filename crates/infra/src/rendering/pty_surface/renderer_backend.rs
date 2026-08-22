@@ -110,6 +110,7 @@ impl RendererBackend for WgpuRendererBackend {
             {
                 append_cursor_quads(
                     &mut cursor_quads,
+                    None,
                     RenderSurfaceCursorSnapshot {
                         x,
                         y,
@@ -121,13 +122,9 @@ impl RendererBackend for WgpuRendererBackend {
                 );
             }
         } else if let Some(cursor) = snapshot.cursor {
-            append_cursor_quads(&mut cursor_quads, cursor, config);
-            append_cursor_text_quads(
-                &mut cursor_text_quads,
-                inner.rendered_rows.get(&cursor.y),
-                cursor,
-                config,
-            );
+            let cursor_row = inner.rendered_rows.get(&cursor.y);
+            append_cursor_quads(&mut cursor_quads, cursor_row, cursor, config);
+            append_cursor_text_quads(&mut cursor_text_quads, cursor_row, cursor, config);
         }
 
         let total_row_quads: usize = inner
@@ -389,6 +386,7 @@ fn append_terminal_geometric_glyph_quads(
 
 fn append_cursor_quads(
     quads: &mut Vec<WgpuQuadDrawItem>,
+    row: Option<&WgpuRenderedRow>,
     cursor: RenderSurfaceCursorSnapshot,
     config: WgpuRendererConfig,
 ) {
@@ -396,9 +394,10 @@ fn append_cursor_quads(
         return;
     }
 
-    let x = config.content_origin_x + cursor.x * config.cell_width_px;
+    let (cursor_x, cursor_cell_width) = cursor_cell_span(row, cursor.x);
+    let x = config.content_origin_x + cursor_x * config.cell_width_px;
     let y = config.row_top_px(cursor.y);
-    let w = config.cell_width_px.max(1);
+    let w = cursor_cell_width * config.cell_width_px.max(1);
     let h = config.row_height_px(cursor.y);
     let style = TextStyleDto {
         foreground: Some(config.cursor_color),
@@ -407,7 +406,7 @@ fn append_cursor_quads(
         italic: false,
         underline: false,
     };
-    let vertical_stroke = w.div_ceil(8).max(1);
+    let vertical_stroke = config.cell_width_px.div_ceil(8).max(1);
     let horizontal_stroke = h.div_ceil(8).max(1);
     match cursor.shape {
         RenderSurfaceCursorShape::Block => {
@@ -463,6 +462,17 @@ fn append_cursor_quads(
         }
         RenderSurfaceCursorShape::Hidden => {}
     }
+}
+
+fn cursor_cell_span(row: Option<&WgpuRenderedRow>, cursor_x: u32) -> (u32, u32) {
+    row.and_then(|row| {
+        row.draw_row.glyphs().iter().find_map(|glyph| {
+            let width = glyph.cell_width.max(1);
+            (cursor_x >= glyph.x && cursor_x < glyph.x.saturating_add(width))
+                .then_some((glyph.x, width))
+        })
+    })
+    .unwrap_or((cursor_x, 1))
 }
 
 fn append_cursor_text_quads(
@@ -1168,6 +1178,44 @@ mod tests {
                 .foreground,
             Some(color_theme.cursor_text)
         );
+    }
+
+    #[test]
+    fn block_cursor_covers_the_full_width_of_a_cjk_glyph() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "功".to_string(),
+                    style: TextStyleDto::plain(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 0,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: None,
+        });
+
+        let cursor = backend
+            .state()
+            .geometric_quads()
+            .into_iter()
+            .find(|quad| quad.height_px == 16)
+            .expect("block cursor should render");
+        assert_eq!(cursor.x_px, 0);
+        assert_eq!(cursor.width_px, 16);
     }
 
     #[test]

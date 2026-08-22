@@ -1747,7 +1747,8 @@ mod tests {
         match pollster::block_on(pty_rx.recv()) {
             Some(PtyInput::Bytes(bytes)) => {
                 let mut expected =
-                    format!("\x1bP>|Germinal {}\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes();
+                    format!("\x1bP>|Germinal-kitty {}\x1b\\", env!("CARGO_PKG_VERSION"))
+                        .into_bytes();
                 expected.extend_from_slice(
                     b"\x1bP1+r436f=323536\x1b\\\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c",
                 );

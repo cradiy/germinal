@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    io::{Cursor, Read},
+    fs::File,
+    io::{Cursor, Read, Seek, SeekFrom},
+    path::Path,
     sync::Arc,
 };
 
@@ -346,15 +348,9 @@ impl KittyGraphicsState {
         cursor: (u32, u32),
         action: char,
     ) -> Result<KittyCommandResult, KittyGraphicsError> {
-        if command.char(b't', 'd') != 'd' {
-            return Err(KittyGraphicsError::UnsupportedMedium);
-        }
-
         let image_id = command.u32(b'i', 0)?;
         let placement_id = command.u32(b'p', 0)?;
-        let encoded = STANDARD
-            .decode(&command.payload)
-            .map_err(|_| KittyGraphicsError::InvalidPayload)?;
+        let encoded = transmission_bytes(&command)?;
         let bytes = if command.char(b'o', '\0') == 'z' {
             decompress_zlib(&encoded)?
         } else if command.control.contains_key(&b'o') {
@@ -678,6 +674,60 @@ impl KittyGraphicsState {
     }
 }
 
+fn transmission_bytes(command: &KittyCommand) -> Result<Vec<u8>, KittyGraphicsError> {
+    let decoded = STANDARD
+        .decode(&command.payload)
+        .map_err(|_| KittyGraphicsError::InvalidPayload)?;
+
+    match command.char(b't', 'd') {
+        'd' => Ok(decoded),
+        'f' => read_regular_file(command, &decoded),
+        _ => Err(KittyGraphicsError::UnsupportedMedium),
+    }
+}
+
+fn read_regular_file(
+    command: &KittyCommand,
+    encoded_path: &[u8],
+) -> Result<Vec<u8>, KittyGraphicsError> {
+    let path = std::str::from_utf8(encoded_path).map_err(|_| KittyGraphicsError::InvalidPayload)?;
+    let path = Path::new(path);
+    let mut file = File::open(path).map_err(|_| KittyGraphicsError::FileReadFailed)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| KittyGraphicsError::FileReadFailed)?;
+    if !metadata.file_type().is_file() {
+        return Err(KittyGraphicsError::UnsupportedFileType);
+    }
+
+    let offset = u64::from(command.u32(b'O', 0)?);
+    let available = metadata
+        .len()
+        .checked_sub(offset)
+        .ok_or(KittyGraphicsError::InvalidPayload)?;
+    let requested = match command.control.get(&b'S') {
+        Some(_) => u64::from(command.u32(b'S', 0)?),
+        None => available,
+    };
+    if requested > available {
+        return Err(KittyGraphicsError::InvalidPayload);
+    }
+    if requested > MAX_DECODED_IMAGE_BYTES as u64 {
+        return Err(KittyGraphicsError::ImageTooLarge);
+    }
+
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|_| KittyGraphicsError::FileReadFailed)?;
+    let mut bytes = Vec::with_capacity(requested as usize);
+    file.take(requested)
+        .read_to_end(&mut bytes)
+        .map_err(|_| KittyGraphicsError::FileReadFailed)?;
+    if bytes.len() != requested as usize {
+        return Err(KittyGraphicsError::InvalidPayload);
+    }
+    Ok(bytes)
+}
+
 fn append_encoded_payload(target: &mut Vec<u8>, payload: &[u8]) -> Result<(), KittyGraphicsError> {
     if target.len().saturating_add(payload.len()) > MAX_ENCODED_IMAGE_BYTES {
         return Err(KittyGraphicsError::ImageTooLarge);
@@ -859,6 +909,8 @@ enum KittyGraphicsError {
     UnsupportedFormat,
     UnsupportedImageNumber,
     UnsupportedMedium,
+    UnsupportedFileType,
+    FileReadFailed,
 }
 
 impl KittyGraphicsError {
@@ -875,13 +927,19 @@ impl KittyGraphicsError {
             Self::UnsupportedFormat => "ENOTSUP:image format is not supported",
             Self::UnsupportedImageNumber => "ENOTSUP:image numbers are not supported",
             Self::UnsupportedMedium => "ENOTSUP:transmission medium is not supported",
+            Self::UnsupportedFileType => "ENOTSUP:file is not a regular file",
+            Self::FileReadFailed => "EIO:failed to read image file",
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
+    use std::{
+        fs,
+        io::Write as _,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 
@@ -890,6 +948,17 @@ mod tests {
         bytes.push(b';');
         bytes.extend_from_slice(payload);
         KittyCommand::parse(&bytes).unwrap()
+    }
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "germinal-kitty-graphics-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -990,15 +1059,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_file_medium() {
+    fn snacks_file_upload_creates_a_virtual_image() {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[10, 20, 30]).unwrap();
+        }
+        let path = temp_path("snacks.png");
+        fs::write(&path, png_bytes).unwrap();
+        let encoded_path = STANDARD.encode(path.to_string_lossy().as_bytes());
         let mut graphics = KittyGraphicsState::default();
-        let path = STANDARD.encode("/tmp/image.png");
-        let result = graphics.handle(command("a=t,t=f,f=100,i=4", path.as_bytes()), (0, 0));
 
-        assert_eq!(
-            result.response,
-            Some(b"\x1b_Gi=4;ENOTSUP:transmission medium is not supported\x1b\\".to_vec())
+        let upload = graphics.handle(
+            command("q=2,t=f,f=100,i=4", encoded_path.as_bytes()),
+            (0, 0),
         );
+        let placement = graphics.handle(command("q=2,a=p,U=1,i=4,p=1,c=1,r=1", b""), (0, 0));
+        let snapshots = graphics.snapshots(&[KittyPlaceholderCell {
+            image_id: 4,
+            x_cell: 2,
+            y_cell: 3,
+        }]);
+
+        fs::remove_file(path).unwrap();
+        assert!(upload.response.is_none());
+        assert!(placement.response.is_none());
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(&*snapshots[0].rgba, &[10, 20, 30, 255]);
     }
 
     #[test]

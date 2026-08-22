@@ -7,6 +7,7 @@ use germinal_ports::pty_host::{
 const MAX_CSI_BYTES: usize = 64;
 const MAX_DCS_BYTES: usize = 4 * 1024;
 const GERMINAL_NAME: &[u8] = b"Germinal";
+const XTVERSION_NAME: &[u8] = b"Germinal-kitty";
 const GERMINAL_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,7 +504,7 @@ fn cell_size_response(size: TerminalPtySize) -> Vec<u8> {
 fn terminal_version_response() -> Vec<u8> {
     format!(
         "\x1bP>|{} {}\x1b\\",
-        String::from_utf8_lossy(GERMINAL_NAME),
+        String::from_utf8_lossy(XTVERSION_NAME),
         String::from_utf8_lossy(GERMINAL_VERSION)
     )
     .into_bytes()
@@ -646,20 +647,23 @@ mod tests {
     }
 
     #[test]
-    fn reports_germinal_name_and_version() {
+    fn reports_germinal_kitty_compatibility_name_and_version() {
         let mut decoder = TerminalCompatibilityProtocolDecoder::new(
             TerminalPtySize::new(24, 80, 960, 576),
             TerminalColorTheme::default(),
             "alacritty",
         );
+        let version_response = terminal_version_response();
+
+        assert!(version_response.starts_with(b"\x1bP>|Germinal-kitty "));
 
         assert_eq!(
             decoder.feed(b"before\x1b[>0qafter\x1b[>q"),
             vec![
                 CompatibilityProtocolEvent::Bytes(b"before".to_vec()),
-                CompatibilityProtocolEvent::PtyWrite(terminal_version_response()),
+                CompatibilityProtocolEvent::PtyWrite(version_response.clone()),
                 CompatibilityProtocolEvent::Bytes(b"after".to_vec()),
-                CompatibilityProtocolEvent::PtyWrite(terminal_version_response()),
+                CompatibilityProtocolEvent::PtyWrite(version_response),
             ]
         );
     }
