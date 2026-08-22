@@ -519,7 +519,8 @@ where
             input_modes.store(
                 self.terminal_store
                     .input_modes(self.target_id)
-                    .with_urxvt_mouse(self.compatibility_decoder.urxvt_mouse_enabled()),
+                    .with_urxvt_mouse(self.compatibility_decoder.urxvt_mouse_enabled())
+                    .with_sgr_pixel_mouse(self.compatibility_decoder.sgr_pixel_mouse_enabled()),
             );
         }
     }
@@ -1403,7 +1404,7 @@ mod tests {
             .expect("PTY input state should send");
         input
             .send(TerminalWorkerInput::Bytes(
-                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?1015h\x1b[>3u".to_vec(),
+                b"\x1b[?1h\x1b[?2004h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?1015h\x1b[?1016h\x1b[>3u".to_vec(),
             ))
             .expect("terminal mode sequences should send");
 
@@ -1414,8 +1415,9 @@ mod tests {
         assert!(modes.app_cursor());
         assert!(modes.bracketed_paste());
         assert!(modes.focus_in_out());
-        assert!(modes.sgr_mouse());
-        assert!(modes.urxvt_mouse());
+        assert!(!modes.sgr_mouse());
+        assert!(!modes.urxvt_mouse());
+        assert!(modes.sgr_pixel_mouse());
         assert!(modes.mouse_report_click());
         assert!(modes.kitty_disambiguate_esc_codes());
         assert!(modes.kitty_report_event_types());

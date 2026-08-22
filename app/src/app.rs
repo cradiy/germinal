@@ -114,6 +114,7 @@ pub struct App {
     ime_enabled: bool,
     cursor_position: Option<PhysicalPosition<f64>>,
     pointer_gshell: Option<GShellId>,
+    pointer_capture: Option<PointerCapture>,
     pending_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
     terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
     hyperlink_pointer_consumed: bool,
@@ -127,6 +128,12 @@ enum PaneDirection {
     Right,
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PointerCapture {
+    gshell_id: GShellId,
+    position: WindowPointerPosition,
 }
 
 impl App {
@@ -227,6 +234,7 @@ impl App {
             ime_enabled: false,
             cursor_position: None,
             pointer_gshell: None,
+            pointer_capture: None,
             pending_working_directories: RefCell::new(HashMap::new()),
             terminal_hyperlinks: HashMap::new(),
             hyperlink_pointer_consumed: false,
@@ -949,6 +957,31 @@ impl App {
         ))
     }
 
+    fn captured_pointer_input_at(
+        &self,
+        gshell_id: GShellId,
+        position: PhysicalPosition<f64>,
+    ) -> Option<WindowPointerPosition> {
+        let window_size = self.current_terminal_size_info().window_size();
+        let placements = self.current_workspace_render_layout(window_size);
+        let placement = placements
+            .into_iter()
+            .find(|placement| placement.target_id.value() == gshell_id.value())?;
+        let size_info = self.terminal_size_info_for_surface(placement);
+        let viewport = size_info.render_viewport();
+        let local_position = surface_local_pointer_position(
+            placement,
+            viewport.origin_x_px(),
+            viewport.origin_y_px(),
+            position,
+        );
+        clamp_pointer_position_to_content(
+            local_position,
+            size_info.content_width_px(),
+            size_info.content_height_px(),
+        )
+    }
+
     fn try_open_hyperlink_at_cursor(&self) -> bool {
         let Some(position) = self.cursor_position else {
             return false;
@@ -984,6 +1017,27 @@ impl App {
     }
 
     fn route_pointer_moved(&mut self, position: PhysicalPosition<f64>) {
+        if let Some(capture) = self.pointer_capture {
+            if let Some(local_position) =
+                self.captured_pointer_input_at(capture.gshell_id, position)
+            {
+                self.pointer_capture = Some(PointerCapture {
+                    position: local_position,
+                    ..capture
+                });
+                self.pointer_gshell = Some(capture.gshell_id);
+                self.route_window_input(
+                    capture.gshell_id,
+                    WindowInputEvent::PointerMoved {
+                        position: local_position,
+                        modifiers: self.window_input_modifiers,
+                    },
+                );
+                return;
+            }
+            self.pointer_capture = None;
+        }
+
         let Some((gshell_id, local_position)) = self.pointer_input_at(position) else {
             self.route_pointer_left();
             return;
@@ -1000,6 +1054,56 @@ impl App {
                 modifiers: self.window_input_modifiers,
             },
         );
+    }
+
+    fn route_pointer_button(&mut self, state: ElementState, button: MouseButton) {
+        let captured = if button == MouseButton::Left && state == ElementState::Released {
+            self.pointer_capture
+        } else {
+            None
+        };
+        let input = captured
+            .map(|capture| {
+                let position = self
+                    .cursor_position
+                    .and_then(|position| {
+                        self.captured_pointer_input_at(capture.gshell_id, position)
+                    })
+                    .unwrap_or(capture.position);
+                (capture.gshell_id, position)
+            })
+            .or_else(|| {
+                self.cursor_position
+                    .and_then(|position| self.pointer_input_at(position))
+            });
+
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            self.pointer_capture = input.map(|(gshell_id, position)| PointerCapture {
+                gshell_id,
+                position,
+            });
+        }
+
+        if let Some((gshell_id, position)) = input {
+            self.route_window_input(
+                gshell_id,
+                WindowInputEvent::PointerButton {
+                    state: winit_element_state_to_port(state),
+                    button: winit_mouse_button_to_port(button),
+                    position,
+                    modifiers: self.window_input_modifiers,
+                },
+            );
+        }
+
+        if button == MouseButton::Left && state == ElementState::Released {
+            self.pointer_capture = None;
+            if let Some(position) = self.cursor_position {
+                self.route_pointer_moved(position);
+            } else {
+                self.route_pointer_left();
+            }
+        }
     }
 
     fn route_pointer_left(&mut self) {
@@ -1245,6 +1349,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     self.window_focused = focused;
                     if !focused {
                         self.clear_ime_preedit(self.focused_gshell());
+                        self.pointer_capture = None;
+                        self.route_pointer_left();
                     }
                     self.route_focus_changed(self.focused_gshell(), focused);
                 }
@@ -1273,7 +1379,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_position = None;
-                self.route_pointer_left();
+                if self.pointer_capture.is_none() {
+                    self.route_pointer_left();
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
@@ -1292,19 +1400,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     self.try_focus_pane_at_cursor();
                 }
-                if let Some(position) = self.cursor_position
-                    && let Some((gshell_id, local_position)) = self.pointer_input_at(position)
-                {
-                    self.route_window_input(
-                        gshell_id,
-                        WindowInputEvent::PointerButton {
-                            state: winit_element_state_to_port(state),
-                            button: winit_mouse_button_to_port(button),
-                            position: local_position,
-                            modifiers: self.window_input_modifiers,
-                        },
-                    );
-                }
+                self.route_pointer_button(state, button);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if let Some(position) = self.cursor_position
@@ -1633,6 +1729,25 @@ fn surface_local_pointer_position(
         position.x - f64::from(placement.x_px) - f64::from(content_origin_x_px),
         position.y - f64::from(placement.y_px) - f64::from(content_origin_y_px),
     )
+}
+
+fn clamp_pointer_position_to_content(
+    position: WindowPointerPosition,
+    content_width_px: u32,
+    content_height_px: u32,
+) -> Option<WindowPointerPosition> {
+    if !position.x_px.is_finite() || !position.y_px.is_finite() {
+        return None;
+    }
+
+    Some(WindowPointerPosition::new(
+        position
+            .x_px
+            .clamp(0.0, f64::from(content_width_px.saturating_sub(1))),
+        position
+            .y_px
+            .clamp(0.0, f64::from(content_height_px.saturating_sub(1))),
+    ))
 }
 
 fn open_terminal_hyperlink(uri: &str) -> Result<(), String> {
@@ -2019,6 +2134,18 @@ mod tests {
         assert_eq!(
             surface_local_pointer_position(placement, 8, 12, PhysicalPosition::new(540.5, 70.25)),
             WindowPointerPosition::new(32.5, 38.25)
+        );
+    }
+
+    #[test]
+    fn captured_pointer_position_clamps_to_pane_content_edges() {
+        assert_eq!(
+            clamp_pointer_position_to_content(WindowPointerPosition::new(-20.0, 300.0), 280, 176,),
+            Some(WindowPointerPosition::new(0.0, 175.0))
+        );
+        assert_eq!(
+            clamp_pointer_position_to_content(WindowPointerPosition::new(45.5, 80.25), 280, 176,),
+            Some(WindowPointerPosition::new(45.5, 80.25))
         );
     }
 

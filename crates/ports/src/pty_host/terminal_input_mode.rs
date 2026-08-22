@@ -16,6 +16,7 @@ const KITTY_REPORT_ALTERNATE_KEYS: u32 = 1 << 9;
 const KITTY_REPORT_ALL_KEYS_AS_ESC: u32 = 1 << 10;
 const KITTY_REPORT_ASSOCIATED_TEXT: u32 = 1 << 11;
 const URXVT_MOUSE: u32 = 1 << 12;
+const SGR_PIXEL_MOUSE: u32 = 1 << 13;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalInputModes(u32);
@@ -80,6 +81,19 @@ impl TerminalInputModes {
             self.0 |= URXVT_MOUSE;
         } else {
             self.0 &= !URXVT_MOUSE;
+        }
+        self
+    }
+
+    pub const fn sgr_pixel_mouse(self) -> bool {
+        self.0 & SGR_PIXEL_MOUSE != 0
+    }
+
+    pub const fn with_sgr_pixel_mouse(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.0 |= SGR_PIXEL_MOUSE;
+        } else {
+            self.0 &= !SGR_PIXEL_MOUSE;
         }
         self
     }
@@ -182,6 +196,7 @@ mod tests {
         let reader = state.clone();
         let modes = TerminalInputModes::new(true, true, true, true, true, false, false)
             .with_urxvt_mouse(true)
+            .with_sgr_pixel_mouse(true)
             .with_kitty_keyboard(true, true, true, true, true);
 
         state.store(modes);
@@ -189,6 +204,7 @@ mod tests {
         assert_eq!(reader.load(), modes);
         assert!(reader.load().mouse_tracking());
         assert!(reader.load().urxvt_mouse());
+        assert!(reader.load().sgr_pixel_mouse());
         assert!(reader.load().kitty_keyboard());
         assert!(reader.load().kitty_disambiguate_esc_codes());
         assert!(reader.load().kitty_report_event_types());

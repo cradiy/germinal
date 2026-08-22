@@ -104,7 +104,7 @@ pub(super) fn encode_focus_changed(modes: TerminalInputModes, focused: bool) -> 
 pub(super) struct PtyMouseEncoder {
     size: TerminalPtySize,
     pressed_buttons: Vec<WindowPointerButton>,
-    last_pointer_cell: Option<(u16, u16)>,
+    last_pointer_location: Option<(u16, u16)>,
     wheel_x: f64,
     wheel_y: f64,
 }
@@ -114,7 +114,7 @@ impl PtyMouseEncoder {
         Self {
             size,
             pressed_buttons: Vec::new(),
-            last_pointer_cell: None,
+            last_pointer_location: None,
             wheel_x: 0.0,
             wheel_y: 0.0,
         }
@@ -122,13 +122,13 @@ impl PtyMouseEncoder {
 
     pub(super) fn resize(&mut self, size: TerminalPtySize) {
         self.size = size;
-        self.last_pointer_cell = None;
+        self.last_pointer_location = None;
         self.wheel_x = 0.0;
         self.wheel_y = 0.0;
     }
 
     pub(super) fn pointer_left(&mut self) {
-        self.last_pointer_cell = None;
+        self.last_pointer_location = None;
         self.pressed_buttons.clear();
     }
 
@@ -145,11 +145,11 @@ impl PtyMouseEncoder {
         position: WindowPointerPosition,
         modifiers: WindowInputModifiers,
     ) -> Option<Vec<u8>> {
-        let cell = terminal_cell_at(position, self.size)?;
-        if self.last_pointer_cell == Some(cell) {
+        let location = terminal_mouse_location(modes, position, self.size)?;
+        if self.last_pointer_location == Some(location) {
             return None;
         }
-        self.last_pointer_cell = Some(cell);
+        self.last_pointer_location = Some(location);
         if !mouse_reporting_enabled(modes) {
             return None;
         }
@@ -168,7 +168,7 @@ impl PtyMouseEncoder {
         Some(mouse_report(
             modes,
             report + 32 + modifier_code(modifiers),
-            cell,
+            location,
             false,
         ))
     }
@@ -182,8 +182,8 @@ impl PtyMouseEncoder {
         modifiers: WindowInputModifiers,
     ) -> Option<Vec<u8>> {
         let button_code = mouse_button_code(button)?;
-        let cell = terminal_cell_at(position, self.size)?;
-        self.last_pointer_cell = Some(cell);
+        let location = terminal_mouse_location(modes, position, self.size)?;
+        self.last_pointer_location = Some(location);
 
         match state {
             WindowInputElementState::Pressed => {
@@ -201,7 +201,7 @@ impl PtyMouseEncoder {
         Some(mouse_report(
             modes,
             button_code + modifier_code(modifiers),
-            cell,
+            location,
             state == WindowInputElementState::Released,
         ))
     }
@@ -230,20 +230,48 @@ impl PtyMouseEncoder {
             return PtyScrollAction::ScrollDisplay(y_steps);
         }
 
-        let Some(cell) = terminal_cell_at(position, self.size) else {
+        let Some(location) = terminal_mouse_location(modes, position, self.size) else {
             return PtyScrollAction::ReportToPty(Vec::new());
         };
-        self.last_pointer_cell = Some(cell);
+        self.last_pointer_location = Some(location);
         let modifiers = modifier_code(modifiers);
         let mut reports = Vec::with_capacity((x_steps.abs() + y_steps.abs()) as usize);
-        append_scroll_reports(&mut reports, modes, y_steps, 64, 65, modifiers, cell);
-        append_scroll_reports(&mut reports, modes, x_steps, 67, 66, modifiers, cell);
+        append_scroll_reports(&mut reports, modes, y_steps, 64, 65, modifiers, location);
+        append_scroll_reports(&mut reports, modes, x_steps, 67, 66, modifiers, location);
         PtyScrollAction::ReportToPty(reports)
     }
 }
 
 pub(super) fn mouse_reporting_enabled(modes: TerminalInputModes) -> bool {
-    (modes.sgr_mouse() || modes.urxvt_mouse()) && modes.mouse_tracking()
+    (modes.sgr_pixel_mouse() || modes.sgr_mouse() || modes.urxvt_mouse()) && modes.mouse_tracking()
+}
+
+fn terminal_mouse_location(
+    modes: TerminalInputModes,
+    position: WindowPointerPosition,
+    size: TerminalPtySize,
+) -> Option<(u16, u16)> {
+    if modes.sgr_pixel_mouse() {
+        terminal_pixel_at(position, size)
+    } else {
+        terminal_cell_at(position, size)
+    }
+}
+
+fn terminal_pixel_at(position: WindowPointerPosition, size: TerminalPtySize) -> Option<(u16, u16)> {
+    if !position.x_px.is_finite()
+        || !position.y_px.is_finite()
+        || position.x_px < 0.0
+        || position.y_px < 0.0
+        || size.pixel_width() == 0
+        || size.pixel_height() == 0
+    {
+        return None;
+    }
+
+    let x = (position.x_px.floor() as u32).min(u32::from(size.pixel_width() - 1)) as u16 + 1;
+    let y = (position.y_px.floor() as u32).min(u32::from(size.pixel_height() - 1)) as u16 + 1;
+    Some((x, y))
 }
 
 fn terminal_cell_at(position: WindowPointerPosition, size: TerminalPtySize) -> Option<(u16, u16)> {
@@ -281,7 +309,7 @@ fn terminal_selection_point_at(
 }
 
 fn mouse_report(modes: TerminalInputModes, code: u8, cell: (u16, u16), released: bool) -> Vec<u8> {
-    if modes.sgr_mouse() {
+    if modes.sgr_pixel_mouse() || modes.sgr_mouse() {
         format!(
             "\x1b[<{};{};{}{}",
             code,
@@ -1210,6 +1238,44 @@ mod tests {
                 WindowInputModifiers::new(false, false, false, false),
             ),
             Some(b"\x1b[<0;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_pixel_mouse_reports_physical_pixels_and_tracks_within_a_cell() {
+        let size = TerminalPtySize::new(10, 20, 200, 100);
+        let mut encoder = PtyMouseEncoder::new(size);
+        let mouse_modes = TerminalInputModes::new(false, false, false, true, false, true, false)
+            .with_urxvt_mouse(true)
+            .with_sgr_pixel_mouse(true);
+
+        assert_eq!(
+            encoder.button(
+                mouse_modes,
+                WindowInputElementState::Pressed,
+                WindowPointerButton::Primary,
+                WindowPointerPosition::new(25.25, 35.25),
+                WindowInputModifiers::new(false, false, false, false),
+            ),
+            Some(b"\x1b[<0;26;36M".to_vec())
+        );
+        assert_eq!(
+            encoder.moved(
+                mouse_modes,
+                WindowPointerPosition::new(26.25, 35.75),
+                WindowInputModifiers::new(false, false, false, false),
+            ),
+            Some(b"\x1b[<32;27;36M".to_vec())
+        );
+        assert_eq!(
+            encoder.button(
+                mouse_modes,
+                WindowInputElementState::Released,
+                WindowPointerButton::Primary,
+                WindowPointerPosition::new(199.9, 99.9),
+                WindowInputModifiers::new(false, false, false, false),
+            ),
+            Some(b"\x1b[<0;200;100m".to_vec())
         );
     }
 

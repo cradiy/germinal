@@ -36,6 +36,7 @@ pub(crate) struct TerminalCompatibilityProtocolDecoder {
     default_cursor_style: TerminalCursorStyle,
     cursor_style: TerminalCursorStyle,
     urxvt_mouse_enabled: bool,
+    sgr_pixel_mouse_enabled: bool,
 }
 
 impl TerminalCompatibilityProtocolDecoder {
@@ -69,6 +70,7 @@ impl TerminalCompatibilityProtocolDecoder {
             default_cursor_style: cursor_style,
             cursor_style,
             urxvt_mouse_enabled: false,
+            sgr_pixel_mouse_enabled: false,
         }
     }
 
@@ -78,6 +80,10 @@ impl TerminalCompatibilityProtocolDecoder {
 
     pub(crate) fn urxvt_mouse_enabled(&self) -> bool {
         self.urxvt_mouse_enabled
+    }
+
+    pub(crate) fn sgr_pixel_mouse_enabled(&self) -> bool {
+        self.sgr_pixel_mouse_enabled
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<CompatibilityProtocolEvent> {
@@ -132,6 +138,7 @@ impl TerminalCompatibilityProtocolDecoder {
                         if byte == b'c' {
                             self.cursor_style = self.default_cursor_style;
                             self.urxvt_mouse_enabled = false;
+                            self.sgr_pixel_mouse_enabled = false;
                         }
                         visible.extend_from_slice(&[0x1b, byte]);
                         DecoderState::Ground
@@ -214,16 +221,22 @@ impl TerminalCompatibilityProtocolDecoder {
             return;
         }
 
-        if let Some((enabled, remaining)) = consume_private_mode(sequence, 1015) {
-            self.urxvt_mouse_enabled = enabled;
-            if !remaining.is_empty() {
-                visible.extend_from_slice(if raw.starts_with(b"\x1b[") {
-                    b"\x1b["
-                } else {
-                    b"\x9b"
-                });
-                visible.extend_from_slice(&remaining);
+        if let Some(mode) = parse_private_mode_query(sequence) {
+            let enabled = match mode {
+                1015 => Some(self.urxvt_mouse_enabled),
+                1016 => Some(self.sgr_pixel_mouse_enabled),
+                _ => None,
+            };
+            if let Some(enabled) = enabled {
+                flush_visible(events, visible);
+                events.push(CompatibilityProtocolEvent::PtyWrite(
+                    private_mode_report_response(mode, enabled),
+                ));
+                return;
             }
+        }
+
+        if self.handle_compatibility_private_modes(&raw, sequence, visible) {
             return;
         }
 
@@ -232,14 +245,6 @@ impl TerminalCompatibilityProtocolDecoder {
             b"?996n" => Some(color_scheme_response(self.dark_color_scheme)),
             b"14t" => Some(text_area_size_response(self.size)),
             b"16t" => Some(cell_size_response(self.size)),
-            b"?2031h" => {
-                self.color_scheme_updates_enabled = true;
-                None
-            }
-            b"?2031l" => {
-                self.color_scheme_updates_enabled = false;
-                None
-            }
             _ => {
                 visible.extend_from_slice(&raw);
                 return;
@@ -250,6 +255,63 @@ impl TerminalCompatibilityProtocolDecoder {
             flush_visible(events, visible);
             events.push(CompatibilityProtocolEvent::PtyWrite(response));
         }
+    }
+
+    fn handle_compatibility_private_modes(
+        &mut self,
+        raw: &[u8],
+        sequence: &[u8],
+        visible: &mut Vec<u8>,
+    ) -> bool {
+        let Some((enabled, parameters)) = parse_private_mode_change(sequence) else {
+            return false;
+        };
+        let contains_compatibility_mode = parameters
+            .iter()
+            .any(|mode| matches!(mode, 1015 | 1016 | 2031));
+        let replaces_compatibility_mouse_encoding = enabled
+            && (self.urxvt_mouse_enabled || self.sgr_pixel_mouse_enabled)
+            && parameters.iter().any(|mode| matches!(mode, 1005 | 1006));
+
+        if !contains_compatibility_mode {
+            if replaces_compatibility_mouse_encoding {
+                self.urxvt_mouse_enabled = false;
+                self.sgr_pixel_mouse_enabled = false;
+                visible.extend_from_slice(raw);
+                return true;
+            }
+            return false;
+        }
+
+        let prefix = csi_prefix(raw);
+        for mode in parameters {
+            match mode {
+                1005 | 1006 => {
+                    if enabled {
+                        self.urxvt_mouse_enabled = false;
+                        self.sgr_pixel_mouse_enabled = false;
+                    }
+                    append_private_mode_change(visible, prefix, &[mode], enabled);
+                }
+                1015 => {
+                    self.urxvt_mouse_enabled = enabled;
+                    if enabled {
+                        self.sgr_pixel_mouse_enabled = false;
+                        append_private_mode_change(visible, prefix, &[1005, 1006], false);
+                    }
+                }
+                1016 => {
+                    self.sgr_pixel_mouse_enabled = enabled;
+                    if enabled {
+                        self.urxvt_mouse_enabled = false;
+                        append_private_mode_change(visible, prefix, &[1005, 1006], false);
+                    }
+                }
+                2031 => self.color_scheme_updates_enabled = enabled,
+                _ => append_private_mode_change(visible, prefix, &[mode], enabled),
+            }
+        }
+        true
     }
 
     fn finish_dcs(
@@ -376,7 +438,7 @@ fn cursor_style_parameter(style: TerminalCursorStyle) -> u8 {
     }
 }
 
-fn consume_private_mode(sequence: &[u8], mode: u16) -> Option<(bool, Vec<u8>)> {
+fn parse_private_mode_change(sequence: &[u8]) -> Option<(bool, Vec<u16>)> {
     let (&final_byte, body) = sequence.split_last()?;
     let enabled = match final_byte {
         b'h' => true,
@@ -384,31 +446,40 @@ fn consume_private_mode(sequence: &[u8], mode: u16) -> Option<(bool, Vec<u8>)> {
         _ => return None,
     };
     let parameters = body.strip_prefix(b"?")?;
-    let mut remaining = Vec::new();
-    let mut found = false;
+    let parameters = parameters
+        .split(|byte| *byte == b';')
+        .map(|parameter| std::str::from_utf8(parameter).ok()?.parse::<u16>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!parameters.is_empty()).then_some((enabled, parameters))
+}
 
-    for parameter in parameters.split(|byte| *byte == b';') {
-        let parsed = std::str::from_utf8(parameter)
-            .ok()
-            .and_then(|value| value.parse::<u16>().ok());
-        if parsed == Some(mode) {
-            found = true;
-        } else {
-            if !remaining.is_empty() {
-                remaining.push(b';');
-            }
-            remaining.extend_from_slice(parameter);
+fn parse_private_mode_query(sequence: &[u8]) -> Option<u16> {
+    let parameter = sequence.strip_prefix(b"?")?.strip_suffix(b"$p")?;
+    std::str::from_utf8(parameter).ok()?.parse().ok()
+}
+
+fn private_mode_report_response(mode: u16, enabled: bool) -> Vec<u8> {
+    format!("\x1b[?{mode};{}$y", if enabled { 1 } else { 2 }).into_bytes()
+}
+
+fn csi_prefix(raw: &[u8]) -> &'static [u8] {
+    if raw.starts_with(b"\x1b[") {
+        b"\x1b["
+    } else {
+        b"\x9b"
+    }
+}
+
+fn append_private_mode_change(output: &mut Vec<u8>, prefix: &[u8], modes: &[u16], enabled: bool) {
+    output.extend_from_slice(prefix);
+    output.push(b'?');
+    for (index, mode) in modes.iter().enumerate() {
+        if index > 0 {
+            output.push(b';');
         }
+        output.extend_from_slice(mode.to_string().as_bytes());
     }
-
-    if !found {
-        return None;
-    }
-    if !remaining.is_empty() {
-        remaining.insert(0, b'?');
-        remaining.push(final_byte);
-    }
-    Some((enabled, remaining))
+    output.push(if enabled { b'h' } else { b'l' });
 }
 
 fn color_scheme_response(dark: bool) -> Vec<u8> {
@@ -675,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn consumes_urxvt_mouse_mode_and_preserves_combined_modes() {
+    fn tracks_extended_mouse_encodings_and_answers_mode_queries() {
         let mut decoder = TerminalCompatibilityProtocolDecoder::new(
             TerminalPtySize::new(24, 80, 960, 576),
             TerminalColorTheme::default(),
@@ -685,16 +756,59 @@ mod tests {
         assert_eq!(
             decoder.feed(b"before\x1b[?1000;1015hafter"),
             vec![CompatibilityProtocolEvent::Bytes(
-                b"before\x1b[?1000hafter".to_vec()
+                b"before\x1b[?1000h\x1b[?1005;1006lafter".to_vec()
             )]
         );
         assert!(decoder.urxvt_mouse_enabled());
+        assert!(!decoder.sgr_pixel_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1b[?1015$p\x1b[?1016$p"),
+            vec![
+                CompatibilityProtocolEvent::PtyWrite(b"\x1b[?1015;1$y".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(b"\x1b[?1016;2$y".to_vec()),
+            ]
+        );
+        assert_eq!(
+            decoder.feed(b"\x1b[?1016h\x1b[?1015$p\x1b[?1016$p"),
+            vec![
+                CompatibilityProtocolEvent::Bytes(b"\x1b[?1005;1006l".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(b"\x1b[?1015;2$y".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(b"\x1b[?1016;1$y".to_vec()),
+            ]
+        );
+        assert!(!decoder.urxvt_mouse_enabled());
+        assert!(decoder.sgr_pixel_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1b[?1006h"),
+            vec![CompatibilityProtocolEvent::Bytes(b"\x1b[?1006h".to_vec())]
+        );
+        assert!(!decoder.sgr_pixel_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1b[?1006;1016h"),
+            vec![CompatibilityProtocolEvent::Bytes(
+                b"\x1b[?1006h\x1b[?1005;1006l".to_vec()
+            )]
+        );
+        assert!(decoder.sgr_pixel_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1b[?1016;1006h"),
+            vec![CompatibilityProtocolEvent::Bytes(
+                b"\x1b[?1005;1006l\x1b[?1006h".to_vec()
+            )]
+        );
+        assert!(!decoder.sgr_pixel_mouse_enabled());
         assert_eq!(
             decoder.feed(b"\x1bc"),
             vec![CompatibilityProtocolEvent::Bytes(b"\x1bc".to_vec())]
         );
         assert!(!decoder.urxvt_mouse_enabled());
-        assert!(decoder.feed(b"\x1b[?1015h\x9b?1015l").is_empty());
+        assert!(!decoder.sgr_pixel_mouse_enabled());
+        assert_eq!(
+            decoder.feed(b"\x1b[?1015h\x9b?1015l"),
+            vec![CompatibilityProtocolEvent::Bytes(
+                b"\x1b[?1005;1006l".to_vec()
+            )]
+        );
         assert!(!decoder.urxvt_mouse_enabled());
     }
 
