@@ -72,7 +72,7 @@ use germinal_ports::{
     },
 };
 pub use logging::init_logging;
-use paste::{HostPasteAction, HostPasteController, HostPasteModifiers};
+use paste::{HostPasteController, HostPasteModifiers};
 use tracing::{debug, error, warn};
 use winit::{
     application::ApplicationHandler,
@@ -609,57 +609,6 @@ impl App {
             .map(|placement| self.terminal_size_info_for_surface(placement))
     }
 
-    fn try_handle_paste_shortcut(
-        &mut self,
-        state: WindowInputElementState,
-        logical_key: &WindowInputKey,
-        physical_key: winit::keyboard::PhysicalKey,
-    ) -> bool {
-        match self.paste_controller.handle_shortcut(
-            self.focused_gshell(),
-            state,
-            logical_key,
-            physical_key,
-        ) {
-            Ok(HostPasteAction::NotHandled) => false,
-            Ok(HostPasteAction::Handled) => true,
-            Ok(HostPasteAction::HandledEmpty) => {
-                debug!("paste shortcut matched but clipboard text was empty");
-                true
-            }
-            Ok(HostPasteAction::Dispatch(input)) => {
-                self.route_input_to_gshell(input);
-                true
-            }
-            Err(error) => {
-                warn!(error = %error, "failed to paste from clipboard");
-                true
-            }
-        }
-    }
-
-    fn try_handle_copy_shortcut(
-        &mut self,
-        state: WindowInputElementState,
-        logical_key: &WindowInputKey,
-        physical_key: winit::keyboard::PhysicalKey,
-    ) -> bool {
-        if !self
-            .paste_controller
-            .handles_copy_shortcut(state, logical_key, physical_key)
-        {
-            return false;
-        }
-
-        if state == WindowInputElementState::Pressed {
-            self.route_input_to_gshell(GShellInput {
-                gshell_id: self.focused_gshell(),
-                event: GShellInputEvent::CopySelection,
-            });
-        }
-        true
-    }
-
     fn try_handle_keyboard_binding(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -695,6 +644,10 @@ impl App {
                 | KeyboardAction::FocusPaneRight
                 | KeyboardAction::FocusPaneUp
                 | KeyboardAction::FocusPaneDown
+                | KeyboardAction::SwapPaneLeft
+                | KeyboardAction::SwapPaneRight
+                | KeyboardAction::SwapPaneUp
+                | KeyboardAction::SwapPaneDown
                 | KeyboardAction::ResizePaneLeft
                 | KeyboardAction::ResizePaneRight
                 | KeyboardAction::ResizePaneUp
@@ -728,6 +681,24 @@ impl App {
                         gshell_id,
                         event: GShellInputEvent::ToggleSearch,
                     });
+                }
+                KeyboardAction::Copy => {
+                    self.route_input_to_gshell(GShellInput {
+                        gshell_id: self.focused_gshell(),
+                        event: GShellInputEvent::CopySelection,
+                    });
+                }
+                KeyboardAction::Paste => {
+                    match self
+                        .paste_controller
+                        .clipboard_paste_input(self.focused_gshell())
+                    {
+                        Ok(Some(input)) => self.route_input_to_gshell(input),
+                        Ok(None) => {
+                            debug!("paste shortcut matched but clipboard text was empty");
+                        }
+                        Err(error) => warn!(error = %error, "failed to paste from clipboard"),
+                    }
                 }
                 KeyboardAction::NewTab => self.create_workspace_tab(),
                 KeyboardAction::NextTab => self.activate_next_workspace_tab(),
@@ -1460,14 +1431,6 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     return;
                 }
 
-                if self.try_handle_copy_shortcut(state, &logical_key, physical_key) {
-                    return;
-                }
-
-                if self.try_handle_paste_shortcut(state, &logical_key, physical_key) {
-                    return;
-                }
-
                 self.route_window_input(focused_gshell, plugin_event);
             }
             WindowEvent::Ime(Ime::Enabled) => {
@@ -1586,8 +1549,8 @@ fn matches_binding_key(
     actual: &WindowInputKey,
     physical_key: winit::keyboard::PhysicalKey,
 ) -> bool {
-    if spec.eq_ignore_ascii_case("space")
-        && physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space)
+    if let winit::keyboard::PhysicalKey::Code(key_code) = physical_key
+        && physical_key_name(key_code).is_some_and(|name| spec.eq_ignore_ascii_case(name))
     {
         return true;
     }
@@ -1600,6 +1563,83 @@ fn matches_binding_key(
         WindowInputKey::Named(named) => spec.eq_ignore_ascii_case(named_key_name(*named)),
         WindowInputKey::Unidentified => false,
     }
+}
+
+fn physical_key_name(key: winit::keyboard::KeyCode) -> Option<&'static str> {
+    use winit::keyboard::KeyCode;
+
+    Some(match key {
+        KeyCode::KeyA => "A",
+        KeyCode::KeyB => "B",
+        KeyCode::KeyC => "C",
+        KeyCode::KeyD => "D",
+        KeyCode::KeyE => "E",
+        KeyCode::KeyF => "F",
+        KeyCode::KeyG => "G",
+        KeyCode::KeyH => "H",
+        KeyCode::KeyI => "I",
+        KeyCode::KeyJ => "J",
+        KeyCode::KeyK => "K",
+        KeyCode::KeyL => "L",
+        KeyCode::KeyM => "M",
+        KeyCode::KeyN => "N",
+        KeyCode::KeyO => "O",
+        KeyCode::KeyP => "P",
+        KeyCode::KeyQ => "Q",
+        KeyCode::KeyR => "R",
+        KeyCode::KeyS => "S",
+        KeyCode::KeyT => "T",
+        KeyCode::KeyU => "U",
+        KeyCode::KeyV => "V",
+        KeyCode::KeyW => "W",
+        KeyCode::KeyX => "X",
+        KeyCode::KeyY => "Y",
+        KeyCode::KeyZ => "Z",
+        KeyCode::Digit0 => "0",
+        KeyCode::Digit1 => "1",
+        KeyCode::Digit2 => "2",
+        KeyCode::Digit3 => "3",
+        KeyCode::Digit4 => "4",
+        KeyCode::Digit5 => "5",
+        KeyCode::Digit6 => "6",
+        KeyCode::Digit7 => "7",
+        KeyCode::Digit8 => "8",
+        KeyCode::Digit9 => "9",
+        KeyCode::Space => "Space",
+        KeyCode::Enter => "Enter",
+        KeyCode::Tab => "Tab",
+        KeyCode::Backspace => "Backspace",
+        KeyCode::Escape => "Escape",
+        KeyCode::ArrowUp => "Up",
+        KeyCode::ArrowDown => "Down",
+        KeyCode::ArrowRight => "Right",
+        KeyCode::ArrowLeft => "Left",
+        KeyCode::Home => "Home",
+        KeyCode::End => "End",
+        KeyCode::Insert => "Insert",
+        KeyCode::Delete => "Delete",
+        KeyCode::PageUp => "PageUp",
+        KeyCode::PageDown => "PageDown",
+        KeyCode::F1 => "F1",
+        KeyCode::F2 => "F2",
+        KeyCode::F3 => "F3",
+        KeyCode::F4 => "F4",
+        KeyCode::F5 => "F5",
+        KeyCode::F6 => "F6",
+        KeyCode::F7 => "F7",
+        KeyCode::F8 => "F8",
+        KeyCode::F9 => "F9",
+        KeyCode::F10 => "F10",
+        KeyCode::F11 => "F11",
+        KeyCode::F12 => "F12",
+        KeyCode::CapsLock => "CapsLock",
+        KeyCode::ScrollLock => "ScrollLock",
+        KeyCode::NumLock => "NumLock",
+        KeyCode::PrintScreen => "PrintScreen",
+        KeyCode::Pause => "Pause",
+        KeyCode::ContextMenu => "ContextMenu",
+        _ => return None,
+    })
 }
 
 fn named_key_name(key: WindowInputNamedKey) -> &'static str {
@@ -1937,6 +1977,30 @@ mod tests {
             &WindowInputKey::Character("F".to_string()),
             winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyF),
         ));
+    }
+
+    #[test]
+    fn default_clipboard_bindings_match_physical_keys_on_release() {
+        let config = GerminalConfig::default();
+        for (key, key_code, action) in [
+            ("C", winit::keyboard::KeyCode::KeyC, KeyboardAction::Copy),
+            ("V", winit::keyboard::KeyCode::KeyV, KeyboardAction::Paste),
+        ] {
+            let binding = config
+                .keyboard
+                .bindings
+                .iter()
+                .find(|binding| binding.action == action)
+                .expect("clipboard action should have a default binding");
+            assert_eq!(binding.key, key);
+            assert!(matches_keyboard_binding(
+                binding,
+                WindowInputModifiers::new(true, false, true, false),
+                WindowInputElementState::Released,
+                &WindowInputKey::Unidentified,
+                winit::keyboard::PhysicalKey::Code(key_code),
+            ));
+        }
     }
 
     #[test]

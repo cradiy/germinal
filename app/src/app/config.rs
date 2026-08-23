@@ -195,6 +195,27 @@ impl GerminalConfig {
             }
         }
 
+        for (index, binding) in self.keyboard.bindings.iter().enumerate() {
+            if binding.key.trim().is_empty() {
+                return Err(format!("keyboard.bindings[{index}].key must not be empty"));
+            }
+            for modifier in binding
+                .mods
+                .split('|')
+                .map(str::trim)
+                .filter(|modifier| !modifier.is_empty())
+            {
+                if !matches!(
+                    modifier.to_ascii_lowercase().as_str(),
+                    "control" | "alt" | "shift" | "super"
+                ) {
+                    return Err(format!(
+                        "keyboard.bindings[{index}].mods contains unsupported modifier {modifier:?}; expected Control, Alt, Shift, or Super"
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -509,6 +530,16 @@ impl Default for KeyboardConfig {
                     action: KeyboardAction::ToggleSearch,
                 },
                 KeyboardBinding {
+                    key: "C".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::Copy,
+                },
+                KeyboardBinding {
+                    key: "V".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::Paste,
+                },
+                KeyboardBinding {
                     key: "D".to_string(),
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::SplitHorizontal,
@@ -635,6 +666,8 @@ pub struct KeyboardBinding {
 pub enum KeyboardAction {
     ToggleViMode,
     ToggleSearch,
+    Copy,
+    Paste,
     NewTab,
     NextTab,
     PreviousTab,
@@ -1058,7 +1091,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 24);
+        assert_eq!(config.keyboard.bindings.len(), 26);
         assert_eq!(
             config.keyboard.bindings[0].action,
             KeyboardAction::ToggleViMode
@@ -1069,12 +1102,21 @@ mod tests {
         );
         assert_eq!(config.keyboard.bindings[1].key, "F");
         assert_eq!(config.keyboard.bindings[1].mods, "Control|Shift");
-        assert_eq!(
-            config.keyboard.bindings[2].action,
-            KeyboardAction::SplitHorizontal
-        );
-        assert_eq!(config.keyboard.bindings[2].key, "D");
-        assert_eq!(config.keyboard.bindings[2].mods, "Control|Shift");
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "C"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::Copy
+        }));
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "V"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::Paste
+        }));
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "D"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::SplitHorizontal
+        }));
         assert!(config.keyboard.bindings.iter().any(|binding| {
             binding.key == "Left"
                 && binding.mods == "Alt|Shift"
@@ -1098,6 +1140,33 @@ mod tests {
         assert_eq!(binding.key, "V");
         assert_eq!(binding.mods, "Control|Shift");
         assert_eq!(binding.action, KeyboardAction::ToggleViMode);
+    }
+
+    #[test]
+    fn rejects_empty_binding_keys_and_unknown_modifiers() {
+        for (contents, expected) in [
+            (
+                r#"
+                [[keyboard.bindings]]
+                key = ""
+                action = "NewTab"
+                "#,
+                "keyboard.bindings[0].key must not be empty",
+            ),
+            (
+                r#"
+                [[keyboard.bindings]]
+                key = "T"
+                mods = "Control|Hyper"
+                action = "NewTab"
+                "#,
+                "unsupported modifier",
+            ),
+        ] {
+            let config: GerminalConfig = toml::from_str(contents).unwrap();
+            let error = config.validate().unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
     }
 
     #[test]

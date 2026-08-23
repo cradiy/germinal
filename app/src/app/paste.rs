@@ -2,7 +2,7 @@ use arboard::Clipboard;
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_ports::event::{
     gshell_input::{GShellInput, GShellInputEvent},
-    window_input_event::{WindowInputElementState, WindowInputKey},
+    window_input_event::WindowInputElementState,
 };
 use germinal_ports::pty_host::terminal_clipboard::TerminalClipboard;
 use thiserror::Error;
@@ -30,14 +30,6 @@ impl HostPressedModifiers {
     fn shift_key(self) -> bool {
         self.left_shift || self.right_shift
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostPasteAction {
-    NotHandled,
-    Handled,
-    HandledEmpty,
-    Dispatch(GShellInput),
 }
 
 #[derive(Debug, Error)]
@@ -78,39 +70,19 @@ impl HostPasteController {
         }
     }
 
-    pub fn handle_shortcut(
+    pub fn clipboard_paste_input(
         &mut self,
         gshell_id: GShellId,
-        state: WindowInputElementState,
-        logical_key: &WindowInputKey,
-        physical_key: PhysicalKey,
-    ) -> Result<HostPasteAction, PasteError> {
-        if !matches_paste_shortcut(self.effective_modifiers(), state, logical_key, physical_key) {
-            return Ok(HostPasteAction::NotHandled);
-        }
-
-        if state == WindowInputElementState::Released {
-            return Ok(HostPasteAction::Handled);
-        }
-
+    ) -> Result<Option<GShellInput>, PasteError> {
         let text = self.read_clipboard_text()?;
         if text.is_empty() {
-            return Ok(HostPasteAction::HandledEmpty);
+            return Ok(None);
         }
 
-        Ok(HostPasteAction::Dispatch(GShellInput {
+        Ok(Some(GShellInput {
             gshell_id,
             event: GShellInputEvent::Paste(text),
         }))
-    }
-
-    pub fn handles_copy_shortcut(
-        &self,
-        state: WindowInputElementState,
-        logical_key: &WindowInputKey,
-        physical_key: PhysicalKey,
-    ) -> bool {
-        matches_copy_shortcut(self.effective_modifiers(), state, logical_key, physical_key)
     }
 
     pub fn write_clipboard_text(&mut self, text: String) -> Result<(), CopyError> {
@@ -193,146 +165,12 @@ fn read_clipboard_text(
     clipboard.get_text()
 }
 
-fn matches_paste_shortcut(
-    modifiers: HostPasteModifiers,
-    state: WindowInputElementState,
-    logical_key: &WindowInputKey,
-    physical_key: PhysicalKey,
-) -> bool {
-    if !modifiers.control || !modifiers.shift {
-        return false;
-    }
-
-    if !matches!(
-        state,
-        WindowInputElementState::Pressed | WindowInputElementState::Released
-    ) {
-        return false;
-    }
-
-    matches!(physical_key, PhysicalKey::Code(KeyCode::KeyV))
-        || matches!(
-            logical_key,
-            WindowInputKey::Character(text) if text.eq_ignore_ascii_case("v")
-        )
-}
-
-fn matches_copy_shortcut(
-    modifiers: HostPasteModifiers,
-    state: WindowInputElementState,
-    logical_key: &WindowInputKey,
-    physical_key: PhysicalKey,
-) -> bool {
-    if !modifiers.control || !modifiers.shift {
-        return false;
-    }
-
-    if !matches!(
-        state,
-        WindowInputElementState::Pressed | WindowInputElementState::Released
-    ) {
-        return false;
-    }
-
-    matches!(physical_key, PhysicalKey::Code(KeyCode::KeyC))
-        || matches!(
-            logical_key,
-            WindowInputKey::Character(text) if text.eq_ignore_ascii_case("c")
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ctrl_shift_v_pressed_requests_paste_dispatch() {
-        assert!(matches_paste_shortcut(
-            HostPasteModifiers {
-                control: true,
-                shift: true
-            },
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("v".into()),
-            PhysicalKey::Code(KeyCode::KeyV),
-        ));
-    }
-
-    #[test]
-    fn ctrl_v_without_shift_does_not_trigger_host_paste() {
-        assert!(!matches_paste_shortcut(
-            HostPasteModifiers {
-                control: true,
-                shift: false
-            },
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("v".into()),
-            PhysicalKey::Code(KeyCode::KeyV),
-        ));
-    }
-
-    #[test]
-    fn released_shortcut_is_still_consumed() {
-        assert!(matches_paste_shortcut(
-            HostPasteModifiers {
-                control: true,
-                shift: true
-            },
-            WindowInputElementState::Released,
-            &WindowInputKey::Character("V".into()),
-            PhysicalKey::Code(KeyCode::KeyV),
-        ));
-    }
-
-    #[test]
-    fn physical_v_without_character_still_triggers_paste() {
-        assert!(matches_paste_shortcut(
-            HostPasteModifiers {
-                control: true,
-                shift: true
-            },
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Unidentified,
-            PhysicalKey::Code(KeyCode::KeyV),
-        ));
-    }
-
-    #[test]
-    fn ctrl_shift_c_matches_copy_on_press_and_release() {
-        let modifiers = HostPasteModifiers {
-            control: true,
-            shift: true,
-        };
-
-        assert!(matches_copy_shortcut(
-            modifiers,
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("c".into()),
-            PhysicalKey::Code(KeyCode::KeyC),
-        ));
-        assert!(matches_copy_shortcut(
-            modifiers,
-            WindowInputElementState::Released,
-            &WindowInputKey::Unidentified,
-            PhysicalKey::Code(KeyCode::KeyC),
-        ));
-    }
-
-    #[test]
-    fn ctrl_c_without_shift_does_not_trigger_host_copy() {
-        assert!(!matches_copy_shortcut(
-            HostPasteModifiers {
-                control: true,
-                shift: false,
-            },
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("c".into()),
-            PhysicalKey::Code(KeyCode::KeyC),
-        ));
-    }
-
-    #[test]
-    fn tracked_physical_modifiers_trigger_paste_without_modifiers_changed_event() {
+    fn tracked_physical_modifiers_fill_missing_modifiers_changed_events() {
         let mut controller = HostPasteController::default();
         controller.observe_key_event(
             WindowInputElementState::Pressed,
@@ -343,17 +181,12 @@ mod tests {
             PhysicalKey::Code(KeyCode::ShiftLeft),
         );
 
-        assert!(matches!(
-            controller.handle_shortcut(
-                GShellId::new(7),
-                WindowInputElementState::Pressed,
-                &WindowInputKey::Unidentified,
-                PhysicalKey::Code(KeyCode::KeyV),
-            ),
-            Err(_)
-                | Ok(HostPasteAction::Handled)
-                | Ok(HostPasteAction::HandledEmpty)
-                | Ok(HostPasteAction::Dispatch(_))
-        ));
+        assert_eq!(
+            controller.effective_modifiers(),
+            HostPasteModifiers {
+                control: true,
+                shift: true,
+            }
+        );
     }
 }

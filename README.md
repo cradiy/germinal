@@ -56,6 +56,117 @@ Germinal tracks terminal modes emitted by PTY applications. Application cursor k
 
 PTY keyboard input includes xterm-compatible navigation and editing keys, `F1` through `F12`, `Shift+Tab`, and modifier parameters for cursor, editing, and function keys.
 
+## Keyboard shortcuts
+
+Germinal consumes a key only when it matches a configured host binding. Every other key is sent to
+the focused PTY or WGPU pane. Modifiers must match exactly, so a `Control|Shift` binding does not
+also match `Control|Shift|Alt`.
+
+### Default host bindings
+
+| Shortcut | Action | Description |
+| --- | --- | --- |
+| `Ctrl+Shift+C` | `Copy` | Copy the active terminal selection. |
+| `Ctrl+Shift+V` | `Paste` | Paste clipboard text using bracketed paste when the application enables it. |
+| `Ctrl+Shift+Space` | `ToggleViMode` | Enter or leave host-side Vi copy mode. |
+| `Ctrl+Shift+F` | `ToggleSearch` | Open or close host-side scrollback search. |
+| `Ctrl+Shift+T` | `NewTab` | Create and focus a new tab. |
+| `Ctrl+Shift+Left`, `Ctrl+Shift+H` | `PreviousTab` | Focus the previous tab. |
+| `Ctrl+Shift+Right`, `Ctrl+Shift+L` | `NextTab` | Focus the next tab. |
+| `Ctrl+Shift+Alt+H` | `MoveTabLeft` | Move the active tab left. |
+| `Ctrl+Shift+Alt+L` | `MoveTabRight` | Move the active tab right. |
+| `Ctrl+Shift+D` | `SplitHorizontal` | Split the focused pane into left and right panes. |
+| `Ctrl+Shift+Alt+D` | `SplitVertical` | Split the focused pane into top and bottom panes. |
+| `Ctrl+Shift+W` | `ClosePane` | Close the focused pane; closing its last pane closes the tab. |
+| `Ctrl+Alt+Left` | `FocusPaneLeft` | Focus the pane to the left. |
+| `Ctrl+Alt+Right` | `FocusPaneRight` | Focus the pane to the right. |
+| `Ctrl+Alt+Up` | `FocusPaneUp` | Focus the pane above. |
+| `Ctrl+Alt+Down` | `FocusPaneDown` | Focus the pane below. |
+| `Ctrl+Shift+Alt+Left` | `SwapPaneLeft` | Swap the focused pane with the pane to the left. |
+| `Ctrl+Shift+Alt+Right` | `SwapPaneRight` | Swap the focused pane with the pane to the right. |
+| `Ctrl+Shift+Alt+Up` | `SwapPaneUp` | Swap the focused pane with the pane above. |
+| `Ctrl+Shift+Alt+Down` | `SwapPaneDown` | Swap the focused pane with the pane below. |
+| `Alt+Shift+Left` | `ResizePaneLeft` | Move the focused split toward the left. |
+| `Alt+Shift+Right` | `ResizePaneRight` | Move the focused split toward the right. |
+| `Alt+Shift+Up` | `ResizePaneUp` | Move the focused split upward. |
+| `Alt+Shift+Down` | `ResizePaneDown` | Move the focused split downward. |
+
+`FocusNextPane` and `FocusPreviousPane` are also available as configurable actions, but have no
+default bindings. Directional focus, swap, and resize actions are passed to the PTY when the current
+tab has only one pane. Tab-move actions are passed to the PTY when only one tab exists.
+
+### Custom bindings
+
+Bindings use an Alacritty-style array in `~/.config/germinal/config.toml`:
+
+```toml
+[[keyboard.bindings]]
+key = "H"
+mods = "Control|Shift"
+action = "PreviousTab"
+
+[[keyboard.bindings]]
+key = "L"
+mods = "Control|Shift"
+action = "NextTab"
+```
+
+Defining `keyboard.bindings` replaces the complete default list. Include every default binding you
+want to keep; remove the entire `[keyboard]` section to restore Germinal's defaults. An empty
+binding list disables all host shortcuts.
+
+`mods` accepts `Control`, `Alt`, `Shift`, and `Super`, joined with `|`. It may be omitted for an
+unmodified key. Letter and digit keys use their printed names. Named keys are `Space`, `Enter`,
+`Tab`, `Backspace`, `Escape`, `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `Insert`, `Delete`,
+`PageUp`, `PageDown`, `F1` through `F12`, `CapsLock`, `ScrollLock`, `NumLock`, `PrintScreen`,
+`Pause`, and `ContextMenu`.
+
+Available `action` values are:
+
+- Clipboard and navigation: `Copy`, `Paste`, `ToggleViMode`, `ToggleSearch`.
+- Tabs: `NewTab`, `PreviousTab`, `NextTab`, `MoveTabLeft`, `MoveTabRight`.
+- Pane creation and closing: `SplitHorizontal`, `SplitVertical`, `ClosePane`.
+- Pane focus: `FocusNextPane`, `FocusPreviousPane`, `FocusPaneLeft`, `FocusPaneRight`,
+  `FocusPaneUp`, `FocusPaneDown`.
+- Pane swapping: `SwapPaneLeft`, `SwapPaneRight`, `SwapPaneUp`, `SwapPaneDown`.
+- Pane resizing: `ResizePaneLeft`, `ResizePaneRight`, `ResizePaneUp`, `ResizePaneDown`.
+
+### Host search keys
+
+After opening host search with `Ctrl+Shift+F`:
+
+| Key | Behavior |
+| --- | --- |
+| Text input | Update the search query. |
+| `Enter` | Find the next match. |
+| `Shift+Enter` | Find the previous match. |
+| `Backspace` | Delete the previous query character. |
+| `Escape` | Close host search. |
+
+### Vi copy mode keys
+
+Vi copy mode navigates and selects terminal history without changing the shell's own editing mode.
+
+| Key | Behavior |
+| --- | --- |
+| `h`, `j`, `k`, `l` | Move left, down, up, or right. |
+| `0`, `^`, `$` | Move to the first column, first occupied cell, or end of the line. |
+| `w`, `b`, `e` | Move by words. |
+| `gg`, `G` | Move to the top or bottom of history. |
+| `H`, `M`, `L` | Move to the top, middle, or bottom of the viewport. |
+| `Ctrl+U`, `Ctrl+D` | Move half a page up or down. |
+| `Ctrl+B`, `Ctrl+F` | Move one page up or down. |
+| `v`, `V` | Toggle character-wise or line-wise visual selection. |
+| `viw`, `vaw` | Select the inner word or the word including surrounding separators. |
+| `y` | Copy the visual selection and return to Vi navigation. |
+| `/`, `?` | Start a forward or backward search. |
+| `n`, `N` | Repeat the last search in the same or opposite direction. |
+| `i`, `a`, `q` | Leave Vi mode when no visual selection is active. |
+| `Escape` | Cancel the visual selection or pending command without leaving Vi mode. |
+
+While entering a Vi search, text updates the query, `Backspace` deletes a character, `Enter`
+accepts it, and `Escape` cancels the prompt.
+
 ## Fonts
 
 The normal face, styled faces, fallback order, and size are configured together:
