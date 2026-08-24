@@ -41,6 +41,29 @@ pub struct WgpuCrossfontUnderlineMetrics {
     thickness_px: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgpuCrossfontStrikeoutMetrics {
+    offset_y_px: u32,
+    thickness_px: u32,
+}
+
+impl WgpuCrossfontStrikeoutMetrics {
+    pub const fn new(offset_y_px: u32, thickness_px: u32) -> Self {
+        Self {
+            offset_y_px,
+            thickness_px,
+        }
+    }
+
+    pub const fn offset_y_px(self) -> u32 {
+        self.offset_y_px
+    }
+
+    pub const fn thickness_px(self) -> u32 {
+        self.thickness_px
+    }
+}
+
 impl WgpuCrossfontUnderlineMetrics {
     pub const fn new(offset_y_px: u32, thickness_px: u32) -> Self {
         Self {
@@ -261,6 +284,13 @@ impl WgpuCrossfontGlyphAtlasBuilder {
             .map(WgpuCrossfontGlyphBackend::underline_metrics)
     }
 
+    pub fn strikeout_metrics(&self) -> Option<WgpuCrossfontStrikeoutMetrics> {
+        self.backend
+            .borrow()
+            .as_ref()
+            .map(WgpuCrossfontGlyphBackend::strikeout_metrics)
+    }
+
     pub fn build_for_texts<I, S>(&self, texts: I) -> WgpuTerminalGlyphAtlas
     where
         I: IntoIterator<Item = S>,
@@ -467,6 +497,7 @@ struct WgpuCrossfontGlyphBackend {
     line_height_px: u32,
     baseline_y_px: i32,
     underline_metrics: WgpuCrossfontUnderlineMetrics,
+    strikeout_metrics: WgpuCrossfontStrikeoutMetrics,
     glyph_cache: HashMap<WgpuTerminalGlyphKey, RasterizedTerminalGlyph>,
     cluster_rasterizer: Option<CosmicTextClusterRasterizer>,
     cluster_font_faces: WgpuCrossfontFontFaces,
@@ -558,6 +589,17 @@ impl WgpuCrossfontGlyphBackend {
                 )
             })
             .unwrap_or_else(|| fallback_underline_metrics(line_height_px));
+        let strikeout_metrics = metrics
+            .as_ref()
+            .map(|metrics| {
+                crossfont_strikeout_metrics(
+                    line_height_px,
+                    baseline_y_px,
+                    metrics.strikeout_position,
+                    metrics.strikeout_thickness,
+                )
+            })
+            .unwrap_or_else(|| fallback_strikeout_metrics(line_height_px));
 
         Ok(Self {
             rasterizer,
@@ -570,6 +612,7 @@ impl WgpuCrossfontGlyphBackend {
             line_height_px,
             baseline_y_px,
             underline_metrics,
+            strikeout_metrics,
             glyph_cache: HashMap::new(),
             cluster_rasterizer: None,
             cluster_font_faces: font_faces,
@@ -590,6 +633,10 @@ impl WgpuCrossfontGlyphBackend {
 
     fn underline_metrics(&self) -> WgpuCrossfontUnderlineMetrics {
         self.underline_metrics
+    }
+
+    fn strikeout_metrics(&self) -> WgpuCrossfontStrikeoutMetrics {
+        self.strikeout_metrics
     }
 
     fn rasterize_terminal_glyph(
@@ -1362,6 +1409,27 @@ fn fallback_underline_metrics(cell_height_px: u32) -> WgpuCrossfontUnderlineMetr
     )
 }
 
+fn crossfont_strikeout_metrics(
+    cell_height_px: u32,
+    baseline_y_px: i32,
+    strikeout_position: f32,
+    strikeout_thickness: f32,
+) -> WgpuCrossfontStrikeoutMetrics {
+    let thickness_px = strikeout_thickness.round().max(1.0) as u32;
+    let strikeout_center_y = baseline_y_px as f32 - strikeout_position;
+    let offset_y_px = (strikeout_center_y - thickness_px as f32 / 2.0)
+        .round()
+        .clamp(0.0, cell_height_px.saturating_sub(thickness_px) as f32)
+        as u32;
+
+    WgpuCrossfontStrikeoutMetrics::new(offset_y_px, thickness_px)
+}
+
+fn fallback_strikeout_metrics(cell_height_px: u32) -> WgpuCrossfontStrikeoutMetrics {
+    let thickness_px = cell_height_px.div_ceil(16).max(1);
+    WgpuCrossfontStrikeoutMetrics::new(cell_height_px.saturating_mul(9) / 16, thickness_px)
+}
+
 fn terminal_glyph_draw_offset(
     glyph: &RasterizedTerminalGlyph,
     base_cell_width: u32,
@@ -1652,7 +1720,8 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 mod tests {
     use super::{
         FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontGlyphAtlasBuilder,
-        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_underline_metrics,
+        WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey,
+        crossfont_strikeout_metrics, crossfont_underline_metrics,
     };
 
     #[test]
@@ -1660,6 +1729,13 @@ mod tests {
         let metrics = crossfont_underline_metrics(32, 25, -3.0, 1.6);
 
         assert_eq!(metrics, WgpuCrossfontUnderlineMetrics::new(27, 2));
+    }
+
+    #[test]
+    fn converts_crossfont_strikeout_metrics_to_cell_pixels() {
+        let metrics = crossfont_strikeout_metrics(32, 25, 9.0, 1.6);
+
+        assert_eq!(metrics, WgpuCrossfontStrikeoutMetrics::new(15, 2));
     }
 
     #[test]

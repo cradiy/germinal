@@ -209,6 +209,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
                         x: run.x,
                         text: run.text.clone(),
                         style: run.style,
+                        decoration: Default::default(),
                     })
                     .collect(),
             })
@@ -222,6 +223,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
                         x: 0,
                         text,
                         style: TextStyleDto::plain(),
+                        decoration: Default::default(),
                     }],
                 });
             }

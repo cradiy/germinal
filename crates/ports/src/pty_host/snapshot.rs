@@ -80,6 +80,7 @@ pub fn render_surface_snapshot_from_terminal_snapshot(
                 x: run.x,
                 text: run.text,
                 style: run.style,
+                decoration: Default::default(),
             });
     }
 
@@ -94,6 +95,7 @@ pub fn render_surface_snapshot_from_terminal_snapshot(
                 x: 0,
                 text: line.text,
                 style: TextStyleDto::plain(),
+                decoration: Default::default(),
             }],
         );
     }

@@ -1005,6 +1005,7 @@ fn build_tab_bar_surface(
                 x,
                 text: TAB_BAR_LEFT_EDGE.to_string(),
                 style: tab_bar_style(palette.active_background, palette.background, false),
+                decoration: Default::default(),
             });
             x = x.saturating_add(1);
         }
@@ -1021,6 +1022,7 @@ fn build_tab_bar_surface(
                     false,
                 )
             },
+            decoration: Default::default(),
         });
         x = x.saturating_add(content_width);
 
@@ -1035,6 +1037,7 @@ fn build_tab_bar_surface(
                     tab_background,
                     true,
                 ),
+                decoration: Default::default(),
             });
             x = x.saturating_add(text_width);
         }
@@ -1051,6 +1054,7 @@ fn build_tab_bar_surface(
                 tab_background,
                 active,
             ),
+            decoration: Default::default(),
         });
         x = x.saturating_add(TAB_BAR_TITLE_PADDING);
 
@@ -1059,6 +1063,7 @@ fn build_tab_bar_surface(
                 x,
                 text: TAB_BAR_RIGHT_EDGE.to_string(),
                 style: tab_bar_style(palette.active_background, palette.background, false),
+                decoration: Default::default(),
             });
             x = x.saturating_add(1);
         }
@@ -1145,6 +1150,7 @@ fn tab_bar_texture_runs(columns: u32, palette: TabBarPalette) -> Vec<RenderSurfa
                 x,
                 text: " ".repeat(width as usize),
                 style: tab_bar_style(color, color, false),
+                decoration: Default::default(),
             }
         })
         .collect()

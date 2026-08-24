@@ -10,7 +10,8 @@ use germinal_ports::{
 
 use crate::rendering::pty_surface::{
     crossfont_glyph_atlas::{
-        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError, WgpuCrossfontUnderlineMetrics,
+        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError,
+        WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics,
     },
     glyph_atlas::{WgpuDebugGlyphAtlasBuilder, WgpuTerminalGlyphAtlas, WgpuTerminalGlyphKey},
     glyph_atlas_texture::{
@@ -110,6 +111,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
     pub fn underline_metrics(&self) -> Option<WgpuCrossfontUnderlineMetrics> {
         self.source.underline_metrics()
+    }
+
+    pub fn strikeout_metrics(&self) -> Option<WgpuCrossfontStrikeoutMetrics> {
+        self.source.strikeout_metrics()
     }
 
     pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
@@ -225,6 +230,13 @@ impl WgpuTerminalGlyphAtlasSource {
         match self {
             Self::Debug5x7(_) => None,
             Self::Crossfont(builder) => builder.underline_metrics(),
+        }
+    }
+
+    pub fn strikeout_metrics(&self) -> Option<WgpuCrossfontStrikeoutMetrics> {
+        match self {
+            Self::Debug5x7(_) => None,
+            Self::Crossfont(builder) => builder.strikeout_metrics(),
         }
     }
 
@@ -394,11 +406,13 @@ mod tests {
                         x: 0,
                         text: "red".to_string(),
                         style: TextStyleDto::plain(),
+                        decoration: Default::default(),
                     },
                     RenderSurfaceRunSnapshot {
                         x: 4,
                         text: "green".to_string(),
                         style: TextStyleDto::plain(),
+                        decoration: Default::default(),
                     },
                 ],
             }],
@@ -449,6 +463,7 @@ mod tests {
                     x: 0,
                     text: "red".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -482,6 +497,7 @@ mod tests {
                     x: 0,
                     text: "red".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -501,6 +517,7 @@ mod tests {
                     x: 0,
                     text: "blue".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -531,6 +548,7 @@ mod tests {
                     x: 0,
                     text: text.to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -561,6 +579,7 @@ mod tests {
                     x: 0,
                     text: text.to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -595,6 +614,7 @@ mod tests {
                     x: 0,
                     text: "red".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -614,6 +634,7 @@ mod tests {
                     x: 0,
                     text: "blue".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],

@@ -144,6 +144,7 @@ impl WgpuTerminalFrameBuilder {
             );
             renderer.set_ligatures(self.glyph_atlas_frame_builder.ligatures());
             renderer.set_underline_metrics(self.glyph_atlas_frame_builder.underline_metrics());
+            renderer.set_strikeout_metrics(self.glyph_atlas_frame_builder.strikeout_metrics());
 
             renderer.render_surface(surface_snapshot);
             let render_surface_time = render_surface_started_at.elapsed();
@@ -351,6 +352,7 @@ mod tests {
                     x: 0,
                     text: "👩\u{200d}💻 سلام".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],

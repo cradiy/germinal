@@ -107,6 +107,12 @@ struct PtyPaneRuntime {
     vi_last_search: Option<ViSearch>,
 }
 
+impl Drop for PtyPaneRuntime {
+    fn drop(&mut self) {
+        self.pty_input_sender.close();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViSearchInput {
     direction: TerminalViSearchDirection,
@@ -1138,6 +1144,39 @@ mod tests {
         assert_eq!(
             super::process_working_directory(std::process::id()),
             std::env::current_dir().ok()
+        );
+    }
+
+    #[test]
+    fn dropping_a_pane_runtime_closes_its_pty_input() {
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let input_observer = pty_input_sender.clone();
+        let (terminal_worker_sender, _terminal_worker_rx) = mpsc::sync_channel(1);
+        let runtime = PtyPaneRuntime {
+            pty_input_sender,
+            terminal_worker_sender,
+            input_modes: TerminalInputModeState::default(),
+            mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+            click_tracker: PtyClickTracker::default(),
+            selection_dragging: false,
+            selection_end: None,
+            display_scrolled: false,
+            vi_mode: false,
+            vi_pending_g: false,
+            vi_selection_kind: None,
+            vi_pending_text_object: None,
+            vi_search_input: None,
+            vi_last_search: None,
+        };
+
+        drop(runtime);
+
+        assert!(
+            input_observer
+                .send(germinal_ports::pty_host::pty_input::PtyInput::Bytes(
+                    b"ignored".to_vec()
+                ))
+                .is_err()
         );
     }
 

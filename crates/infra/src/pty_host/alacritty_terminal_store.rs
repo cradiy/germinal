@@ -15,8 +15,12 @@ use alacritty_terminal::{
     index::{Boundary, Column, Direction, Point, Side},
     selection::{Selection, SelectionType},
     term::{
-        ClipboardType, Config, Osc52, Term, TermDamage, TermMode, cell::Flags, color::Colors,
-        point_to_viewport, search::RegexSearch, viewport_to_point,
+        ClipboardType, Config, Osc52, Term, TermDamage, TermMode,
+        cell::{Cell, Flags},
+        color::Colors,
+        point_to_viewport,
+        search::RegexSearch,
+        viewport_to_point,
     },
     vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler},
 };
@@ -43,7 +47,8 @@ use germinal_ports::{
         render_target_id::RenderTargetId,
         surface_snapshot::{
             RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
-            RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+            RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, RenderSurfaceTextDecoration,
+            RenderSurfaceUnderlineStyle,
         },
     },
     seq::Seq,
@@ -1477,6 +1482,7 @@ fn append_vi_mode_indicator(rows: &mut Vec<RenderSurfaceRowSnapshot>, columns: u
             italic: false,
             underline: false,
         },
+        decoration: Default::default(),
     };
 
     if let Some(row) = rows.iter_mut().find(|row| row.y == 0) {
@@ -1530,6 +1536,7 @@ fn append_vi_search_prompt(
             italic: false,
             underline: false,
         },
+        decoration: Default::default(),
     };
     let row_index = screen_lines.saturating_sub(1) as u32;
     if let Some(row) = rows.iter_mut().find(|row| row.y == row_index) {
@@ -1558,7 +1565,7 @@ fn visible_surface_rows(
     let mut current_x = 0_u32;
     let mut current_next_x = 0_u32;
     let mut current_text = String::new();
-    let mut current_style = None::<TextStyleDto>;
+    let mut current_style = None::<(TextStyleDto, RenderSurfaceTextDecoration)>;
 
     for indexed in renderable.display_iter {
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
@@ -1571,8 +1578,14 @@ fn visible_surface_rows(
         let col = point.column.0 as u32;
 
         if current_row != Some(row) {
-            if let Some(style) = current_style.take() {
-                push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, style);
+            if let Some((style, decoration)) = current_style.take() {
+                push_surface_run_if_not_blank(
+                    &mut current_runs,
+                    current_x,
+                    &current_text,
+                    style,
+                    decoration,
+                );
                 current_text.clear();
             }
 
@@ -1594,8 +1607,12 @@ fn visible_surface_rows(
         }
 
         let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
+        let mut decoration = decoration_of_cell(cell, colors, color_theme);
         if cell.hyperlink().is_some() {
             style.underline = true;
+            if decoration.underline == RenderSurfaceUnderlineStyle::None {
+                decoration.underline = RenderSurfaceUnderlineStyle::Single;
+            }
         }
         let style = if selected {
             selected_style(style, color_theme)
@@ -1604,7 +1621,7 @@ fn visible_surface_rows(
         };
         if cell.c == ' '
             && cell.zerowidth().is_none_or(<[char]>::is_empty)
-            && !style_has_visible_content(style)
+            && !surface_style_has_visible_content(style, decoration)
         {
             continue;
         }
@@ -1621,9 +1638,13 @@ fn visible_surface_rows(
                     cell.c,
                     cell.zerowidth().unwrap_or_default(),
                 );
-                current_style = Some(style);
+                current_style = Some((style, decoration));
             }
-            Some(existing_style) if existing_style == style && is_contiguous => {
+            Some((existing_style, existing_decoration))
+                if existing_style == style
+                    && existing_decoration == decoration
+                    && is_contiguous =>
+            {
                 push_cell_characters(
                     &mut current_text,
                     cell.c,
@@ -1631,12 +1652,13 @@ fn visible_surface_rows(
                 );
                 current_next_x = col + cell_width;
             }
-            Some(existing_style) => {
+            Some((existing_style, existing_decoration)) => {
                 push_surface_run_if_not_blank(
                     &mut current_runs,
                     current_x,
                     &current_text,
                     existing_style,
+                    existing_decoration,
                 );
 
                 current_x = col;
@@ -1647,13 +1669,19 @@ fn visible_surface_rows(
                     cell.c,
                     cell.zerowidth().unwrap_or_default(),
                 );
-                current_style = Some(style);
+                current_style = Some((style, decoration));
             }
         }
     }
 
-    if let Some(style) = current_style.take() {
-        push_surface_run_if_not_blank(&mut current_runs, current_x, &current_text, style);
+    if let Some((style, decoration)) = current_style.take() {
+        push_surface_run_if_not_blank(
+            &mut current_runs,
+            current_x,
+            &current_text,
+            style,
+            decoration,
+        );
     }
 
     if let Some(row) = current_row
@@ -1830,12 +1858,13 @@ fn push_surface_run_if_not_blank(
     x: u32,
     text: &str,
     style: TextStyleDto,
+    decoration: RenderSurfaceTextDecoration,
 ) {
     if text.is_empty() {
         return;
     }
 
-    if text.trim().is_empty() && !style_has_visible_content(style) {
+    if text.trim().is_empty() && !surface_style_has_visible_content(style, decoration) {
         return;
     }
 
@@ -1843,7 +1872,17 @@ fn push_surface_run_if_not_blank(
         x,
         text: text.to_string(),
         style,
+        decoration,
     });
+}
+
+fn surface_style_has_visible_content(
+    style: TextStyleDto,
+    decoration: RenderSurfaceTextDecoration,
+) -> bool {
+    style_has_visible_content(style)
+        || decoration.underline != RenderSurfaceUnderlineStyle::None
+        || decoration.strikeout
 }
 
 fn style_has_visible_content(style: TextStyleDto) -> bool {
@@ -1899,6 +1938,36 @@ fn style_of_cell(
         bold: flags.contains(Flags::BOLD),
         italic: flags.contains(Flags::ITALIC),
         underline: flags.contains(Flags::UNDERLINE),
+    }
+}
+
+fn decoration_of_cell(
+    cell: &Cell,
+    colors: &Colors,
+    color_theme: &TerminalColorTheme,
+) -> RenderSurfaceTextDecoration {
+    let underline = if cell.flags.contains(Flags::UNDERCURL) {
+        RenderSurfaceUnderlineStyle::Curly
+    } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+        RenderSurfaceUnderlineStyle::Double
+    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+        RenderSurfaceUnderlineStyle::Dotted
+    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+        RenderSurfaceUnderlineStyle::Dashed
+    } else if cell.flags.contains(Flags::UNDERLINE) {
+        RenderSurfaceUnderlineStyle::Single
+    } else {
+        RenderSurfaceUnderlineStyle::None
+    };
+
+    RenderSurfaceTextDecoration {
+        underline,
+        underline_color: cell
+            .underline_color()
+            .and_then(|color| color_to_rgb(color, colors, color_theme)),
+        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+        dim: cell.flags.contains(Flags::DIM),
+        hidden: cell.flags.contains(Flags::HIDDEN),
     }
 }
 
@@ -2200,6 +2269,45 @@ mod tests {
         let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
         assert_eq!(snapshot.rows[0].runs[0].text, "docs");
         assert!(snapshot.rows[0].runs[0].style.underline);
+    }
+
+    #[test]
+    fn exports_modern_sgr_text_decorations() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(84);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b[2mD\x1b[0m\x1b[8mH\x1b[0m\x1b[9mS\x1b[0m\x1b[4:2m2\x1b[0m\x1b[4:3mC\x1b[0m\x1b[4:4mO\x1b[0m\x1b[4:5mA\x1b[0m\x1b[4;58;2;12;34;56mU",
+        );
+
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        let runs = &snapshot.rows[0].runs;
+        let run = |text: &str| runs.iter().find(|run| run.text == text).unwrap();
+
+        assert!(run("D").decoration.dim);
+        assert!(run("H").decoration.hidden);
+        assert!(run("S").decoration.strikeout);
+        assert_eq!(
+            run("2").decoration.underline,
+            RenderSurfaceUnderlineStyle::Double
+        );
+        assert_eq!(
+            run("C").decoration.underline,
+            RenderSurfaceUnderlineStyle::Curly
+        );
+        assert_eq!(
+            run("O").decoration.underline,
+            RenderSurfaceUnderlineStyle::Dotted
+        );
+        assert_eq!(
+            run("A").decoration.underline,
+            RenderSurfaceUnderlineStyle::Dashed
+        );
+        assert_eq!(
+            run("U").decoration.underline_color,
+            Some(RgbColorDto::new(12, 34, 56))
+        );
     }
 
     #[test]

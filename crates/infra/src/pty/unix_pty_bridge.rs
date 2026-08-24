@@ -107,6 +107,7 @@ async fn run_compio_bridge<Dispatch>(
     if let Some(process_id) = child.process_id() {
         input_rx.set_child_process_id(process_id);
     }
+    let mut child_killer = child.clone_killer();
     drop(pair.slave);
 
     let master = pair.master;
@@ -186,6 +187,7 @@ async fn run_compio_bridge<Dispatch>(
             let BufResult(..) = writer.write_all(eof_bytes).await;
             let _ = writer.flush().await;
         }
+        let _ = child_killer.kill();
     });
 
     let _ = read_task.await.resume_unwind();

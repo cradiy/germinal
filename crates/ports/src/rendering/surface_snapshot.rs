@@ -79,6 +79,27 @@ pub struct RenderSurfaceRunSnapshot {
     pub x: u32,
     pub text: String,
     pub style: TextStyleDto,
+    pub decoration: RenderSurfaceTextDecoration,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RenderSurfaceTextDecoration {
+    pub underline: RenderSurfaceUnderlineStyle,
+    pub underline_color: Option<RgbColorDto>,
+    pub strikeout: bool,
+    pub dim: bool,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSurfaceUnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

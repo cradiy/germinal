@@ -249,6 +249,7 @@ mod tests {
                     x: 0,
                     text: "hello".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],

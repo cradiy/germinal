@@ -197,18 +197,40 @@ fn preferred_terminal_term_name_with_paths(
 mod tests {
     use std::{
         fs,
+        sync::mpsc,
+        thread,
+        time::Duration,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use germinal_ports::pty_host::{
-        spawn_config::{PtyShellCommand, PtySpawnConfig},
-        terminal_size::TerminalPtySize,
+    use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::vo::pty_host_id::PtyHostId};
+    use germinal_ports::{
+        event::{
+            runtime_event::{GShellRuntimeEvent, RuntimeEvent},
+            runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
+        },
+        pty_host::{
+            spawn_config::{PtyShellCommand, PtySpawnConfig},
+            terminal_size::TerminalPtySize,
+            worker_input::TerminalWorkerInput,
+        },
     };
 
     use super::{
-        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridgeConfig,
+        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridge, PtyBridgeConfig,
         preferred_terminal_term_name_with_paths, terminfo_exists_in_paths,
     };
+
+    #[derive(Clone)]
+    struct TestDispatcher(mpsc::Sender<RuntimeEvent>);
+
+    impl IRuntimeEventDispatcher for TestDispatcher {
+        fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
+            self.0
+                .send(event)
+                .map_err(|_| RuntimeEventDispatchError::Closed)
+        }
+    }
 
     #[test]
     fn bridge_config_preserves_shell_and_working_directory() {
@@ -227,6 +249,53 @@ mod tests {
         assert_eq!(config.shell.program, "/bin/test-shell");
         assert_eq!(config.shell.args, ["--login"]);
         assert_eq!(config.working_directory, Some("/tmp/project".into()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_pty_input_terminates_the_child_process() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (worker_tx, _worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let input = PtyBridge::spawn(
+            TestDispatcher(event_tx),
+            GShellId::new(1),
+            PtyHostId::new(1),
+            PtySpawnConfig {
+                shell: Some(PtyShellCommand::new(
+                    "/bin/sh".to_string(),
+                    vec!["-c".to_string(), "exec sleep 30".to_string()],
+                )),
+                working_directory: None,
+                initial_size: TerminalPtySize::new(24, 80, 640, 384),
+            },
+            Vec::new(),
+            worker_tx,
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let process_id = loop {
+            if let Some(process_id) = input.child_process_id() {
+                break process_id;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY child did not start"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        input.close();
+
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PTY bridge should report that the shell closed");
+        assert_eq!(
+            event,
+            RuntimeEvent::GShell(GShellRuntimeEvent::Closed {
+                gshell_id: GShellId::new(1)
+            })
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{process_id}")).exists());
     }
 
     #[test]

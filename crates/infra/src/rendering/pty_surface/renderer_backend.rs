@@ -19,7 +19,7 @@ use germinal_ports::{
         renderer_backend::RendererBackend,
         surface_snapshot::{
             RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
-            RenderSurfaceSnapshot,
+            RenderSurfaceSnapshot, RenderSurfaceTextDecoration, RenderSurfaceUnderlineStyle,
         },
     },
     seq::Seq,
@@ -28,7 +28,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::rendering::pty_surface::{
-    crossfont_glyph_atlas::WgpuCrossfontUnderlineMetrics,
+    crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
     glyph_atlas::WgpuTerminalGlyphKey,
     text_shaping::{terminal_grapheme_cell_width, terminal_text_segments_with_ligatures},
 };
@@ -46,12 +46,33 @@ fn fallback_underline_metrics(row_height_px: u32) -> WgpuCrossfontUnderlineMetri
     )
 }
 
+fn fallback_strikeout_metrics(row_height_px: u32) -> WgpuCrossfontStrikeoutMetrics {
+    WgpuCrossfontStrikeoutMetrics::new(
+        row_height_px.saturating_mul(9) / 16,
+        row_height_px.div_ceil(16).max(1),
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WgpuTextDecorationMetrics {
+    underline: Option<WgpuCrossfontUnderlineMetrics>,
+    strikeout: Option<WgpuCrossfontStrikeoutMetrics>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WgpuTextDecorationSpan {
+    x: u32,
+    y: u32,
+    cell_width: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
     text_shaping: Cell<bool>,
     ligatures: Cell<bool>,
     underline_metrics: Cell<Option<WgpuCrossfontUnderlineMetrics>>,
+    strikeout_metrics: Cell<Option<WgpuCrossfontStrikeoutMetrics>>,
 }
 
 impl WgpuRendererBackend {
@@ -64,6 +85,7 @@ impl WgpuRendererBackend {
             text_shaping: Cell::new(false),
             ligatures: Cell::new(true),
             underline_metrics: Cell::new(None),
+            strikeout_metrics: Cell::new(None),
         }
     }
 
@@ -81,6 +103,17 @@ impl WgpuRendererBackend {
 
     pub fn set_underline_metrics(&self, metrics: Option<WgpuCrossfontUnderlineMetrics>) {
         self.underline_metrics.set(metrics);
+    }
+
+    pub fn set_strikeout_metrics(&self, metrics: Option<WgpuCrossfontStrikeoutMetrics>) {
+        self.strikeout_metrics.set(metrics);
+    }
+
+    fn text_decoration_metrics(&self) -> WgpuTextDecorationMetrics {
+        WgpuTextDecorationMetrics {
+            underline: self.underline_metrics.get(),
+            strikeout: self.strikeout_metrics.get(),
+        }
     }
 
     pub fn with_quads<T>(&self, f: impl FnOnce(&[WgpuQuadDrawItem]) -> T) -> T {
@@ -129,7 +162,7 @@ impl RendererBackend for WgpuRendererBackend {
                     config,
                     self.text_shaping.get(),
                     self.ligatures.get(),
-                    self.underline_metrics.get(),
+                    self.text_decoration_metrics(),
                 );
                 inner
                     .draw_rows
@@ -152,7 +185,7 @@ impl RendererBackend for WgpuRendererBackend {
                 config,
                 self.text_shaping.get(),
                 self.ligatures.get(),
-                self.underline_metrics.get(),
+                self.text_decoration_metrics(),
             );
             if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
             {
@@ -235,7 +268,7 @@ fn render_ime_preedit(
     config: WgpuRendererConfig,
     text_shaping: bool,
     ligatures: bool,
-    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
+    decoration_metrics: WgpuTextDecorationMetrics,
 ) -> Vec<WgpuRenderedRow> {
     if preedit.text.is_empty() || config.grid_columns == 0 || config.grid_rows == 0 {
         return Vec::new();
@@ -304,6 +337,7 @@ fn render_ime_preedit(
                 x,
                 text: character.to_string(),
                 style,
+                decoration: Default::default(),
             },
         );
         last_run = Some((y, runs.len() - 1));
@@ -316,7 +350,7 @@ fn render_ime_preedit(
     }
 
     rows.values()
-        .map(|row| render_row(row, config, text_shaping, ligatures, underline_metrics))
+        .map(|row| render_row(row, config, text_shaping, ligatures, decoration_metrics))
         .collect()
 }
 
@@ -378,10 +412,10 @@ fn render_row(
     config: WgpuRendererConfig,
     text_shaping: bool,
     ligatures: bool,
-    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
+    decoration_metrics: WgpuTextDecorationMetrics,
 ) -> WgpuRenderedRow {
     if text_shaping {
-        return render_shaped_row(row, config, ligatures, underline_metrics);
+        return render_shaped_row(row, config, ligatures, decoration_metrics);
     }
 
     let mut draw_row = WgpuDrawRow {
@@ -393,11 +427,15 @@ fn render_row(
     let mut underline_quads = Vec::new();
 
     for run in &row.runs {
+        let glyph_style = dimmed_style(run.style, run.decoration.dim);
         let mut x = run.x;
         let mut previous_glyph_x = None;
         for c in run.text.nfc() {
             let cell_width = terminal_char_cell_width(c);
             if cell_width == 0 {
+                if run.decoration.hidden {
+                    continue;
+                }
                 let Some(glyph_x) = previous_glyph_x else {
                     continue;
                 };
@@ -406,7 +444,7 @@ fn render_row(
                     y: row.y,
                     c,
                     cell_width: 0,
-                    style: run.style,
+                    style: glyph_style,
                 };
                 draw_row.glyphs.push(glyph);
                 glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
@@ -417,33 +455,37 @@ fn render_row(
                 y: row.y,
                 c,
                 cell_width,
-                style: run.style,
+                style: glyph_style,
             };
-            draw_row.glyphs.push(glyph);
             if run.style.background.is_some() {
                 background_quads.push(WgpuQuadDrawItem::background(
                     x, row.y, cell_width, config, run.style,
                 ));
             }
-            if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(c) {
-                append_terminal_geometric_glyph_quads(
-                    &mut glyph_quads,
-                    glyph,
+            if !run.decoration.hidden {
+                draw_row.glyphs.push(glyph);
+                if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(c) {
+                    append_terminal_geometric_glyph_quads(
+                        &mut glyph_quads,
+                        glyph,
+                        config,
+                        geometric_glyph,
+                    );
+                } else if c != ' ' {
+                    glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+                }
+                append_text_decoration_quads(
+                    &mut underline_quads,
+                    WgpuTextDecorationSpan {
+                        x,
+                        y: row.y,
+                        cell_width,
+                    },
                     config,
-                    geometric_glyph,
+                    glyph_style,
+                    run.decoration,
+                    decoration_metrics,
                 );
-            } else if c != ' ' {
-                glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
-            }
-            if run.style.underline {
-                underline_quads.push(WgpuQuadDrawItem::underline(
-                    x,
-                    row.y,
-                    cell_width,
-                    config,
-                    run.style,
-                    underline_metrics,
-                ));
             }
             previous_glyph_x = Some(x);
             x += cell_width;
@@ -461,7 +503,7 @@ fn render_shaped_row(
     row: &RenderSurfaceRowSnapshot,
     config: WgpuRendererConfig,
     ligatures: bool,
-    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
+    decoration_metrics: WgpuTextDecorationMetrics,
 ) -> WgpuRenderedRow {
     let mut draw_row = WgpuDrawRow {
         y: row.y,
@@ -472,6 +514,7 @@ fn render_shaped_row(
     let mut underline_quads = Vec::new();
 
     for run in &row.runs {
+        let glyph_style = dimmed_style(run.style, run.decoration.dim);
         let mut x = run.x;
         let mut previous_glyph_x = None;
         for segment in terminal_text_segments_with_ligatures(&run.text, run.style, ligatures) {
@@ -491,37 +534,43 @@ fn render_shaped_row(
                         run.style,
                     ));
                 }
-                if run.style.underline {
-                    underline_quads.push(WgpuQuadDrawItem::underline(
-                        segment_x,
-                        row.y,
-                        segment.cell_width,
+                if !run.decoration.hidden {
+                    append_text_decoration_quads(
+                        &mut underline_quads,
+                        WgpuTextDecorationSpan {
+                            x: segment_x,
+                            y: row.y,
+                            cell_width: segment.cell_width,
+                        },
                         config,
-                        run.style,
-                        underline_metrics,
-                    ));
+                        glyph_style,
+                        run.decoration,
+                        decoration_metrics,
+                    );
                 }
             }
 
-            let mut grapheme_x = segment_x;
-            for grapheme in segment.text.graphemes(true) {
-                let grapheme_width = terminal_grapheme_cell_width(grapheme);
-                for (character_index, character) in grapheme.chars().enumerate() {
-                    draw_row.glyphs.push(WgpuGlyphDrawItem {
-                        x: grapheme_x,
-                        y: row.y,
-                        c: character,
-                        cell_width: if character_index == 0 {
-                            grapheme_width
-                        } else {
-                            0
-                        },
-                        style: run.style,
-                    });
-                }
-                if grapheme_width > 0 {
-                    previous_glyph_x = Some(grapheme_x);
-                    grapheme_x += grapheme_width;
+            if !run.decoration.hidden {
+                let mut grapheme_x = segment_x;
+                for grapheme in segment.text.graphemes(true) {
+                    let grapheme_width = terminal_grapheme_cell_width(grapheme);
+                    for (character_index, character) in grapheme.chars().enumerate() {
+                        draw_row.glyphs.push(WgpuGlyphDrawItem {
+                            x: grapheme_x,
+                            y: row.y,
+                            c: character,
+                            cell_width: if character_index == 0 {
+                                grapheme_width
+                            } else {
+                                0
+                            },
+                            style: glyph_style,
+                        });
+                    }
+                    if grapheme_width > 0 {
+                        previous_glyph_x = Some(grapheme_x);
+                        grapheme_x += grapheme_width;
+                    }
                 }
             }
 
@@ -533,9 +582,11 @@ fn render_shaped_row(
                 y: row.y,
                 c: character,
                 cell_width: segment.cell_width,
-                style: run.style,
+                style: glyph_style,
             };
-            if segment.shaped {
+            if run.decoration.hidden {
+                // Hidden text still consumes its normal terminal cell span.
+            } else if segment.shaped {
                 glyph_quads.push(WgpuQuadDrawItem::glyph_with_key(
                     glyph,
                     segment.glyph_key,
@@ -561,6 +612,129 @@ fn render_shaped_row(
         background_quads,
         glyph_quads,
         underline_quads,
+    }
+}
+
+fn dimmed_style(mut style: TextStyleDto, dim: bool) -> TextStyleDto {
+    if !dim {
+        return style;
+    }
+
+    let foreground = style.foreground.unwrap_or(RgbColorDto::new(255, 255, 255));
+    style.foreground = Some(RgbColorDto::new(
+        (u16::from(foreground.red) * 2 / 3) as u8,
+        (u16::from(foreground.green) * 2 / 3) as u8,
+        (u16::from(foreground.blue) * 2 / 3) as u8,
+    ));
+    style
+}
+
+fn append_text_decoration_quads(
+    quads: &mut Vec<WgpuQuadDrawItem>,
+    span: WgpuTextDecorationSpan,
+    config: WgpuRendererConfig,
+    style: TextStyleDto,
+    decoration: RenderSurfaceTextDecoration,
+    metrics: WgpuTextDecorationMetrics,
+) {
+    let underline = if decoration.underline == RenderSurfaceUnderlineStyle::None && style.underline
+    {
+        RenderSurfaceUnderlineStyle::Single
+    } else {
+        decoration.underline
+    };
+    let underline_style = TextStyleDto {
+        foreground: decoration.underline_color.or(style.foreground),
+        ..style
+    };
+
+    if underline != RenderSurfaceUnderlineStyle::None {
+        let base = WgpuQuadDrawItem::underline(
+            span.x,
+            span.y,
+            span.cell_width,
+            config,
+            underline_style,
+            metrics.underline,
+        );
+        match underline {
+            RenderSurfaceUnderlineStyle::None => {}
+            RenderSurfaceUnderlineStyle::Single => quads.push(base),
+            RenderSurfaceUnderlineStyle::Double => {
+                let gap = base.height_px.max(1);
+                let upper_y = base.y_px.saturating_sub(base.height_px.saturating_add(gap));
+                quads.push(WgpuQuadDrawItem::line_rect(
+                    base.x_px,
+                    upper_y,
+                    base.width_px,
+                    base.height_px,
+                    underline_style,
+                ));
+                quads.push(base);
+            }
+            RenderSurfaceUnderlineStyle::Dotted => {
+                let dot = base.height_px.max(1);
+                let pitch = dot.saturating_mul(2).max(2);
+                let end_x = base.x_px.saturating_add(base.width_px);
+                let mut dot_x = base.x_px;
+                while dot_x < end_x {
+                    quads.push(WgpuQuadDrawItem::line_rect(
+                        dot_x,
+                        base.y_px,
+                        dot.min(end_x - dot_x),
+                        dot,
+                        underline_style,
+                    ));
+                    dot_x = dot_x.saturating_add(pitch);
+                }
+            }
+            RenderSurfaceUnderlineStyle::Dashed => {
+                let dash = base.height_px.saturating_mul(4).max(4);
+                let pitch = dash.saturating_add(base.height_px.saturating_mul(2).max(2));
+                let end_x = base.x_px.saturating_add(base.width_px);
+                let mut dash_x = base.x_px;
+                while dash_x < end_x {
+                    quads.push(WgpuQuadDrawItem::line_rect(
+                        dash_x,
+                        base.y_px,
+                        dash.min(end_x - dash_x),
+                        base.height_px,
+                        underline_style,
+                    ));
+                    dash_x = dash_x.saturating_add(pitch);
+                }
+            }
+            RenderSurfaceUnderlineStyle::Curly => {
+                let unit = base.height_px.max(1);
+                let top = base.y_px.saturating_sub(unit.saturating_mul(2));
+                let offsets = [unit, 0, unit, unit.saturating_mul(2)];
+                let end_x = base.x_px.saturating_add(base.width_px);
+                let mut wave_x = base.x_px;
+                let mut step = 0_usize;
+                while wave_x < end_x {
+                    quads.push(WgpuQuadDrawItem::line_rect(
+                        wave_x,
+                        top.saturating_add(offsets[step % offsets.len()]),
+                        unit.min(end_x - wave_x),
+                        unit,
+                        underline_style,
+                    ));
+                    wave_x = wave_x.saturating_add(unit);
+                    step += 1;
+                }
+            }
+        }
+    }
+
+    if decoration.strikeout {
+        quads.push(WgpuQuadDrawItem::strikeout(
+            span.x,
+            span.y,
+            span.cell_width,
+            config,
+            style,
+            metrics.strikeout,
+        ));
     }
 }
 
@@ -1094,6 +1268,41 @@ impl WgpuQuadDrawItem {
         }
     }
 
+    fn strikeout(
+        x: u32,
+        y: u32,
+        cell_width: u32,
+        config: WgpuRendererConfig,
+        style: TextStyleDto,
+        metrics: Option<WgpuCrossfontStrikeoutMetrics>,
+    ) -> Self {
+        let row_height_px = config.row_height_px(y);
+        let metrics = metrics.unwrap_or_else(|| fallback_strikeout_metrics(row_height_px));
+        let thickness_px = metrics.thickness_px().min(row_height_px).max(1);
+        let offset_y_px = metrics
+            .offset_y_px()
+            .min(row_height_px.saturating_sub(thickness_px));
+        Self::line_rect(
+            config.content_origin_x + x * config.cell_width_px,
+            config.row_top_px(y).saturating_add(offset_y_px),
+            cell_width.max(1) * config.cell_width_px,
+            thickness_px,
+            style,
+        )
+    }
+
+    fn line_rect(x_px: u32, y_px: u32, width_px: u32, height_px: u32, style: TextStyleDto) -> Self {
+        Self {
+            kind: WgpuQuadKind::Underline,
+            x_px,
+            y_px,
+            width_px: width_px.max(1),
+            height_px: height_px.max(1),
+            style,
+            alpha: u8::MAX,
+        }
+    }
+
     pub fn solid_rect(
         x_px: u32,
         y_px: u32,
@@ -1159,7 +1368,8 @@ mod tests {
             surface_snapshot::{
                 RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
                 RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot,
-                RenderSurfaceRunSnapshot, RenderSurfaceSnapshot,
+                RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, RenderSurfaceTextDecoration,
+                RenderSurfaceUnderlineStyle,
             },
         },
         seq::Seq,
@@ -1170,7 +1380,8 @@ mod tests {
         append_pixel_rect_quads_from_row,
     };
     use crate::rendering::pty_surface::{
-        crossfont_glyph_atlas::WgpuCrossfontUnderlineMetrics, glyph_atlas::WgpuTerminalGlyphKey,
+        crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
+        glyph_atlas::WgpuTerminalGlyphKey,
     };
 
     fn pixel_row(command: RenderCommandDto) -> RenderSurfaceRowSnapshot {
@@ -1181,8 +1392,35 @@ mod tests {
                 x: 0,
                 text,
                 style: Default::default(),
+                decoration: Default::default(),
             }],
         }
+    }
+
+    fn render_decorated_run(
+        backend: &WgpuRendererBackend,
+        style: TextStyleDto,
+        decoration: RenderSurfaceTextDecoration,
+    ) {
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(99),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "x".to_string(),
+                    style,
+                    decoration,
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        });
     }
 
     #[test]
@@ -1291,6 +1529,7 @@ mod tests {
                         underline: true,
                         ..TextStyleDto::plain()
                     },
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1304,6 +1543,91 @@ mod tests {
         assert_eq!(underlines.len(), 1);
         assert_eq!(underlines[0].y_px, 11);
         assert_eq!(underlines[0].height_px, 3);
+    }
+
+    #[test]
+    fn modern_underlines_and_strikeout_generate_distinct_geometry() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+            cell_width_px: 12,
+            cell_height_px: 20,
+            content_width_px: 12,
+            content_height_px: 20,
+            ..WgpuRendererConfig::default()
+        });
+        backend.set_underline_metrics(Some(WgpuCrossfontUnderlineMetrics::new(16, 2)));
+        backend.set_strikeout_metrics(Some(WgpuCrossfontStrikeoutMetrics::new(9, 2)));
+        let color = RgbColorDto::new(12, 34, 56);
+
+        for (underline, minimum_quads) in [
+            (RenderSurfaceUnderlineStyle::Double, 2),
+            (RenderSurfaceUnderlineStyle::Curly, 4),
+            (RenderSurfaceUnderlineStyle::Dotted, 3),
+            (RenderSurfaceUnderlineStyle::Dashed, 1),
+        ] {
+            render_decorated_run(
+                &backend,
+                TextStyleDto {
+                    foreground: Some(color),
+                    ..TextStyleDto::plain()
+                },
+                RenderSurfaceTextDecoration {
+                    underline,
+                    underline_color: Some(color),
+                    strikeout: true,
+                    ..Default::default()
+                },
+            );
+            let lines = backend.state().underline_quads();
+            assert!(lines.len() > minimum_quads);
+            assert!(
+                lines
+                    .iter()
+                    .all(|quad| quad.style.foreground == Some(color))
+            );
+            assert!(lines.iter().any(|quad| quad.y_px == 9));
+        }
+    }
+
+    #[test]
+    fn hidden_text_keeps_background_without_emitting_glyphs() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        render_decorated_run(
+            &backend,
+            TextStyleDto {
+                foreground: Some(RgbColorDto::new(210, 210, 210)),
+                background: Some(RgbColorDto::new(20, 30, 40)),
+                ..TextStyleDto::plain()
+            },
+            RenderSurfaceTextDecoration {
+                hidden: true,
+                ..Default::default()
+            },
+        );
+
+        let state = backend.state();
+        assert!(state.glyph_quads().is_empty());
+        assert_eq!(state.background_quads().len(), 2);
+    }
+
+    #[test]
+    fn dim_text_reduces_the_glyph_foreground_intensity() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        render_decorated_run(
+            &backend,
+            TextStyleDto {
+                foreground: Some(RgbColorDto::new(150, 120, 90)),
+                ..TextStyleDto::plain()
+            },
+            RenderSurfaceTextDecoration {
+                dim: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            backend.state().glyph_quads()[0].style.foreground,
+            Some(RgbColorDto::new(100, 80, 60))
+        );
     }
 
     #[test]
@@ -1396,6 +1720,7 @@ mod tests {
                     x: 0,
                     text: "x".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1442,6 +1767,7 @@ mod tests {
                     x: 0,
                     text: "功".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1481,6 +1807,7 @@ mod tests {
                     x: 0,
                     text: text.to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1526,6 +1853,7 @@ mod tests {
                     x: 0,
                     text: "👩\u{200d}💻سلامx".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1748,6 +2076,7 @@ mod tests {
                     x: 0,
                     text: "▄".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1793,6 +2122,7 @@ mod tests {
                     x: 0,
                     text: "│".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
@@ -1837,6 +2167,7 @@ mod tests {
                     x: 0,
                     text: "\u{1FB02}".to_string(),
                     style: TextStyleDto::plain(),
+                    decoration: Default::default(),
                 }],
             }],
             video_surfaces: vec![],
