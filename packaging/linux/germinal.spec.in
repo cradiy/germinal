@@ -1,0 +1,45 @@
+Name:           germinal
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        GPU-rendered terminal and structured UI host
+License:        MIT
+URL:            https://github.com/cradiy/germinal
+Source0:        germinal
+Source1:        io.github.cradiy.Germinal.desktop
+Source2:        io.github.cradiy.Germinal.svg
+Source3:        LICENSE
+Source4:        README.md
+Source5:        PACKAGE-README.md
+
+Requires:       fontconfig
+Requires:       freetype
+Requires:       gstreamer1
+Requires:       gstreamer1-plugins-base
+
+%description
+Germinal is a keyboard-first GPU-rendered terminal that combines PTY shell
+compatibility with structured UI applications.
+
+%prep
+
+%build
+
+%install
+install -Dm0755 %{SOURCE0} %{buildroot}%{_bindir}/germinal
+install -Dm0644 %{SOURCE1} %{buildroot}%{_datadir}/applications/io.github.cradiy.Germinal.desktop
+install -Dm0644 %{SOURCE2} %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.github.cradiy.Germinal.svg
+install -Dm0644 %{SOURCE3} %{buildroot}%{_licensedir}/germinal/LICENSE
+install -Dm0644 %{SOURCE4} %{buildroot}%{_docdir}/germinal/README.md
+install -Dm0644 %{SOURCE5} %{buildroot}%{_docdir}/germinal/PACKAGE-README.md
+
+%files
+%{_bindir}/germinal
+%{_datadir}/applications/io.github.cradiy.Germinal.desktop
+%{_datadir}/icons/hicolor/scalable/apps/io.github.cradiy.Germinal.svg
+%license %{_licensedir}/germinal/LICENSE
+%doc %{_docdir}/germinal/README.md
+%doc %{_docdir}/germinal/PACKAGE-README.md
+
+%changelog
+* Mon Aug 24 2026 Germinal Project - @VERSION@-1
+- Package Germinal for Linux.

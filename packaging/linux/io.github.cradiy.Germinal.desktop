@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Germinal
+Comment=GPU-rendered terminal and structured UI host
+Exec=germinal
+Icon=io.github.cradiy.Germinal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;terminal;command;prompt;
+StartupNotify=true
+StartupWMClass=io.github.cradiy.Germinal
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=germinal

@@ -520,6 +520,11 @@ impl Default for KeyboardConfig {
         Self {
             bindings: vec![
                 KeyboardBinding {
+                    key: "N".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::NewWindow,
+                },
+                KeyboardBinding {
                     key: "Space".to_string(),
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::ToggleViMode,
@@ -664,6 +669,7 @@ pub struct KeyboardBinding {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
+    NewWindow,
     ToggleViMode,
     ToggleSearch,
     Copy,
@@ -850,9 +856,12 @@ mod tests {
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
-        assert_eq!(
-            value["keyboard"]["bindings"][0]["action"].as_str(),
-            Some("ToggleViMode")
+        assert!(
+            value["keyboard"]["bindings"]
+                .as_array()
+                .is_some_and(|bindings| bindings
+                    .iter()
+                    .any(|binding| { binding["action"].as_str() == Some("ToggleViMode") }))
         );
     }
 
@@ -1091,17 +1100,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 26);
+        assert_eq!(config.keyboard.bindings.len(), 27);
         assert_eq!(
-            config.keyboard.bindings[0].action,
+            config.keyboard.bindings[1].action,
             KeyboardAction::ToggleViMode
         );
         assert_eq!(
-            config.keyboard.bindings[1].action,
+            config.keyboard.bindings[2].action,
             KeyboardAction::ToggleSearch
         );
-        assert_eq!(config.keyboard.bindings[1].key, "F");
-        assert_eq!(config.keyboard.bindings[1].mods, "Control|Shift");
+        assert_eq!(config.keyboard.bindings[2].key, "F");
+        assert_eq!(config.keyboard.bindings[2].mods, "Control|Shift");
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "N"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::NewWindow
+        }));
         assert!(config.keyboard.bindings.iter().any(|binding| {
             binding.key == "C"
                 && binding.mods == "Control|Shift"

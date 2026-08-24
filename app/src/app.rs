@@ -83,6 +83,9 @@ use winit::{
     window::WindowId,
 };
 
+#[cfg(target_os = "linux")]
+const DESKTOP_APP_ID: &str = "io.github.cradiy.Germinal";
+
 #[derive(Clone)]
 pub struct AppRuntimeEventDispatcher {
     proxy: EventLoopProxy<RuntimeEvent>,
@@ -264,17 +267,29 @@ impl App {
             return Ok(());
         }
 
+        let window_attributes = winit::window::Window::default_attributes()
+            .with_title(self.config.window.title.as_str())
+            .with_transparent(self.config.window.opacity < 1.0)
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                f64::from(self.config.window.width_px),
+                f64::from(self.config.window.height_px),
+            ));
+        #[cfg(target_os = "linux")]
+        let window_attributes = {
+            use winit::platform::{
+                wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11,
+            };
+
+            let window_attributes = WindowAttributesExtWayland::with_name(
+                window_attributes,
+                DESKTOP_APP_ID,
+                "germinal",
+            );
+            WindowAttributesExtX11::with_name(window_attributes, DESKTOP_APP_ID, "germinal")
+        };
         let window = std::sync::Arc::new(
             event_loop
-                .create_window(
-                    winit::window::Window::default_attributes()
-                        .with_title(self.config.window.title.as_str())
-                        .with_transparent(self.config.window.opacity < 1.0)
-                        .with_inner_size(winit::dpi::LogicalSize::new(
-                            f64::from(self.config.window.width_px),
-                            f64::from(self.config.window.height_px),
-                        )),
-                )
+                .create_window(window_attributes)
                 .map_err(AppError::CreateWindow)?,
         );
         let window_id = window.id();
@@ -446,6 +461,42 @@ impl App {
         let focused_gshell = self.create_tab_gshell();
         self.inherit_working_directory(previous_gshell, focused_gshell);
         self.activate_workspace_tab(previous_gshell, focused_gshell);
+    }
+
+    fn create_window(&self) {
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                warn!(error = %error, "failed to locate the Germinal executable for a new window");
+                return;
+            }
+        };
+        let working_directory = self
+            .gshell_working_directory(self.focused_gshell())
+            .or_else(|| self.config.configured_working_directory());
+        let mut command = Command::new(executable);
+        if let Some(working_directory) = working_directory.filter(|path| path.is_dir()) {
+            command.current_dir(working_directory);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            command.process_group(0);
+        }
+
+        match command.spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    if let Err(error) = child.wait() {
+                        warn!(error = %error, "failed to wait for a Germinal child window");
+                    }
+                });
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to create a Germinal window");
+            }
+        }
     }
 
     fn activate_next_workspace_tab(&mut self) {
@@ -666,6 +717,7 @@ impl App {
 
         if state == WindowInputElementState::Pressed {
             match action {
+                KeyboardAction::NewWindow => self.create_window(),
                 KeyboardAction::ToggleViMode => {
                     let gshell_id = self.focused_gshell();
                     self.clear_ime_preedit(gshell_id);
@@ -1957,6 +2009,25 @@ mod tests {
             WindowInputElementState::Pressed,
             &WindowInputKey::Character("D".to_string()),
             winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD),
+        ));
+    }
+
+    #[test]
+    fn default_ctrl_shift_n_is_consumed_as_new_window() {
+        let config = GerminalConfig::default();
+        let binding = config
+            .keyboard
+            .bindings
+            .iter()
+            .find(|binding| binding.action == KeyboardAction::NewWindow)
+            .expect("new window should have a default binding");
+
+        assert!(matches_keyboard_binding(
+            binding,
+            WindowInputModifiers::new(true, false, true, false),
+            WindowInputElementState::Pressed,
+            &WindowInputKey::Character("n".to_string()),
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyN),
         ));
     }
 

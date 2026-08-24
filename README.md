@@ -22,6 +22,78 @@ cargo run -r -p germinal-gnative-demo
 
 The germinal first start up with `PTY` mode (using alacritty-terminal for parsing), when the `germinal-gnative-demo` starts, the germinal enters into `gnative` mode, which is a actually GUI.
 
+## Building
+
+Germinal provides Nushell and Bash build scripts. Run either command from the repository root:
+
+```nu
+./scripts/build-release.nu
+```
+
+```sh
+./scripts/build-release.sh
+```
+
+The optimized executable is written to `target/product/germinal`.
+
+Use `--target` to build for a specific Rust target:
+
+```nu
+./scripts/build-release.nu --target x86_64-unknown-linux-gnu
+```
+
+For Linux, `--libc gnu` and `--libc musl` select the corresponding target for the current
+architecture:
+
+```nu
+./scripts/build-release.nu --libc musl
+```
+
+Targeted builds are written to `target/<rust-target>/product/germinal`.
+
+## Linux packages
+
+Create a portable Linux archive with:
+
+```nu
+./scripts/package-linux.nu
+```
+
+Release files and their SHA-256 checksums are written to `dist/`. Use `--format` to create a DEB,
+an RPM, or every available package format:
+
+```nu
+./scripts/package-linux.nu --format deb
+./scripts/package-linux.nu --format rpm
+./scripts/package-linux.nu --format all
+```
+
+Use an existing product binary without rebuilding it:
+
+```nu
+./scripts/package-linux.nu --skip-build
+```
+
+Choose another output directory with `--output-dir <directory>`. DEB packaging requires
+`dpkg-deb`, and RPM packaging requires `rpmbuild`. Packages include the executable, desktop entry,
+application icon, license, and user documentation.
+
+Bash users can replace the `.nu` suffix with `.sh`. Both scripts accept the same options.
+
+### musl packages
+
+Build and package a musl archive on a musl system or with a configured musl sysroot:
+
+```nu
+./scripts/build-release.nu --libc musl
+./scripts/package-linux.nu --libc musl --skip-build
+```
+
+musl releases are distributed as portable archives. Germinal uses musl builds of Fontconfig,
+FreeType, GLib, GStreamer, and the required GStreamer plugins, so these libraries must be available
+on the target system. Cross-compilation also requires the Rust musl target, a matching C linker, and
+a pkg-config sysroot.
+
 ## Terminal images
 
 Germinal supports direct Kitty Graphics Protocol images using raw RGB, raw RGBA, or PNG payloads. Chunked base64 payloads, zlib compression, image/placement IDs, Unicode placeholders used by Yazi, source rectangles, cell sizing, z-index layering, deletion, and query responses are supported.
@@ -66,6 +138,7 @@ also match `Control|Shift|Alt`.
 
 | Shortcut | Action | Description |
 | --- | --- | --- |
+| `Ctrl+Shift+N` | `NewWindow` | Open an independent Germinal window in the focused shell's working directory. |
 | `Ctrl+Shift+C` | `Copy` | Copy the active terminal selection. |
 | `Ctrl+Shift+V` | `Paste` | Paste clipboard text using bracketed paste when the application enables it. |
 | `Ctrl+Shift+Space` | `ToggleViMode` | Enter or leave host-side Vi copy mode. |
@@ -124,7 +197,8 @@ unmodified key. Letter and digit keys use their printed names. Named keys are `S
 Available `action` values are:
 
 - Clipboard and navigation: `Copy`, `Paste`, `ToggleViMode`, `ToggleSearch`.
-- Tabs: `NewTab`, `PreviousTab`, `NextTab`, `MoveTabLeft`, `MoveTabRight`.
+- Windows and tabs: `NewWindow`, `NewTab`, `PreviousTab`, `NextTab`, `MoveTabLeft`,
+  `MoveTabRight`.
 - Pane creation and closing: `SplitHorizontal`, `SplitVertical`, `ClosePane`.
 - Pane focus: `FocusNextPane`, `FocusPreviousPane`, `FocusPaneLeft`, `FocusPaneRight`,
   `FocusPaneUp`, `FocusPaneDown`.
