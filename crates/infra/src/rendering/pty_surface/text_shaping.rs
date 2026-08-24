@@ -11,9 +11,19 @@ pub struct TerminalTextSegment {
     pub cell_width: u32,
     pub glyph_key: WgpuTerminalGlyphKey,
     pub shaped: bool,
+    pub ligature: bool,
 }
 
+#[cfg(test)]
 pub fn terminal_text_segments(text: &str, style: TextStyleDto) -> Vec<TerminalTextSegment> {
+    terminal_text_segments_with_ligatures(text, style, true)
+}
+
+pub fn terminal_text_segments_with_ligatures(
+    text: &str,
+    style: TextStyleDto,
+    ligatures: bool,
+) -> Vec<TerminalTextSegment> {
     let normalized: String = text.nfc().collect();
     let graphemes: Vec<&str> = normalized.graphemes(true).collect();
     let mut segments = Vec::new();
@@ -27,18 +37,43 @@ pub fn terminal_text_segments(text: &str, style: TextStyleDto) -> Vec<TerminalTe
             while index < graphemes.len() && is_contextual_script_grapheme(graphemes[index]) {
                 index += 1;
             }
-            push_shaped_segment(&mut segments, &graphemes[start..index], style);
+            push_shaped_segment(&mut segments, &graphemes[start..index], style, false);
+            continue;
+        }
+
+        if ligatures && is_code_operator_grapheme(grapheme) {
+            let start = index;
+            index += 1;
+            while index < graphemes.len() && is_code_operator_grapheme(graphemes[index]) {
+                index += 1;
+            }
+            if index - start > 1 {
+                push_shaped_segment(&mut segments, &graphemes[start..index], style, true);
+                continue;
+            }
+            index = start;
+        }
+
+        if ligatures && let Some(ligature_len) = standard_ligature_len(&graphemes[index..]) {
+            push_shaped_segment(
+                &mut segments,
+                &graphemes[index..index + ligature_len],
+                style,
+                true,
+            );
+            index += ligature_len;
             continue;
         }
 
         if grapheme.chars().count() > 1 {
-            push_shaped_segment(&mut segments, &graphemes[index..=index], style);
+            push_shaped_segment(&mut segments, &graphemes[index..=index], style, false);
         } else if let Some(character) = grapheme.chars().next() {
             segments.push(TerminalTextSegment {
                 text: grapheme.to_owned(),
                 cell_width: terminal_grapheme_cell_width(grapheme),
                 glyph_key: WgpuTerminalGlyphKey::styled(character, style.bold, style.italic),
                 shaped: false,
+                ligature: false,
             });
         }
         index += 1;
@@ -51,6 +86,7 @@ fn push_shaped_segment(
     segments: &mut Vec<TerminalTextSegment>,
     graphemes: &[&str],
     style: TextStyleDto,
+    ligature: bool,
 ) {
     let text = graphemes.concat();
     let cell_width = graphemes
@@ -62,6 +98,7 @@ fn push_shaped_segment(
         glyph_key: WgpuTerminalGlyphKey::cluster(stable_text_hash(&text), style.bold, style.italic),
         text,
         shaped: true,
+        ligature,
     });
 }
 
@@ -89,6 +126,7 @@ pub fn cursor_fallback_segments(segment: &TerminalTextSegment) -> Vec<TerminalTe
                     segment.glyph_key.italic(),
                 ),
                 shaped: false,
+                ligature: false,
             })
         })
         .collect()
@@ -105,6 +143,46 @@ fn stable_text_hash(text: &str) -> u64 {
 
 fn is_contextual_script_grapheme(grapheme: &str) -> bool {
     grapheme.chars().any(is_contextual_script_character)
+}
+
+fn is_code_operator_grapheme(grapheme: &str) -> bool {
+    matches!(
+        grapheme.as_bytes(),
+        [b'!']
+            | [b'#']
+            | [b'$']
+            | [b'%']
+            | [b'&']
+            | [b'*']
+            | [b'+']
+            | [b'-']
+            | [b'.']
+            | [b'/']
+            | [b':']
+            | [b'<']
+            | [b'=']
+            | [b'>']
+            | [b'?']
+            | [b'@']
+            | [b'\\']
+            | [b'^']
+            | [b'|']
+            | [b'~']
+    )
+}
+
+fn standard_ligature_len(graphemes: &[&str]) -> Option<usize> {
+    const STANDARD_LIGATURES: [&str; 6] = ["ffi", "ffl", "www", "ff", "fi", "fl"];
+
+    STANDARD_LIGATURES.iter().find_map(|ligature| {
+        let len = ligature.len();
+        (graphemes.len() >= len
+            && graphemes[..len]
+                .iter()
+                .zip(ligature.bytes())
+                .all(|(grapheme, byte)| grapheme.as_bytes() == [byte]))
+        .then_some(len)
+    })
 }
 
 fn is_contextual_script_character(character: char) -> bool {
@@ -171,5 +249,72 @@ mod tests {
         assert!(segments[0].shaped);
         assert_eq!(segments[2].text, "दुनिया");
         assert!(segments[2].shaped);
+    }
+
+    #[test]
+    fn groups_programming_operators_for_ligature_shaping() {
+        let segments = terminal_text_segments("a != b -> c => d::e", TextStyleDto::plain());
+        let shaped = segments
+            .iter()
+            .filter(|segment| segment.shaped)
+            .map(|segment| (segment.text.as_str(), segment.cell_width))
+            .collect::<Vec<_>>();
+
+        assert_eq!(shaped, vec![("!=", 2), ("->", 2), ("=>", 2), ("::", 2)]);
+        assert!(
+            segments
+                .iter()
+                .filter(|segment| segment.shaped)
+                .all(|segment| segment.ligature)
+        );
+    }
+
+    #[test]
+    fn groups_standard_alphabetic_ligatures_without_grouping_identifiers() {
+        let text = "office float www name";
+        let segments = terminal_text_segments(text, TextStyleDto::plain());
+        let shaped = segments
+            .iter()
+            .filter(|segment| segment.shaped)
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(shaped, vec!["ffi", "fl", "www"]);
+        assert!(
+            segments
+                .iter()
+                .filter(|segment| segment.shaped)
+                .all(|segment| segment.ligature)
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<String>(),
+            text
+        );
+    }
+
+    #[test]
+    fn disabling_ligatures_keeps_code_operators_separate_but_preserves_required_shaping() {
+        let segments =
+            terminal_text_segments_with_ligatures("a != b سلام", TextStyleDto::plain(), false);
+
+        assert!(
+            segments
+                .iter()
+                .filter(|segment| segment.shaped)
+                .all(|segment| segment.text == "سلام" && !segment.ligature)
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| segment.text == "!" && !segment.shaped)
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| segment.text == "=" && !segment.shaped)
+        );
     }
 }

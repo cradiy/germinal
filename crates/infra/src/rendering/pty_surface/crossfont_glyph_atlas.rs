@@ -1,8 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use cosmic_text::{
-    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style as CosmicStyle, SwashCache,
-    Weight as CosmicWeight, Wrap,
+    Attrs, Buffer, CacheKey, CacheKeyFlags, Color, Family, FeatureTag, FontFeatures, FontSystem,
+    Metrics, Shaping, Style as CosmicStyle, SwashCache, Weight as CosmicWeight, Wrap, fontdb,
+    rustybuzz,
 };
 use crossfont::{
     BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
@@ -67,6 +68,7 @@ pub struct WgpuCrossfontGlyphAtlasBuilder {
     max_texture_dimension_2d: u32,
     cell_width_px: Option<u32>,
     cell_height_px: Option<u32>,
+    ligatures: bool,
     backend: Rc<RefCell<Option<WgpuCrossfontGlyphBackend>>>,
 }
 
@@ -81,6 +83,7 @@ impl std::fmt::Debug for WgpuCrossfontGlyphAtlasBuilder {
             .field("max_texture_dimension_2d", &self.max_texture_dimension_2d)
             .field("cell_width_px", &self.cell_width_px)
             .field("cell_height_px", &self.cell_height_px)
+            .field("ligatures", &self.ligatures)
             .finish()
     }
 }
@@ -99,10 +102,11 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         font_config: &TerminalFontConfig,
         font_size_px: f32,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
-        Self::from_font_faces(
+        Ok(Self::from_font_faces(
             WgpuCrossfontFontFaces::from_terminal(font_config),
             font_size_px,
-        )
+        )?
+        .with_ligatures(font_config.ligatures()))
     }
 
     fn from_font_faces(
@@ -123,6 +127,7 @@ impl WgpuCrossfontGlyphAtlasBuilder {
             max_texture_dimension_2d: u32::MAX,
             cell_width_px: None,
             cell_height_px: None,
+            ligatures: true,
             backend: Rc::new(RefCell::new(Some(backend))),
         })
     }
@@ -158,6 +163,11 @@ impl WgpuCrossfontGlyphAtlasBuilder {
     pub fn with_cell_size_px(mut self, cell_width_px: u32, cell_height_px: u32) -> Self {
         self.cell_width_px = Some(cell_width_px.max(1));
         self.cell_height_px = Some(cell_height_px.max(1));
+        self
+    }
+
+    pub fn with_ligatures(mut self, ligatures: bool) -> Self {
+        self.ligatures = ligatures;
         self
     }
 
@@ -217,6 +227,10 @@ impl WgpuCrossfontGlyphAtlasBuilder {
         self.cell_height_px
     }
 
+    pub const fn ligatures(&self) -> bool {
+        self.ligatures
+    }
+
     pub fn build_for_texts<I, S>(&self, texts: I) -> WgpuTerminalGlyphAtlas
     where
         I: IntoIterator<Item = S>,
@@ -224,10 +238,13 @@ impl WgpuCrossfontGlyphAtlasBuilder {
     {
         let mut segments = std::collections::BTreeMap::new();
         for text in texts {
-            for segment in crate::rendering::pty_surface::text_shaping::terminal_text_segments(
-                text.as_ref(),
-                germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
-            ) {
+            for segment in
+                crate::rendering::pty_surface::text_shaping::terminal_text_segments_with_ligatures(
+                    text.as_ref(),
+                    germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+                    self.ligatures,
+                )
+            {
                 segments.entry(segment.glyph_key).or_insert(segment);
             }
         }
@@ -559,6 +576,7 @@ impl WgpuCrossfontGlyphBackend {
                     CosmicTextClusterRasterizer::new(
                         self.cluster_font_faces.clone(),
                         self.size.as_px(),
+                        self.baseline_y_px,
                     )
                 })
                 .rasterize(segment, cell_width_px, cell_height_px)
@@ -719,15 +737,17 @@ struct CosmicTextClusterRasterizer {
     swash_cache: SwashCache,
     font_faces: WgpuCrossfontFontFaces,
     font_size_px: f32,
+    baseline_y_px: i32,
 }
 
 impl CosmicTextClusterRasterizer {
-    fn new(font_faces: WgpuCrossfontFontFaces, font_size_px: f32) -> Self {
+    fn new(font_faces: WgpuCrossfontFontFaces, font_size_px: f32, baseline_y_px: i32) -> Self {
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             font_faces,
             font_size_px,
+            baseline_y_px,
         }
     }
 
@@ -747,13 +767,26 @@ impl CosmicTextClusterRasterizer {
         } else {
             CosmicStyle::Normal
         };
-        let mut drawn_pixels = self.draw_cluster(
-            &segment.text,
-            &primary_family,
-            weight,
-            style,
-            cell_height_px,
-        );
+        let mut drawn_pixels = if segment.ligature {
+            self.draw_ligature(&segment.text, &primary_family, weight, style)
+        } else {
+            self.draw_cluster(
+                &segment.text,
+                &primary_family,
+                weight,
+                style,
+                cell_height_px,
+            )
+        };
+        if drawn_pixels.is_empty() && segment.ligature {
+            drawn_pixels = self.draw_cluster(
+                &segment.text,
+                &primary_family,
+                weight,
+                style,
+                cell_height_px,
+            );
+        }
         if drawn_pixels.is_empty() && is_emoji_text_cluster(&segment.text) {
             let fallback_families: Vec<String> = self
                 .font_faces
@@ -793,6 +826,74 @@ impl CosmicTextClusterRasterizer {
         )
     }
 
+    fn draw_ligature(
+        &mut self,
+        text: &str,
+        family: &str,
+        weight: CosmicWeight,
+        style: CosmicStyle,
+    ) -> Vec<(i32, i32, [u8; 4])> {
+        let families = [fontdb_family(family)];
+        let query = fontdb::Query {
+            families: &families,
+            weight,
+            stretch: fontdb::Stretch::Normal,
+            style,
+        };
+        let Some(font_id) = self.font_system.db().query(&query) else {
+            return Vec::new();
+        };
+        let Some(font) = self.font_system.get_font(font_id) else {
+            return Vec::new();
+        };
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let features = [
+            rustybuzz_feature(b"liga"),
+            rustybuzz_feature(b"clig"),
+            rustybuzz_feature(b"calt"),
+        ];
+        let glyph_buffer = rustybuzz::shape(font.rustybuzz(), &features, buffer);
+        let scale = self.font_size_px / font.rustybuzz().units_per_em() as f32;
+        let mut pen_x = 0_i32;
+        let mut pen_y = 0_i32;
+        let mut drawn_pixels = Vec::new();
+
+        for (info, position) in glyph_buffer
+            .glyph_infos()
+            .iter()
+            .zip(glyph_buffer.glyph_positions())
+        {
+            let glyph_x = (pen_x + position.x_offset) as f32 * scale;
+            let glyph_y = -(pen_y + position.y_offset) as f32 * scale;
+            let (cache_key, physical_x, physical_y) = CacheKey::new(
+                font_id,
+                info.glyph_id as u16,
+                self.font_size_px,
+                (glyph_x, glyph_y),
+                CacheKeyFlags::empty(),
+            );
+            self.swash_cache.with_pixels(
+                &mut self.font_system,
+                cache_key,
+                Color::rgb(255, 255, 255),
+                |x, y, color| {
+                    drawn_pixels.push((
+                        physical_x + x,
+                        self.baseline_y_px + physical_y + y,
+                        color.as_rgba(),
+                    ));
+                },
+            );
+            pen_x += position.x_advance;
+            pen_y += position.y_advance;
+        }
+
+        drawn_pixels
+    }
+
     fn draw_cluster(
         &mut self,
         text: &str,
@@ -801,10 +902,16 @@ impl CosmicTextClusterRasterizer {
         style: CosmicStyle,
         cell_height_px: u32,
     ) -> Vec<(i32, i32, [u8; 4])> {
+        let mut font_features = FontFeatures::new();
+        font_features
+            .enable(FeatureTag::STANDARD_LIGATURES)
+            .enable(FeatureTag::CONTEXTUAL_LIGATURES)
+            .enable(FeatureTag::CONTEXTUAL_ALTERNATES);
         let attrs = Attrs::new()
             .family(cosmic_family(family))
             .weight(weight)
-            .style(style);
+            .style(style)
+            .font_features(font_features);
         let metrics = Metrics::new(self.font_size_px, cell_height_px as f32);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         let mut buffer = buffer.borrow_with(&mut self.font_system);
@@ -827,6 +934,14 @@ impl CosmicTextClusterRasterizer {
         );
         drawn_pixels
     }
+}
+
+fn rustybuzz_feature(tag: &[u8; 4]) -> rustybuzz::Feature {
+    rustybuzz::Feature::new(
+        rustybuzz::ttf_parser::Tag::from_bytes(tag),
+        1,
+        0..usize::MAX,
+    )
 }
 
 fn rasterized_cluster_from_pixels(
@@ -933,6 +1048,17 @@ fn cosmic_family(family: &str) -> Family<'_> {
         "cursive" => Family::Cursive,
         "fantasy" => Family::Fantasy,
         _ => Family::Name(family),
+    }
+}
+
+fn fontdb_family(family: &str) -> fontdb::Family<'_> {
+    match family.to_ascii_lowercase().as_str() {
+        "monospace" => fontdb::Family::Monospace,
+        "sans-serif" => fontdb::Family::SansSerif,
+        "serif" => fontdb::Family::Serif,
+        "cursive" => fontdb::Family::Cursive,
+        "fantasy" => fontdb::Family::Fantasy,
+        _ => fontdb::Family::Name(family),
     }
 }
 

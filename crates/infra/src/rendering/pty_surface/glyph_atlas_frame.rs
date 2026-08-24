@@ -14,7 +14,9 @@ use crate::rendering::pty_surface::{
     glyph_atlas_texture::{
         WgpuTerminalGlyphAtlasTextureFactory, WgpuTerminalGlyphAtlasUploadBytes,
     },
-    text_shaping::{TerminalTextSegment, cursor_fallback_segments, terminal_text_segments},
+    text_shaping::{
+        TerminalTextSegment, cursor_fallback_segments, terminal_text_segments_with_ligatures,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +102,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         self.source.kind()
     }
 
+    pub fn ligatures(&self) -> bool {
+        self.source.ligatures()
+    }
+
     pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
         self.cache.borrow_mut().remove(&target_id).is_some()
     }
@@ -115,7 +121,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         let run_count = texts.len();
         let char_count = texts.iter().map(|text| text.chars().count()).sum();
 
-        let segments = collect_text_segments(surface_snapshot);
+        let segments = collect_text_segments(surface_snapshot, self.ligatures());
         let glyphs = match self.source.kind() {
             WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => collect_glyphs(surface_snapshot),
             WgpuTerminalGlyphAtlasSourceKind::Crossfont => segments.keys().copied().collect(),
@@ -199,6 +205,13 @@ impl WgpuTerminalGlyphAtlasSource {
         match self {
             Self::Debug5x7(_) => WgpuTerminalGlyphAtlasSourceKind::Debug5x7,
             Self::Crossfont(_) => WgpuTerminalGlyphAtlasSourceKind::Crossfont,
+        }
+    }
+
+    pub fn ligatures(&self) -> bool {
+        match self {
+            Self::Debug5x7(_) => false,
+            Self::Crossfont(builder) => builder.ligatures(),
         }
     }
 
@@ -289,19 +302,21 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
 
 fn collect_text_segments(
     surface_snapshot: &RenderSurfaceSnapshot,
+    ligatures: bool,
 ) -> BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment> {
     let mut segments = BTreeMap::new();
     for row in &surface_snapshot.rows {
         for run in &row.runs {
-            for segment in terminal_text_segments(&run.text, run.style) {
+            for segment in terminal_text_segments_with_ligatures(&run.text, run.style, ligatures) {
                 insert_text_segment(&mut segments, segment);
             }
         }
     }
     if let Some(preedit) = surface_snapshot.ime_preedit.as_ref() {
-        for segment in terminal_text_segments(
+        for segment in terminal_text_segments_with_ligatures(
             &preedit.text,
             germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
+            ligatures,
         ) {
             insert_text_segment(&mut segments, segment);
         }

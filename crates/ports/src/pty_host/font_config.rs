@@ -12,6 +12,7 @@ pub struct TerminalFontConfig {
     fallbacks: Vec<TerminalFontFamily>,
     size: TerminalFontSize,
     bold_weight: TerminalFontWeight,
+    ligatures: bool,
 }
 
 impl TerminalFontConfig {
@@ -24,6 +25,7 @@ impl TerminalFontConfig {
             fallbacks: Vec::new(),
             size,
             bold_weight: TerminalFontWeight::DEFAULT_BOLD,
+            ligatures: true,
         }
     }
 
@@ -59,11 +61,19 @@ impl TerminalFontConfig {
         self.bold_weight
     }
 
+    pub const fn ligatures(&self) -> bool {
+        self.ligatures
+    }
+
     pub fn with_bold_weight(self, bold_weight: TerminalFontWeight) -> Self {
         Self {
             bold_weight,
             ..self
         }
+    }
+
+    pub fn with_ligatures(self, ligatures: bool) -> Self {
+        Self { ligatures, ..self }
     }
 
     pub fn with_faces(

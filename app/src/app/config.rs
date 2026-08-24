@@ -102,7 +102,8 @@ impl GerminalConfig {
             normal.family().clone(),
             TerminalFontSize::new(self.font.size),
         )
-        .with_faces(normal, bold, italic, bold_italic, fallbacks);
+        .with_faces(normal, bold, italic, bold_italic, fallbacks)
+        .with_ligatures(self.font.ligatures);
 
         TerminalProfile::new(
             font_config.family().clone(),
@@ -467,6 +468,7 @@ pub struct FontConfig {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<String>,
     pub size: f32,
+    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
@@ -478,6 +480,7 @@ impl Default for FontConfig {
             bold_italic: None,
             fallback: Vec::new(),
             size: 16.0,
+            ligatures: true,
         }
     }
 }
@@ -847,6 +850,7 @@ mod tests {
         assert_eq!(value["window"]["decorations"].as_bool(), Some(true));
         assert!(value.get("background").is_none());
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
+        assert_eq!(value["font"]["ligatures"].as_bool(), Some(true));
         assert_eq!(
             value["font"]["normal"]["family"].as_str(),
             Some(TerminalFontFamily::default().name())
@@ -1069,6 +1073,7 @@ mod tests {
             font.bold_italic = { family = "JetBrains Mono", style = "Bold Italic" }
             font.fallback = ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono"]
             font.size = 18
+            font.ligatures = false
             "#,
         )
         .unwrap();
@@ -1077,6 +1082,7 @@ mod tests {
         assert_eq!(profile.font_family().name(), "JetBrains Mono");
         assert_eq!(profile.font_size().logical_px(), 18.0);
         let font = profile.font_config();
+        assert!(!font.ligatures());
         assert_eq!(font.normal().style(), Some("Regular"));
         assert_eq!(font.bold().and_then(|face| face.style()), Some("Bold"));
         assert_eq!(font.italic().and_then(|face| face.style()), Some("Italic"));

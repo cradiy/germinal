@@ -142,6 +142,7 @@ impl WgpuTerminalFrameBuilder {
                 self.glyph_atlas_frame_builder.source_kind()
                     == WgpuTerminalGlyphAtlasSourceKind::Crossfont,
             );
+            renderer.set_ligatures(self.glyph_atlas_frame_builder.ligatures());
 
             renderer.render_surface(surface_snapshot);
             let render_surface_time = render_surface_started_at.elapsed();

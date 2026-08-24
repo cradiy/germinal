@@ -29,7 +29,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::rendering::pty_surface::{
     glyph_atlas::WgpuTerminalGlyphKey,
-    text_shaping::{terminal_grapheme_cell_width, terminal_text_segments},
+    text_shaping::{terminal_grapheme_cell_width, terminal_text_segments_with_ligatures},
 };
 
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
@@ -41,6 +41,7 @@ const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
     text_shaping: Cell<bool>,
+    ligatures: Cell<bool>,
 }
 
 impl WgpuRendererBackend {
@@ -51,6 +52,7 @@ impl WgpuRendererBackend {
                 ..WgpuRendererState::default()
             }),
             text_shaping: Cell::new(false),
+            ligatures: Cell::new(true),
         }
     }
 
@@ -60,6 +62,10 @@ impl WgpuRendererBackend {
 
     pub fn set_text_shaping(&self, enabled: bool) {
         self.text_shaping.set(enabled);
+    }
+
+    pub fn set_ligatures(&self, enabled: bool) {
+        self.ligatures.set(enabled);
     }
 
     pub fn with_quads<T>(&self, f: impl FnOnce(&[WgpuQuadDrawItem]) -> T) -> T {
@@ -103,7 +109,8 @@ impl RendererBackend for WgpuRendererBackend {
 
         for row_y in dirty_rows {
             if let Some(row) = snapshot_rows.get(&row_y) {
-                let rendered_row = render_row(row, config, self.text_shaping.get());
+                let rendered_row =
+                    render_row(row, config, self.text_shaping.get(), self.ligatures.get());
                 inner
                     .draw_rows
                     .insert(row_y, Arc::clone(&rendered_row.draw_row));
@@ -124,6 +131,7 @@ impl RendererBackend for WgpuRendererBackend {
                 snapshot.default_background,
                 config,
                 self.text_shaping.get(),
+                self.ligatures.get(),
             );
             if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
             {
@@ -205,6 +213,7 @@ fn render_ime_preedit(
     default_background: RgbColorDto,
     config: WgpuRendererConfig,
     text_shaping: bool,
+    ligatures: bool,
 ) -> Vec<WgpuRenderedRow> {
     if preedit.text.is_empty() || config.grid_columns == 0 || config.grid_rows == 0 {
         return Vec::new();
@@ -285,7 +294,7 @@ fn render_ime_preedit(
     }
 
     rows.values()
-        .map(|row| render_row(row, config, text_shaping))
+        .map(|row| render_row(row, config, text_shaping, ligatures))
         .collect()
 }
 
@@ -346,9 +355,10 @@ fn render_row(
     row: &RenderSurfaceRowSnapshot,
     config: WgpuRendererConfig,
     text_shaping: bool,
+    ligatures: bool,
 ) -> WgpuRenderedRow {
     if text_shaping {
-        return render_shaped_row(row, config);
+        return render_shaped_row(row, config, ligatures);
     }
 
     let mut draw_row = WgpuDrawRow {
@@ -422,6 +432,7 @@ fn render_row(
 fn render_shaped_row(
     row: &RenderSurfaceRowSnapshot,
     config: WgpuRendererConfig,
+    ligatures: bool,
 ) -> WgpuRenderedRow {
     let mut draw_row = WgpuDrawRow {
         y: row.y,
@@ -434,7 +445,7 @@ fn render_shaped_row(
     for run in &row.runs {
         let mut x = run.x;
         let mut previous_glyph_x = None;
-        for segment in terminal_text_segments(&run.text, run.style) {
+        for segment in terminal_text_segments_with_ligatures(&run.text, run.style, ligatures) {
             let segment_x = if segment.cell_width == 0 {
                 previous_glyph_x.unwrap_or(x)
             } else {

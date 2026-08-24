@@ -283,6 +283,14 @@ the selected primary face; the system font fallback remains the final fallback. 
 the display scale automatically when a window starts on or moves between displays with different
 pixel densities.
 
+Programming and standard font ligatures are enabled by default in every terminal application,
+including editors such as Neovim. Disable them when a font or workflow requires separate glyphs:
+
+```toml
+[font]
+ligatures = false
+```
+
 ## Background opacity
 
 Window background opacity is configured independently from the terminal colors:
