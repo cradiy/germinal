@@ -419,6 +419,23 @@ impl AlacrittyTerminalStore {
         true
     }
 
+    pub fn advance_kitty_animations(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        now: Instant,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(state) = inner.get_mut(&render_target_id) else {
+            return false;
+        };
+        if !state.graphics.advance_animations(now) {
+            return false;
+        }
+        state.latest_seq = seq;
+        true
+    }
+
     pub fn start_selection(
         &self,
         render_target_id: RenderTargetId,
@@ -2512,6 +2529,29 @@ mod tests {
             store.take_pending_pty_writes(target_id),
             vec![b"\x1b_Gi=7,p=2;OK\x1b\\".to_vec()]
         );
+    }
+
+    #[test]
+    fn advances_kitty_animation_without_additional_pty_output() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(2);
+        let root = STANDARD.encode([255, 0, 0, 255]);
+        let second = STANDARD.encode([0, 255, 0, 255]);
+        let bytes = format!(
+            "\x1b_Ga=T,f=32,s=1,v=1,i=7,C=1;{root}\x1b\\\
+             \x1b_Ga=f,f=32,s=1,v=1,i=7,z=10;{second}\x1b\\\
+             \x1b_Ga=a,i=7,r=1,z=10,s=3\x1b\\"
+        );
+        store.apply_bytes(target_id, Seq::new(1), bytes.as_bytes());
+
+        assert!(store.advance_kitty_animations(
+            target_id,
+            Seq::new(2),
+            Instant::now() + std::time::Duration::from_millis(20),
+        ));
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.latest_seq, Seq::new(2));
+        assert_eq!(&*snapshot.image_surfaces[0].rgba, &[0, 255, 0, 255]);
     }
 
     #[test]

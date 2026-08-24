@@ -4,6 +4,7 @@ use std::{
     io::{Cursor, Read, Seek, SeekFrom},
     path::Path,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -79,8 +80,11 @@ impl KittyCommand {
         }
     }
 
-    fn has_only_chunk_continuation_keys(&self) -> bool {
-        self.control.keys().all(|key| matches!(key, b'm' | b'q'))
+    fn has_only_chunk_continuation_keys(&self, action: char) -> bool {
+        self.control
+            .keys()
+            .all(|key| matches!(key, b'm' | b'q') || (action == 'f' && *key == b'a'))
+            && (action != 'f' || self.control.get(&b'a').is_some_and(|value| value == "f"))
     }
 }
 
@@ -190,11 +194,56 @@ fn flush_visible(events: &mut Vec<KittyStreamEvent>, visible: &mut Vec<u8>) {
 #[derive(Debug, Clone)]
 struct KittyImage {
     key: u64,
-    generation: u64,
     image_id: u32,
     width_px: u32,
     height_px: u32,
+    frames: Vec<KittyAnimationFrame>,
+    animation: KittyAnimation,
+}
+
+#[derive(Debug, Clone)]
+struct KittyAnimationFrame {
+    generation: u64,
     rgba: Arc<[u8]>,
+    gap_ms: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KittyAnimationState {
+    Stopped,
+    Loading,
+    Running,
+}
+
+#[derive(Debug, Clone)]
+struct KittyAnimation {
+    state: KittyAnimationState,
+    current_frame: usize,
+    loop_limit: Option<u32>,
+    completed_loops: u32,
+    next_frame_at: Option<Instant>,
+}
+
+impl Default for KittyAnimation {
+    fn default() -> Self {
+        Self {
+            state: KittyAnimationState::Stopped,
+            current_frame: 0,
+            loop_limit: None,
+            completed_loops: 0,
+            next_frame_at: None,
+        }
+    }
+}
+
+impl KittyImage {
+    fn current_frame(&self) -> &KittyAnimationFrame {
+        &self.frames[self.animation.current_frame.min(self.frames.len() - 1)]
+    }
+
+    fn byte_len(&self) -> usize {
+        self.frames.iter().map(|frame| frame.rgba.len()).sum()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +387,14 @@ pub(crate) struct KittyGraphicsState {
 }
 
 impl KittyGraphicsState {
+    pub(crate) fn advance_animations(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for image in self.images.values_mut() {
+            changed |= advance_image_animation(image, now);
+        }
+        changed
+    }
+
     pub(crate) fn enter_alternate_screen(&mut self) {
         if self.primary_screen.is_some() {
             return;
@@ -517,7 +574,12 @@ impl KittyGraphicsState {
                 self.pending = None;
                 return self.delete(command, cursor);
             }
-            if !command.has_only_chunk_continuation_keys() {
+            let pending_action = self
+                .pending
+                .as_ref()
+                .map(|pending| pending.command.char(b'a', 't'))
+                .unwrap_or('t');
+            if !command.has_only_chunk_continuation_keys(pending_action) {
                 self.pending = None;
                 return Err(KittyGraphicsError::InvalidChunk);
             }
@@ -539,7 +601,7 @@ impl KittyGraphicsState {
         }
 
         let action = command.char(b'a', 't');
-        if matches!(action, 't' | 'T' | 'q') && command.u32(b'm', 0)? == 1 {
+        if matches!(action, 't' | 'T' | 'q' | 'f') && command.u32(b'm', 0)? == 1 {
             let mut encoded_payload = Vec::new();
             append_encoded_payload(&mut encoded_payload, &command.payload)?;
             command.payload.clear();
@@ -552,6 +614,9 @@ impl KittyGraphicsState {
 
         match action {
             't' | 'T' | 'q' => self.transmit(command, cursor, cell_size_px, action),
+            'f' => self.transmit_animation_frame(command),
+            'a' => self.control_animation(command, Instant::now()),
+            'c' => self.compose_animation_frames(command),
             'p' => self.place(command, cursor, cell_size_px),
             'd' => self.delete(command, cursor),
             _ => Err(KittyGraphicsError::UnsupportedAction),
@@ -603,6 +668,259 @@ impl KittyGraphicsState {
         Ok(KittyCommandResult {
             response: response_for(image_id, image_number, placement_id, "OK"),
             cursor_move,
+        })
+    }
+
+    fn transmit_animation_frame(
+        &mut self,
+        command: KittyCommand,
+    ) -> Result<KittyCommandResult, KittyGraphicsError> {
+        let image = self.resolve_image(&command)?;
+        let encoded = transmission_bytes(&command)?;
+        let bytes = if command.char(b'o', '\0') == 'z' {
+            decompress_zlib(&encoded)?
+        } else if command.control.contains_key(&b'o') {
+            return Err(KittyGraphicsError::UnsupportedCompression);
+        } else {
+            encoded
+        };
+        let decoded = decode_image(&command, &bytes)?;
+        let destination_x = command.u32(b'x', 0)?;
+        let destination_y = command.u32(b'y', 0)?;
+        let edit_frame = command.u32(b'r', 0)?;
+        let base_frame = command.u32(b'c', 0)?;
+        let composition = command.u32(b'X', 0)?;
+        if composition > 1 {
+            return Err(KittyGraphicsError::InvalidControl);
+        }
+        let frame_gap = nonzero_frame_gap(&command)?;
+
+        let (width_px, height_px, existing_frames) = {
+            let image = self
+                .images
+                .get(&image.image_key)
+                .ok_or(KittyGraphicsError::ImageNotFound)?;
+            (image.width_px, image.height_px, image.frames.len())
+        };
+        validate_rect(
+            destination_x,
+            destination_y,
+            decoded.width_px,
+            decoded.height_px,
+            width_px,
+            height_px,
+        )?;
+        let edit_index = optional_frame_index(edit_frame, existing_frames)?;
+        let base_index = optional_frame_index(base_frame, existing_frames)?;
+        let mut frame = if let Some(index) = edit_index {
+            self.images[&image.image_key].frames[index].rgba.to_vec()
+        } else if let Some(index) = base_index {
+            self.images[&image.image_key].frames[index].rgba.to_vec()
+        } else {
+            solid_frame(width_px, height_px, command.u32(b'Y', 0)?)?
+        };
+        composite_rgba_rect(
+            &mut frame,
+            width_px,
+            (destination_x, destination_y),
+            &decoded.rgba,
+            (decoded.width_px, decoded.height_px),
+            composition == 1,
+        )?;
+
+        let generation = self.allocate_generation();
+        let now = Instant::now();
+        let image_state = self
+            .images
+            .get_mut(&image.image_key)
+            .ok_or(KittyGraphicsError::ImageNotFound)?;
+        if let Some(index) = edit_index {
+            let existing_gap = image_state.frames[index].gap_ms;
+            image_state.frames[index] = KittyAnimationFrame {
+                generation,
+                rgba: frame.into(),
+                gap_ms: frame_gap.or(existing_gap),
+            };
+            if index == image_state.animation.current_frame && frame_gap.is_some() {
+                schedule_next_frame(image_state, now);
+            }
+        } else {
+            let was_loading_at_end = image_state.animation.state == KittyAnimationState::Loading
+                && image_state.animation.current_frame + 1 == image_state.frames.len()
+                && image_state.animation.next_frame_at.is_none();
+            image_state.frames.push(KittyAnimationFrame {
+                generation,
+                rgba: frame.into(),
+                gap_ms: frame_gap,
+            });
+            self.total_bytes = self
+                .total_bytes
+                .saturating_add(frame_byte_len(width_px, height_px)?);
+            if was_loading_at_end {
+                image_state.animation.next_frame_at = Some(now);
+            }
+        }
+        self.evict_to_quota();
+
+        Ok(KittyCommandResult {
+            response: response_for(image.image_id, image.image_number, 0, "OK"),
+            cursor_move: None,
+        })
+    }
+
+    fn control_animation(
+        &mut self,
+        command: KittyCommand,
+        now: Instant,
+    ) -> Result<KittyCommandResult, KittyGraphicsError> {
+        let image = self.resolve_image(&command)?;
+        let current_frame = command.u32(b'c', 0)?;
+        let affected_frame = command.u32(b'r', 0)?;
+        let state = command.u32(b's', 0)?;
+        let loops = command.u32(b'v', 0)?;
+        if state > 3 {
+            return Err(KittyGraphicsError::InvalidControl);
+        }
+
+        let image_state = self
+            .images
+            .get_mut(&image.image_key)
+            .ok_or(KittyGraphicsError::ImageNotFound)?;
+        if current_frame != 0 {
+            image_state.animation.current_frame =
+                required_frame_index(current_frame, image_state.frames.len())?;
+        }
+        if affected_frame != 0 {
+            let index = required_frame_index(affected_frame, image_state.frames.len())?;
+            if let Some(gap) = nonzero_frame_gap(&command)? {
+                image_state.frames[index].gap_ms = Some(gap);
+            }
+        }
+        if loops != 0 {
+            image_state.animation.loop_limit = (loops != 1).then_some(loops - 1);
+            image_state.animation.completed_loops = 0;
+        }
+        match state {
+            0 => {}
+            1 => {
+                image_state.animation.state = KittyAnimationState::Stopped;
+                image_state.animation.completed_loops = 0;
+                image_state.animation.next_frame_at = None;
+            }
+            2 => {
+                image_state.animation.state = KittyAnimationState::Loading;
+                image_state.animation.completed_loops = 0;
+                schedule_next_frame(image_state, now);
+            }
+            3 => {
+                image_state.animation.state = KittyAnimationState::Running;
+                image_state.animation.completed_loops = 0;
+                schedule_next_frame(image_state, now);
+            }
+            _ => unreachable!(),
+        }
+        let affected_current_frame = affected_frame != 0
+            && required_frame_index(affected_frame, image_state.frames.len())?
+                == image_state.animation.current_frame;
+        if state == 0 && (current_frame != 0 || affected_current_frame) {
+            schedule_next_frame(image_state, now);
+        }
+
+        Ok(KittyCommandResult {
+            response: response_for(image.image_id, image.image_number, 0, "OK"),
+            cursor_move: None,
+        })
+    }
+
+    fn compose_animation_frames(
+        &mut self,
+        command: KittyCommand,
+    ) -> Result<KittyCommandResult, KittyGraphicsError> {
+        let image = self.resolve_image(&command)?;
+        let source_frame = command.u32(b'r', 0)?;
+        let destination_frame = command.u32(b'c', 0)?;
+        if source_frame == 0 || destination_frame == 0 {
+            return Err(KittyGraphicsError::InvalidControl);
+        }
+        let source_x = command.u32(b'X', 0)?;
+        let source_y = command.u32(b'Y', 0)?;
+        let destination_x = command.u32(b'x', 0)?;
+        let destination_y = command.u32(b'y', 0)?;
+        let replace = match command.u32(b'C', 0)? {
+            0 => false,
+            1 => true,
+            _ => return Err(KittyGraphicsError::InvalidControl),
+        };
+
+        let (width_px, height_px, source_index, destination_index) = {
+            let image_state = self
+                .images
+                .get(&image.image_key)
+                .ok_or(KittyGraphicsError::ImageNotFound)?;
+            (
+                image_state.width_px,
+                image_state.height_px,
+                required_frame_index(source_frame, image_state.frames.len())?,
+                required_frame_index(destination_frame, image_state.frames.len())?,
+            )
+        };
+        let rect_width = command.u32(b'w', width_px)?;
+        let rect_height = command.u32(b'h', height_px)?;
+        validate_rect(
+            source_x,
+            source_y,
+            rect_width,
+            rect_height,
+            width_px,
+            height_px,
+        )?;
+        validate_rect(
+            destination_x,
+            destination_y,
+            rect_width,
+            rect_height,
+            width_px,
+            height_px,
+        )?;
+        if source_index == destination_index
+            && rects_overlap(
+                (source_x, source_y, rect_width, rect_height),
+                (destination_x, destination_y, rect_width, rect_height),
+            )
+        {
+            return Err(KittyGraphicsError::InvalidControl);
+        }
+
+        let source = extract_rgba_rect(
+            &self.images[&image.image_key].frames[source_index].rgba,
+            width_px,
+            source_x,
+            source_y,
+            rect_width,
+            rect_height,
+        )?;
+        let mut destination = self.images[&image.image_key].frames[destination_index]
+            .rgba
+            .to_vec();
+        composite_rgba_rect(
+            &mut destination,
+            width_px,
+            (destination_x, destination_y),
+            &source,
+            (rect_width, rect_height),
+            replace,
+        )?;
+        let generation = self.allocate_generation();
+        let image_state = self
+            .images
+            .get_mut(&image.image_key)
+            .ok_or(KittyGraphicsError::ImageNotFound)?;
+        image_state.frames[destination_index].generation = generation;
+        image_state.frames[destination_index].rgba = destination.into();
+
+        Ok(KittyCommandResult {
+            response: response_for(image.image_id, image.image_number, 0, "OK"),
+            cursor_move: None,
         })
     }
 
@@ -671,6 +989,23 @@ impl KittyGraphicsState {
                         self.remove_image(image_key);
                     }
                 }
+            }
+            'f' => {
+                let image = self.resolve_image(&command)?;
+                let image_state = self
+                    .images
+                    .get_mut(&image.image_key)
+                    .ok_or(KittyGraphicsError::ImageNotFound)?;
+                let removed_bytes = image_state
+                    .frames
+                    .iter()
+                    .skip(1)
+                    .map(|frame| frame.rgba.len())
+                    .sum::<usize>();
+                image_state.frames.truncate(1);
+                image_state.animation = KittyAnimation::default();
+                self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
+                response_image_id = image.image_id;
             }
             'c' => {
                 self.delete_physical_placements(
@@ -773,11 +1108,15 @@ impl KittyGraphicsState {
             key,
             KittyImage {
                 key,
-                generation: self.next_generation,
                 image_id,
                 width_px: decoded.width_px,
                 height_px: decoded.height_px,
-                rgba: decoded.rgba.into(),
+                frames: vec![KittyAnimationFrame {
+                    generation: self.next_generation,
+                    rgba: decoded.rgba.into(),
+                    gap_ms: None,
+                }],
+                animation: KittyAnimation::default(),
             },
         );
         self.insertion_order.push_back(key);
@@ -802,6 +1141,11 @@ impl KittyGraphicsState {
             }
         }
         Err(KittyGraphicsError::StorageFull)
+    }
+
+    fn allocate_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.saturating_add(1).max(1);
+        self.next_generation
     }
 
     fn resolve_image(
@@ -1169,12 +1513,13 @@ impl KittyGraphicsState {
             .values()
             .filter_map(|placement| {
                 let image = self.images.get(&placement.image_key)?;
+                let frame = image.current_frame();
                 let &(x_cell, y_cell) = positions.get(&placement.key)?;
                 let (clip_top_cell, clip_bottom_cell) = self.placement_clip_cells(placement.key);
                 Some(RenderSurfaceImageSnapshot {
                     id: format!("{}:{}", image.key, placement.key),
                     image_id: placement.image_id,
-                    image_generation: image.generation,
+                    image_generation: frame.generation,
                     x_cell: signed_cell_to_i32(x_cell),
                     y_cell: signed_cell_to_i32(y_cell),
                     x_offset_px: placement.x_offset_px,
@@ -1190,7 +1535,7 @@ impl KittyGraphicsState {
                     clip_top_cell: clip_top_cell.map(signed_cell_to_i32),
                     clip_bottom_cell: clip_bottom_cell.map(signed_cell_to_i32),
                     z_index: placement.z_index,
-                    rgba: Arc::clone(&image.rgba),
+                    rgba: Arc::clone(&frame.rgba),
                 })
             })
             .collect();
@@ -1241,6 +1586,7 @@ impl KittyGraphicsState {
             let Some(image) = self.images.get(&placement.image_key) else {
                 continue;
             };
+            let frame = image.current_frame();
             while let Some(start) = remaining.iter().next().copied() {
                 let mut stack = vec![start];
                 remaining.remove(&start);
@@ -1270,7 +1616,7 @@ impl KittyGraphicsState {
                 snapshots.push(RenderSurfaceImageSnapshot {
                     id: format!("virtual:{placement_key}:{min_x}:{min_y}"),
                     image_id: placement.image_id,
-                    image_generation: image.generation,
+                    image_generation: frame.generation,
                     x_cell: i32::try_from(min_x).unwrap_or(i32::MAX),
                     y_cell: i32::try_from(min_y).unwrap_or(i32::MAX),
                     x_offset_px: 0,
@@ -1286,7 +1632,7 @@ impl KittyGraphicsState {
                     clip_top_cell: None,
                     clip_bottom_cell: None,
                     z_index: placement.z_index,
-                    rgba: Arc::clone(&image.rgba),
+                    rgba: Arc::clone(&frame.rgba),
                 });
             }
         }
@@ -1383,7 +1729,7 @@ impl KittyGraphicsState {
             .collect();
         self.remove_placement_trees(roots, false);
         if let Some(image) = self.images.remove(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(image.rgba.len());
+            self.total_bytes = self.total_bytes.saturating_sub(image.byte_len());
         }
         self.image_ids.retain(|_, value| *value != key);
         self.image_numbers.retain(|_, keys| {
@@ -1392,6 +1738,232 @@ impl KittyGraphicsState {
         });
         self.remove_unreferenced_images(inactive_descendants);
     }
+}
+
+fn schedule_next_frame(image: &mut KittyImage, now: Instant) {
+    if image.animation.state == KittyAnimationState::Stopped {
+        image.animation.next_frame_at = None;
+        return;
+    }
+    image.animation.next_frame_at = match image.current_frame().gap_ms {
+        Some(gap) if gap > 0 => Some(now + Duration::from_millis(gap as u64)),
+        Some(gap) if gap < 0 => Some(now),
+        _ => None,
+    };
+}
+
+fn advance_image_animation(image: &mut KittyImage, now: Instant) -> bool {
+    let mut changed = false;
+    let max_transitions = image.frames.len().saturating_add(1);
+    for _ in 0..max_transitions {
+        let Some(deadline) = image.animation.next_frame_at else {
+            break;
+        };
+        if deadline > now {
+            break;
+        }
+
+        if image.animation.current_frame + 1 < image.frames.len() {
+            image.animation.current_frame += 1;
+            changed = true;
+        } else {
+            match image.animation.state {
+                KittyAnimationState::Stopped => {
+                    image.animation.next_frame_at = None;
+                    break;
+                }
+                KittyAnimationState::Loading => {
+                    image.animation.next_frame_at = None;
+                    break;
+                }
+                KittyAnimationState::Running => {
+                    if image
+                        .animation
+                        .loop_limit
+                        .is_some_and(|limit| image.animation.completed_loops >= limit)
+                    {
+                        image.animation.state = KittyAnimationState::Stopped;
+                        image.animation.next_frame_at = None;
+                        break;
+                    }
+                    image.animation.completed_loops =
+                        image.animation.completed_loops.saturating_add(1);
+                    changed |= image.animation.current_frame != 0;
+                    image.animation.current_frame = 0;
+                }
+            }
+        }
+        schedule_next_frame(image, now);
+        if image.animation.next_frame_at != Some(now) {
+            break;
+        }
+    }
+    changed
+}
+
+fn nonzero_frame_gap(command: &KittyCommand) -> Result<Option<i32>, KittyGraphicsError> {
+    command.i32(b'z', 0).map(|gap| (gap != 0).then_some(gap))
+}
+
+fn required_frame_index(number: u32, frame_count: usize) -> Result<usize, KittyGraphicsError> {
+    let index =
+        usize::try_from(number.saturating_sub(1)).map_err(|_| KittyGraphicsError::ImageNotFound)?;
+    if number == 0 || index >= frame_count {
+        return Err(KittyGraphicsError::ImageNotFound);
+    }
+    Ok(index)
+}
+
+fn optional_frame_index(
+    number: u32,
+    frame_count: usize,
+) -> Result<Option<usize>, KittyGraphicsError> {
+    (number != 0)
+        .then(|| required_frame_index(number, frame_count))
+        .transpose()
+}
+
+fn frame_byte_len(width: u32, height: u32) -> Result<usize, KittyGraphicsError> {
+    usize::try_from(u64::from(width) * u64::from(height) * 4)
+        .map_err(|_| KittyGraphicsError::ImageTooLarge)
+}
+
+fn solid_frame(width: u32, height: u32, rgba: u32) -> Result<Vec<u8>, KittyGraphicsError> {
+    let pixel = rgba.to_be_bytes();
+    let mut frame = Vec::with_capacity(frame_byte_len(width, height)?);
+    for _ in 0..u64::from(width) * u64::from(height) {
+        frame.extend_from_slice(&pixel);
+    }
+    Ok(frame)
+}
+
+fn validate_rect(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    image_width: u32,
+    image_height: u32,
+) -> Result<(), KittyGraphicsError> {
+    if width == 0
+        || height == 0
+        || x.checked_add(width).is_none_or(|right| right > image_width)
+        || y.checked_add(height)
+            .is_none_or(|bottom| bottom > image_height)
+    {
+        return Err(KittyGraphicsError::InvalidControl);
+    }
+    Ok(())
+}
+
+fn composite_rgba_rect(
+    destination: &mut [u8],
+    destination_width: u32,
+    destination_origin: (u32, u32),
+    source: &[u8],
+    source_size: (u32, u32),
+    replace: bool,
+) -> Result<(), KittyGraphicsError> {
+    let (destination_x, destination_y) = destination_origin;
+    let (source_width, source_height) = source_size;
+    let expected_destination = frame_byte_len(
+        destination_width,
+        u32::try_from(destination.len() / 4)
+            .ok()
+            .and_then(|pixels| pixels.checked_div(destination_width))
+            .ok_or(KittyGraphicsError::InvalidPayload)?,
+    )?;
+    if destination.len() != expected_destination
+        || source.len() != frame_byte_len(source_width, source_height)?
+    {
+        return Err(KittyGraphicsError::InvalidPayload);
+    }
+    let destination_width =
+        usize::try_from(destination_width).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let destination_x =
+        usize::try_from(destination_x).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let destination_y =
+        usize::try_from(destination_y).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let source_width =
+        usize::try_from(source_width).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let source_height =
+        usize::try_from(source_height).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+
+    for row in 0..source_height {
+        for column in 0..source_width {
+            let source_offset = (row * source_width + column) * 4;
+            let destination_offset =
+                ((destination_y + row) * destination_width + destination_x + column) * 4;
+            if replace {
+                destination[destination_offset..destination_offset + 4]
+                    .copy_from_slice(&source[source_offset..source_offset + 4]);
+            } else {
+                alpha_blend_pixel(
+                    &mut destination[destination_offset..destination_offset + 4],
+                    &source[source_offset..source_offset + 4],
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn alpha_blend_pixel(destination: &mut [u8], source: &[u8]) {
+    let source_alpha = u32::from(source[3]);
+    let destination_alpha = u32::from(destination[3]);
+    let inverse_source_alpha = 255 - source_alpha;
+    let output_alpha = source_alpha + (destination_alpha * inverse_source_alpha + 127) / 255;
+    if output_alpha == 0 {
+        destination.copy_from_slice(&[0, 0, 0, 0]);
+        return;
+    }
+    for channel in 0..3 {
+        let source_premultiplied = u32::from(source[channel]) * source_alpha;
+        let destination_premultiplied = u32::from(destination[channel]) * destination_alpha;
+        let output_premultiplied =
+            source_premultiplied + (destination_premultiplied * inverse_source_alpha + 127) / 255;
+        destination[channel] =
+            u8::try_from((output_premultiplied + output_alpha / 2) / output_alpha)
+                .unwrap_or(u8::MAX);
+    }
+    destination[3] = u8::try_from(output_alpha).unwrap_or(u8::MAX);
+}
+
+fn extract_rgba_rect(
+    source: &[u8],
+    source_width: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, KittyGraphicsError> {
+    let source_width =
+        usize::try_from(source_width).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let x = usize::try_from(x).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let y = usize::try_from(y).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let width = usize::try_from(width).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let height = usize::try_from(height).map_err(|_| KittyGraphicsError::ImageTooLarge)?;
+    let mut extracted = Vec::with_capacity(width.saturating_mul(height).saturating_mul(4));
+    for row in 0..height {
+        let start = ((y + row) * source_width + x) * 4;
+        let end = start + width * 4;
+        let pixels = source
+            .get(start..end)
+            .ok_or(KittyGraphicsError::InvalidControl)?;
+        extracted.extend_from_slice(pixels);
+    }
+    Ok(extracted)
+}
+
+fn rects_overlap(first: (u32, u32, u32, u32), second: (u32, u32, u32, u32)) -> bool {
+    let first_right = first.0.saturating_add(first.2);
+    let first_bottom = first.1.saturating_add(first.3);
+    let second_right = second.0.saturating_add(second.2);
+    let second_bottom = second.1.saturating_add(second.3);
+    first.0 < second_right
+        && second.0 < first_right
+        && first.1 < second_bottom
+        && second.1 < first_bottom
 }
 
 fn matching_placement_key(
@@ -2597,5 +3169,160 @@ mod tests {
         assert_eq!(snapshots.len(), 1);
         assert_eq!((snapshots[0].x_cell, snapshots[0].y_cell), (4, 3));
         assert_eq!((snapshots[0].columns, snapshots[0].rows), (2, 2));
+    }
+
+    #[test]
+    fn animation_frame_transmission_composes_partial_pixels_on_a_base_frame() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255, 255, 0, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=2,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        let patch = STANDARD.encode([0, 255, 0, 255]);
+
+        let result = graphics.handle(
+            command("a=f,f=32,s=1,v=1,i=17,c=1,x=1,y=0,z=25", patch.as_bytes()),
+            (0, 0),
+        );
+        assert_eq!(result.response, Some(b"\x1b_Gi=17;OK\x1b\\".to_vec()));
+
+        graphics.handle(command("a=a,i=17,c=2", b""), (0, 0));
+        assert_eq!(
+            &*graphics.snapshots(&[])[0].rgba,
+            &[255, 0, 0, 255, 0, 255, 0, 255]
+        );
+    }
+
+    #[test]
+    fn chunked_animation_frame_requires_and_accepts_repeated_frame_action() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=1,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        let frame = STANDARD.encode([0, 255, 0, 255]);
+        let split = 4;
+
+        assert!(
+            graphics
+                .handle(
+                    command("a=f,f=32,s=1,v=1,i=17,m=1", &frame.as_bytes()[..split]),
+                    (0, 0),
+                )
+                .response
+                .is_none()
+        );
+        let invalid = graphics.handle(command("m=0", &frame.as_bytes()[split..]), (0, 0));
+        assert_eq!(
+            invalid.response,
+            Some(b"\x1b_Gi=17;EINVAL:invalid chunk sequence\x1b\\".to_vec())
+        );
+        assert!(
+            graphics
+                .handle(
+                    command("a=f,f=32,s=1,v=1,i=17,m=1", &frame.as_bytes()[..split]),
+                    (0, 0),
+                )
+                .response
+                .is_none()
+        );
+        let result = graphics.handle(command("a=f,m=0", &frame.as_bytes()[split..]), (0, 0));
+        assert_eq!(result.response, Some(b"\x1b_Gi=17;OK\x1b\\".to_vec()));
+        graphics.handle(command("a=a,i=17,c=2", b""), (0, 0));
+        assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn terminal_driven_animation_advances_on_frame_deadlines_and_loops() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255]);
+        let second = STANDARD.encode([0, 255, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=1,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        graphics.handle(
+            command("a=f,f=32,s=1,v=1,i=17,z=10", second.as_bytes()),
+            (0, 0),
+        );
+        let started_at = Instant::now();
+        graphics
+            .control_animation(command("a=a,i=17,r=1,z=10,s=3", b""), started_at)
+            .unwrap();
+
+        assert!(!graphics.advance_animations(started_at + Duration::from_millis(9)));
+        assert!(graphics.advance_animations(started_at + Duration::from_millis(10)));
+        assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[0, 255, 0, 255]);
+        assert!(graphics.advance_animations(started_at + Duration::from_millis(20)));
+        assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn finite_animation_loop_count_stops_on_the_last_frame() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255]);
+        let second = STANDARD.encode([0, 255, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=1,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        graphics.handle(
+            command("a=f,f=32,s=1,v=1,i=17,z=10", second.as_bytes()),
+            (0, 0),
+        );
+        let started_at = Instant::now();
+        graphics
+            .control_animation(command("a=a,i=17,r=1,z=10,s=3,v=2", b""), started_at)
+            .unwrap();
+
+        for elapsed_ms in [10, 20, 30] {
+            assert!(graphics.advance_animations(started_at + Duration::from_millis(elapsed_ms)));
+        }
+        assert!(!graphics.advance_animations(started_at + Duration::from_millis(40)));
+        assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn animation_composition_updates_the_destination_frame() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255, 255, 0, 0, 255]);
+        let patch = STANDARD.encode([0, 255, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=2,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        graphics.handle(
+            command("a=f,f=32,s=1,v=1,i=17,c=1,x=1", patch.as_bytes()),
+            (0, 0),
+        );
+
+        let result = graphics.handle(
+            command("a=c,i=17,r=2,c=1,X=1,Y=0,x=0,y=0,w=1,h=1,C=1", b""),
+            (0, 0),
+        );
+        assert_eq!(result.response, Some(b"\x1b_Gi=17;OK\x1b\\".to_vec()));
+        assert_eq!(
+            &*graphics.snapshots(&[])[0].rgba,
+            &[0, 255, 0, 255, 255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn deleting_animation_frames_keeps_the_root_image() {
+        let mut graphics = KittyGraphicsState::default();
+        let root = STANDARD.encode([255, 0, 0, 255]);
+        let second = STANDARD.encode([0, 255, 0, 255]);
+        graphics.handle(
+            command("a=T,f=32,s=1,v=1,i=17,C=1", root.as_bytes()),
+            (0, 0),
+        );
+        graphics.handle(command("a=f,f=32,s=1,v=1,i=17", second.as_bytes()), (0, 0));
+        graphics.handle(command("a=a,i=17,c=2", b""), (0, 0));
+
+        let result = graphics.handle(command("a=d,d=f,i=17", b""), (0, 0));
+        assert_eq!(result.response, Some(b"\x1b_Gi=17;OK\x1b\\".to_vec()));
+        assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[255, 0, 0, 255]);
     }
 }

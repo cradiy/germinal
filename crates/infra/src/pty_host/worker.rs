@@ -119,6 +119,7 @@ where
             Err(TryRecvError::Disconnected) => disconnected = true,
         }
 
+        progressed |= self.runtime.advance_kitty_animations();
         progressed |= self.runtime.publish_unpublished_snapshot();
 
         if disconnected {
@@ -685,6 +686,20 @@ where
         self.terminal_store
             .scroll_display(self.target_id, seq, scroll)
             .then_some(seq)
+    }
+
+    fn advance_kitty_animations(&mut self) -> bool {
+        let next_seq = self.seq.saturating_add(1);
+        let seq = Seq::new(next_seq);
+        if !self
+            .terminal_store
+            .advance_kitty_animations(self.target_id, seq, Instant::now())
+        {
+            return false;
+        }
+        self.seq = next_seq;
+        self.unpublished_seq = Some(seq);
+        true
     }
 
     fn start_selection(
