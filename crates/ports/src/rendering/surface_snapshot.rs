@@ -115,8 +115,8 @@ pub struct RenderSurfaceVideoSurfaceSnapshot {
 pub struct RenderSurfaceImageSnapshot {
     pub id: String,
     pub image_generation: u64,
-    pub x_cell: u32,
-    pub y_cell: u32,
+    pub x_cell: i32,
+    pub y_cell: i32,
     pub x_offset_px: u32,
     pub y_offset_px: u32,
     pub columns: u32,

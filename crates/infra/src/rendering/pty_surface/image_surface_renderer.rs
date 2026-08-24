@@ -498,14 +498,12 @@ fn vertices_for_image(
         return None;
     }
 
-    let raw_left = config
-        .content_origin_x
-        .saturating_add(image.x_cell.saturating_mul(config.cell_width_px))
-        .saturating_add(image.x_offset_px) as f32;
-    let raw_top = config
-        .content_origin_y
-        .saturating_add(image.y_cell.saturating_mul(config.cell_height_px))
-        .saturating_add(image.y_offset_px) as f32;
+    let raw_left = config.content_origin_x as f32
+        + image.x_cell as f32 * config.cell_width_px as f32
+        + image.x_offset_px as f32;
+    let raw_top = config.content_origin_y as f32
+        + image.y_cell as f32 * config.cell_height_px as f32
+        + image.y_offset_px as f32;
     let raw_right = raw_left + width as f32;
     let raw_bottom = raw_top + height as f32;
     let content_right = config
@@ -645,5 +643,31 @@ mod tests {
         assert!((vertices[1].position_ndc[0] - 1.0).abs() < f32::EPSILON);
         assert!((vertices[1].position_ndc[1] - 0.4).abs() < 1e-6);
         assert_eq!(vertices[1].uv, [0.5, 0.0]);
+    }
+
+    #[test]
+    fn clips_scrolled_image_above_the_content_area() {
+        let mut image = image();
+        image.y_cell = -1;
+        let vertices = vertices_for_image(
+            &image,
+            WgpuTerminalRenderTargetPlan::new(100, 100),
+            WgpuRendererConfig {
+                cell_width_px: 10,
+                cell_height_px: 10,
+                content_origin_x: 0,
+                content_origin_y: 0,
+                content_width_px: 100,
+                content_height_px: 100,
+                grid_columns: 10,
+                grid_rows: 10,
+                blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert!((vertices[0].position_ndc[1] - 1.0).abs() < f32::EPSILON);
+        assert_eq!(vertices[0].uv, [0.0, 0.5]);
     }
 }

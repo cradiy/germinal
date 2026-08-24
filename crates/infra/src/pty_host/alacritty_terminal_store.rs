@@ -22,7 +22,9 @@ use alacritty_terminal::{
         search::RegexSearch,
         viewport_to_point,
     },
-    vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler},
+    vte::ansi::{
+        ClearMode, Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler,
+    },
 };
 use germinal_ports::{
     pty_host::{
@@ -56,6 +58,9 @@ use germinal_ports::{
 
 use super::kitty_graphics::{
     KittyGraphicsState, KittyGraphicsStreamDecoder, KittyPlaceholderCell, KittyStreamEvent,
+};
+use super::kitty_terminal_lifecycle::{
+    KittyTerminalLifecycleEvent, KittyTerminalLifecycleObserver,
 };
 
 const KITTY_IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
@@ -319,7 +324,7 @@ impl AlacrittyTerminalStore {
         for event in state.graphics_decoder.feed(bytes) {
             match event {
                 KittyStreamEvent::Bytes(visible) => {
-                    state.processor.advance(&mut state.term, &visible);
+                    state.advance_terminal_bytes(&visible);
                 }
                 KittyStreamEvent::Command(command) => {
                     let point = state.term.grid().cursor.point;
@@ -1268,6 +1273,28 @@ fn select_around_vim_word<T: EventListener>(term: &mut Term<T>) {
     term.selection = Some(selection);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TerminalCursorObservation {
+    column: u32,
+    line: u32,
+    input_needs_wrap: bool,
+}
+
+impl TerminalCursorObservation {
+    const fn point(self) -> (u32, u32) {
+        (self.column, self.line)
+    }
+}
+
+fn terminal_cursor_observation<T: EventListener>(term: &Term<T>) -> TerminalCursorObservation {
+    let cursor = &term.grid().cursor;
+    TerminalCursorObservation {
+        column: u32::try_from(cursor.point.column.0).unwrap_or(0),
+        line: u32::try_from(cursor.point.line.0).unwrap_or(0),
+        input_needs_wrap: cursor.input_needs_wrap,
+    }
+}
+
 pub struct AlacrittyTermState {
     term: Term<PtyWriteEventListener>,
     pending_write_tx: Sender<PendingPtyWrite>,
@@ -1279,6 +1306,8 @@ pub struct AlacrittyTermState {
     title: Option<String>,
     title_changed: bool,
     processor: Processor<StdSyncHandler>,
+    graphics_lifecycle_processor: Processor<StdSyncHandler>,
+    graphics_lifecycle_observer: KittyTerminalLifecycleObserver,
     graphics_decoder: KittyGraphicsStreamDecoder,
     graphics: KittyGraphicsState,
     size: AlacrittyTermSize,
@@ -1338,6 +1367,8 @@ impl AlacrittyTermState {
             title: None,
             title_changed: false,
             processor: Processor::<StdSyncHandler>::new(),
+            graphics_lifecycle_processor: Processor::<StdSyncHandler>::new(),
+            graphics_lifecycle_observer: KittyTerminalLifecycleObserver::new(size.screen_lines()),
             graphics_decoder: KittyGraphicsStreamDecoder::default(),
             graphics: KittyGraphicsState::default(),
             size,
@@ -1350,6 +1381,85 @@ impl AlacrittyTermState {
         }
     }
 
+    fn advance_terminal_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            let before = terminal_cursor_observation(&self.term);
+            self.graphics_lifecycle_processor.advance(
+                &mut self.graphics_lifecycle_observer,
+                std::slice::from_ref(byte),
+            );
+            self.processor
+                .advance(&mut self.term, std::slice::from_ref(byte));
+            let after = terminal_cursor_observation(&self.term);
+            let events = self.graphics_lifecycle_observer.take_events();
+
+            for event in events {
+                self.apply_graphics_lifecycle_event(event, before, after);
+            }
+        }
+    }
+
+    fn apply_graphics_lifecycle_event(
+        &mut self,
+        event: KittyTerminalLifecycleEvent,
+        before: TerminalCursorObservation,
+        after: TerminalCursorObservation,
+    ) {
+        match event {
+            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::All) => {
+                self.graphics.clear_screen_all();
+            }
+            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Above) => {
+                self.graphics.clear_screen_above(before.point());
+            }
+            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Below) => {
+                self.graphics.clear_screen_below(before.point());
+            }
+            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Saved) => {}
+            KittyTerminalLifecycleEvent::Reset => self.graphics.reset_terminal(),
+            KittyTerminalLifecycleEvent::EnterAlternateScreen => {
+                self.graphics.enter_alternate_screen();
+            }
+            KittyTerminalLifecycleEvent::LeaveAlternateScreen => {
+                self.graphics.leave_alternate_screen();
+            }
+            KittyTerminalLifecycleEvent::ScrollUp { start, end, lines } => {
+                self.graphics.scroll_up(start, end, lines);
+            }
+            KittyTerminalLifecycleEvent::ScrollDown { start, end, lines } => {
+                self.graphics.scroll_down(start, end, lines);
+            }
+            KittyTerminalLifecycleEvent::DeleteLines { end, lines } => {
+                if before.line < end {
+                    self.graphics.scroll_up(before.line, end, lines);
+                }
+            }
+            KittyTerminalLifecycleEvent::InsertBlankLines { end, lines } => {
+                if before.line < end {
+                    self.graphics.scroll_down(before.line, end, lines);
+                }
+            }
+            KittyTerminalLifecycleEvent::Linefeed { start, end } => {
+                if before.line == end.saturating_sub(1) && after.line == before.line {
+                    self.graphics.scroll_up(start, end, 1);
+                }
+            }
+            KittyTerminalLifecycleEvent::ReverseIndex { start, end } => {
+                if before.line == start && after.line == before.line {
+                    self.graphics.scroll_down(start, end, 1);
+                }
+            }
+            KittyTerminalLifecycleEvent::Input { start, end } => {
+                let wrapped = before.line == end.saturating_sub(1)
+                    && after.line == before.line
+                    && (before.input_needs_wrap || after.column < before.column);
+                if wrapped {
+                    self.graphics.scroll_up(start, end, 1);
+                }
+            }
+        }
+    }
+
     fn resize(&mut self, size: AlacrittyTermSize) {
         if self.size == size {
             return;
@@ -1357,6 +1467,8 @@ impl AlacrittyTermState {
 
         self.size = size;
         self.term.resize(self.size);
+        self.graphics_lifecycle_observer
+            .resize(self.size.screen_lines());
     }
 
     fn take_pending_writes(&mut self, color_theme: &TerminalColorTheme) -> Vec<Vec<u8>> {
@@ -1402,7 +1514,15 @@ impl AlacrittyTermState {
             return false;
         }
 
+        let before = terminal_cursor_observation(&self.term);
+        self.graphics_lifecycle_processor
+            .stop_sync(&mut self.graphics_lifecycle_observer);
         self.processor.stop_sync(&mut self.term);
+        let after = terminal_cursor_observation(&self.term);
+        let events = self.graphics_lifecycle_observer.take_events();
+        for event in events {
+            self.apply_graphics_lifecycle_event(event, before, after);
+        }
         true
     }
 
@@ -2214,6 +2334,22 @@ mod tests {
 
     use super::*;
 
+    fn image_count(store: &AlacrittyTerminalStore, target_id: RenderTargetId) -> usize {
+        store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .image_surfaces
+            .len()
+    }
+
+    fn first_image_y(store: &AlacrittyTerminalStore, target_id: RenderTargetId) -> i32 {
+        store
+            .render_surface_snapshot_of(target_id)
+            .unwrap()
+            .image_surfaces[0]
+            .y_cell
+    }
+
     #[test]
     fn exports_osc_title_changes_and_reset() {
         let store = AlacrittyTerminalStore::new();
@@ -2376,6 +2512,74 @@ mod tests {
             store.take_pending_pty_writes(target_id),
             vec![b"\x1b_Gi=7,p=2;OK\x1b\\".to_vec()]
         );
+    }
+
+    #[test]
+    fn kitty_images_follow_clear_reset_and_alternate_screen_lifecycle() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 4));
+        let target_id = RenderTargetId::new(101);
+        let payload = STANDARD.encode([255, 0, 0, 255]);
+        let primary = format!("\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1;{payload}\x1b\\");
+        let alternate = format!("\x1b_Ga=T,f=32,s=1,v=1,i=8,p=1,C=1;{payload}\x1b\\");
+
+        store.apply_bytes(target_id, Seq::new(1), primary.as_bytes());
+        assert_eq!(image_count(&store, target_id), 1);
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b[?1049h");
+        assert_eq!(image_count(&store, target_id), 0);
+        store.apply_bytes(target_id, Seq::new(3), alternate.as_bytes());
+        assert_eq!(image_count(&store, target_id), 1);
+
+        store.apply_bytes(target_id, Seq::new(4), b"\x1b[?1049l");
+        assert_eq!(image_count(&store, target_id), 1);
+        store.apply_bytes(target_id, Seq::new(5), b"\x1b[2J");
+        assert_eq!(image_count(&store, target_id), 0);
+
+        store.apply_bytes(target_id, Seq::new(6), primary.as_bytes());
+        store.apply_bytes(target_id, Seq::new(7), b"\x1bc");
+        assert_eq!(image_count(&store, target_id), 0);
+    }
+
+    #[test]
+    fn kitty_physical_images_scroll_with_terminal_content() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 3));
+        let target_id = RenderTargetId::new(102);
+        let payload = STANDARD.encode([255, 0, 0, 255]);
+        let transfer = format!("\x1b[3;1H\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1;{payload}\x1b\\");
+
+        store.apply_bytes(target_id, Seq::new(1), transfer.as_bytes());
+        assert_eq!(first_image_y(&store, target_id), 2);
+        store.apply_bytes(target_id, Seq::new(2), b"\n");
+        assert_eq!(first_image_y(&store, target_id), 1);
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[1S");
+        assert_eq!(first_image_y(&store, target_id), 0);
+        store.apply_bytes(target_id, Seq::new(4), b"\x1b[1S");
+        assert_eq!(first_image_y(&store, target_id), -1);
+    }
+
+    #[test]
+    fn kitty_uppercase_deletion_reaches_hidden_primary_screen_data() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(103);
+        let payload = STANDARD.encode([255, 0, 0, 255]);
+        let transfer = format!("\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1;{payload}\x1b\\");
+
+        store.apply_bytes(target_id, Seq::new(1), transfer.as_bytes());
+        store.apply_bytes(
+            target_id,
+            Seq::new(2),
+            b"\x1b[?1049h\x1b_Ga=d,d=i,i=7\x1b\\",
+        );
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[?1049l");
+        assert_eq!(image_count(&store, target_id), 1);
+
+        store.apply_bytes(
+            target_id,
+            Seq::new(4),
+            b"\x1b[?1049h\x1b_Ga=d,d=I,i=7\x1b\\",
+        );
+        store.apply_bytes(target_id, Seq::new(5), b"\x1b[?1049l");
+        assert_eq!(image_count(&store, target_id), 0);
     }
 
     #[test]

@@ -219,6 +219,70 @@ struct KittyPlacement {
     relative_to: Option<u64>,
     horizontal_offset: i32,
     vertical_offset: i32,
+    scroll_offset_y: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct KittyScreenState {
+    placements: HashMap<u64, KittyPlacement>,
+    virtual_placements: HashMap<u64, KittyPlacement>,
+    resolved_positions: HashMap<u64, (i64, i64)>,
+}
+
+impl KittyScreenState {
+    fn image_is_referenced(&self, image_key: u64) -> bool {
+        self.placements
+            .values()
+            .chain(self.virtual_placements.values())
+            .any(|placement| placement.image_key == image_key)
+    }
+
+    fn remove_image_placements(&mut self, image_key: u64) -> HashSet<u64> {
+        let roots = self
+            .placements
+            .values()
+            .chain(self.virtual_placements.values())
+            .filter(|placement| placement.image_key == image_key)
+            .map(|placement| placement.key)
+            .collect::<HashSet<_>>();
+        let mut removed = roots.clone();
+
+        loop {
+            let children = self
+                .placements
+                .values()
+                .chain(self.virtual_placements.values())
+                .filter_map(|placement| {
+                    placement
+                        .relative_to
+                        .filter(|parent| removed.contains(parent))
+                        .map(|_| placement.key)
+                })
+                .collect::<Vec<_>>();
+            let old_len = removed.len();
+            removed.extend(children);
+            if removed.len() == old_len {
+                break;
+            }
+        }
+
+        let descendant_images = removed
+            .difference(&roots)
+            .filter_map(|key| {
+                self.placements
+                    .get(key)
+                    .or_else(|| self.virtual_placements.get(key))
+            })
+            .map(|placement| placement.image_key)
+            .filter(|key| *key != image_key)
+            .collect();
+        self.placements.retain(|key, _| !removed.contains(key));
+        self.virtual_placements
+            .retain(|key, _| !removed.contains(key));
+        self.resolved_positions
+            .retain(|key, _| !removed.contains(key));
+        descendant_images
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +325,7 @@ pub(crate) struct KittyGraphicsState {
     image_numbers: HashMap<u32, Vec<u64>>,
     placements: HashMap<u64, KittyPlacement>,
     virtual_placements: HashMap<u64, KittyPlacement>,
+    primary_screen: Option<KittyScreenState>,
     insertion_order: VecDeque<u64>,
     pending: Option<PendingTransmission>,
     next_key: u64,
@@ -271,6 +336,107 @@ pub(crate) struct KittyGraphicsState {
 }
 
 impl KittyGraphicsState {
+    pub(crate) fn enter_alternate_screen(&mut self) {
+        if self.primary_screen.is_some() {
+            return;
+        }
+
+        self.primary_screen = Some(KittyScreenState {
+            placements: std::mem::take(&mut self.placements),
+            virtual_placements: std::mem::take(&mut self.virtual_placements),
+            resolved_positions: std::mem::take(&mut self.resolved_positions),
+        });
+    }
+
+    pub(crate) fn leave_alternate_screen(&mut self) {
+        let Some(primary) = self.primary_screen.take() else {
+            return;
+        };
+
+        self.placements = primary.placements;
+        self.virtual_placements = primary.virtual_placements;
+        self.resolved_positions = primary.resolved_positions;
+    }
+
+    pub(crate) fn reset_terminal(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn clear_screen_all(&mut self) {
+        let roots = self.placements.keys().copied().collect();
+        self.remove_placement_trees(roots, false);
+    }
+
+    pub(crate) fn clear_screen_above(&mut self, cursor: (u32, u32)) {
+        let cursor = (i64::from(cursor.0), i64::from(cursor.1));
+        self.clear_physical_placements(|placement, origin| {
+            let right = origin
+                .0
+                .saturating_add(i64::from(placement.occupied_columns));
+            let bottom = origin.1.saturating_add(i64::from(placement.occupied_rows));
+            origin.1 < cursor.1
+                || (origin.1 <= cursor.1 && bottom > cursor.1 && origin.0 <= cursor.0 && right > 0)
+        });
+    }
+
+    pub(crate) fn clear_screen_below(&mut self, cursor: (u32, u32)) {
+        let cursor = (i64::from(cursor.0), i64::from(cursor.1));
+        self.clear_physical_placements(|placement, origin| {
+            let right = origin
+                .0
+                .saturating_add(i64::from(placement.occupied_columns));
+            let bottom = origin.1.saturating_add(i64::from(placement.occupied_rows));
+            bottom > cursor.1.saturating_add(1)
+                || (origin.1 <= cursor.1 && bottom > cursor.1 && right > cursor.0)
+        });
+    }
+
+    pub(crate) fn scroll_up(&mut self, start_row: u32, end_row: u32, lines: u32) {
+        self.scroll_screen_region(start_row, end_row, -i64::from(lines));
+    }
+
+    pub(crate) fn scroll_down(&mut self, start_row: u32, end_row: u32, lines: u32) {
+        self.scroll_screen_region(start_row, end_row, i64::from(lines));
+    }
+
+    fn clear_physical_placements(
+        &mut self,
+        predicate: impl Fn(&KittyPlacement, (i64, i64)) -> bool,
+    ) {
+        let roots = self
+            .placements
+            .values()
+            .filter(|placement| predicate(placement, self.placement_origin(placement)))
+            .map(|placement| placement.key)
+            .collect();
+        self.remove_placement_trees(roots, false);
+    }
+
+    fn scroll_screen_region(&mut self, start_row: u32, end_row: u32, delta: i64) {
+        if delta == 0 || start_row >= end_row {
+            return;
+        }
+
+        let range = i64::from(start_row)..i64::from(end_row);
+        let roots = self
+            .placements
+            .values()
+            .filter(|placement| placement.relative_to.is_none())
+            .filter(|placement| {
+                let row = i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y);
+                range.contains(&row)
+            })
+            .map(|placement| placement.key)
+            .collect::<Vec<_>>();
+
+        for key in roots {
+            if let Some(placement) = self.placements.get_mut(&key) {
+                placement.scroll_offset_y = placement.scroll_offset_y.saturating_add(delta);
+            }
+        }
+        self.resolved_positions.clear();
+    }
+
     #[cfg(test)]
     pub(crate) fn handle(
         &mut self,
@@ -467,7 +633,7 @@ impl KittyGraphicsState {
             'i' if requested_image_id != 0 && requested_image_number == 0 => {
                 if let Some(image_key) = self.image_ids.get(&requested_image_id).copied() {
                     self.delete_image_placements(image_key, placement_id);
-                    if selector.is_ascii_uppercase() && !self.image_is_referenced(image_key) {
+                    if selector.is_ascii_uppercase() {
                         self.remove_image(image_key);
                     }
                 }
@@ -479,7 +645,7 @@ impl KittyGraphicsState {
                         .get(&image_key)
                         .map_or(0, |image| image.image_id);
                     self.delete_image_placements(image_key, placement_id);
-                    if selector.is_ascii_uppercase() && !self.image_is_referenced(image_key) {
+                    if selector.is_ascii_uppercase() {
                         self.remove_image(image_key);
                     }
                 }
@@ -667,10 +833,16 @@ impl KittyGraphicsState {
     }
 
     fn image_is_referenced(&self, image_key: u64) -> bool {
-        self.placements
+        let active = self
+            .placements
             .values()
             .chain(self.virtual_placements.values())
-            .any(|placement| placement.image_key == image_key)
+            .any(|placement| placement.image_key == image_key);
+        active
+            || self
+                .primary_screen
+                .as_ref()
+                .is_some_and(|screen| screen.image_is_referenced(image_key))
     }
 
     fn remove_unreferenced_images(&mut self, keys: HashSet<u64>) {
@@ -683,7 +855,7 @@ impl KittyGraphicsState {
 
     fn delete_physical_placements(
         &mut self,
-        predicate: impl Fn(&KittyPlacement, (u32, u32)) -> bool,
+        predicate: impl Fn(&KittyPlacement, (i64, i64)) -> bool,
         delete_data: bool,
     ) {
         let roots = self
@@ -695,12 +867,14 @@ impl KittyGraphicsState {
         self.remove_placement_trees(roots, delete_data);
     }
 
-    fn placement_origin(&self, placement: &KittyPlacement) -> (u32, u32) {
+    fn placement_origin(&self, placement: &KittyPlacement) -> (i64, i64) {
         self.resolved_positions
             .get(&placement.key)
             .copied()
-            .map(|(x, y)| (signed_cell_to_u32(x), signed_cell_to_u32(y)))
-            .unwrap_or((placement.x_cell, placement.y_cell))
+            .unwrap_or((
+                i64::from(placement.x_cell),
+                i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y),
+            ))
     }
 
     fn remove_placement_trees(&mut self, roots: HashSet<u64>, delete_root_data: bool) {
@@ -746,7 +920,9 @@ impl KittyGraphicsState {
             .retain(|key, _| !removed.contains(key));
         self.remove_unreferenced_images(descendant_images);
         if delete_root_data {
-            self.remove_unreferenced_images(root_images);
+            for image_key in root_images {
+                self.remove_image(image_key);
+            }
         }
     }
 
@@ -864,6 +1040,7 @@ impl KittyGraphicsState {
             relative_to,
             horizontal_offset: command.i32(b'H', 0)?,
             vertical_offset: command.i32(b'V', 0)?,
+            scroll_offset_y: 0,
         };
 
         let cursor_move = if relative_to.is_some() || command.u32(b'C', 0)? == 1 {
@@ -972,8 +1149,8 @@ impl KittyGraphicsState {
                 Some(RenderSurfaceImageSnapshot {
                     id: format!("{}:{}", image.key, placement.key),
                     image_generation: image.generation,
-                    x_cell: signed_cell_to_u32(x_cell),
-                    y_cell: signed_cell_to_u32(y_cell),
+                    x_cell: signed_cell_to_i32(x_cell),
+                    y_cell: signed_cell_to_i32(y_cell),
                     x_offset_px: placement.x_offset_px,
                     y_offset_px: placement.y_offset_px,
                     columns: placement.columns,
@@ -1065,8 +1242,8 @@ impl KittyGraphicsState {
                 snapshots.push(RenderSurfaceImageSnapshot {
                     id: format!("virtual:{placement_key}:{min_x}:{min_y}"),
                     image_generation: image.generation,
-                    x_cell: min_x,
-                    y_cell: min_y,
+                    x_cell: i32::try_from(min_x).unwrap_or(i32::MAX),
+                    y_cell: i32::try_from(min_y).unwrap_or(i32::MAX),
                     x_offset_px: 0,
                     y_offset_px: 0,
                     columns: max_x.saturating_sub(min_x).saturating_add(1),
@@ -1119,7 +1296,10 @@ impl KittyGraphicsState {
         } else if self.virtual_placements.contains_key(&key) {
             *virtual_positions.get(&key)?
         } else {
-            (i64::from(placement.x_cell), i64::from(placement.y_cell))
+            (
+                i64::from(placement.x_cell),
+                i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y),
+            )
         };
         visiting.remove(&key);
         resolved.insert(key, position);
@@ -1136,6 +1316,11 @@ impl KittyGraphicsState {
     }
 
     fn remove_image(&mut self, key: u64) {
+        let inactive_descendants = self
+            .primary_screen
+            .as_mut()
+            .map(|screen| screen.remove_image_placements(key))
+            .unwrap_or_default();
         let roots = self
             .placements
             .values()
@@ -1152,6 +1337,7 @@ impl KittyGraphicsState {
             keys.retain(|image_key| *image_key != key);
             !keys.is_empty()
         });
+        self.remove_unreferenced_images(inactive_descendants);
     }
 }
 
@@ -1173,8 +1359,12 @@ fn has_relative_placement_controls(command: &KittyCommand) -> bool {
     b"PQHV".iter().any(|key| command.control.contains_key(key))
 }
 
-fn signed_cell_to_u32(value: i64) -> u32 {
-    u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+fn signed_cell_to_i32(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1290,7 +1480,7 @@ fn command_cell_coordinate(command: &KittyCommand, key: u8) -> Result<u32, Kitty
 
 fn placement_intersects_cell(
     placement: &KittyPlacement,
-    origin: (u32, u32),
+    origin: (i64, i64),
     x_cell: u32,
     y_cell: u32,
 ) -> bool {
@@ -1298,12 +1488,14 @@ fn placement_intersects_cell(
         && placement_intersects_row(placement, origin.1, y_cell)
 }
 
-fn placement_intersects_column(placement: &KittyPlacement, origin_x: u32, x_cell: u32) -> bool {
-    x_cell >= origin_x && x_cell < origin_x.saturating_add(placement.occupied_columns)
+fn placement_intersects_column(placement: &KittyPlacement, origin_x: i64, x_cell: u32) -> bool {
+    let x_cell = i64::from(x_cell);
+    x_cell >= origin_x && x_cell < origin_x.saturating_add(i64::from(placement.occupied_columns))
 }
 
-fn placement_intersects_row(placement: &KittyPlacement, origin_y: u32, y_cell: u32) -> bool {
-    y_cell >= origin_y && y_cell < origin_y.saturating_add(placement.occupied_rows)
+fn placement_intersects_row(placement: &KittyPlacement, origin_y: i64, y_cell: u32) -> bool {
+    let y_cell = i64::from(y_cell);
+    y_cell >= origin_y && y_cell < origin_y.saturating_add(i64::from(placement.occupied_rows))
 }
 
 fn transmission_bytes(command: &KittyCommand) -> Result<Vec<u8>, KittyGraphicsError> {
