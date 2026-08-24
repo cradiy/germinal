@@ -31,9 +31,10 @@ use germinal_domain::{
         },
     },
 };
+#[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
+use germinal_infra::gnative::gst_video_player_bridge::GstVideoPlayerBridge;
 use germinal_infra::rendering::pty_surface::render_plugin::WgpuPaneRenderPlugin;
 use germinal_infra::{
-    gnative::gst_video_player_bridge::GstVideoPlayerBridge,
     pty::PlatformPtyBackend,
     pty_host::worker::PlatformTerminalWorkerBackend,
     rendering::pty_surface::window_runtime::{
@@ -101,6 +102,7 @@ pub struct App {
     runtime_event_dispatcher: AppRuntimeEventDispatcher,
     pty_backend: PlatformPtyBackend,
     gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>,
+    #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
     media_bridge: std::sync::Arc<GstVideoPlayerBridge>,
     terminal_worker_backend: PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
     render_runtime_factory: WgpuTerminalWindowRuntimeFactory,
@@ -175,10 +177,12 @@ impl App {
                 GShellRuntimeEvent::SystemNotificationActivated { gshell_id },
             ));
         });
+        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
         let media_dispatcher = {
             let runtime_event_dispatcher = runtime_event_dispatcher.clone();
             std::sync::Arc::new(move |event: RuntimeEvent| runtime_event_dispatcher.dispatch(event))
         };
+        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
         let media_bridge = std::sync::Arc::new(
             GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
         );
@@ -215,6 +219,7 @@ impl App {
             pty_backend: PlatformPtyBackend::new(),
             gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new()
                 .map_err(AppError::CreateGNativeTunnel)?,
+            #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
             media_bridge: std::sync::Arc::clone(&media_bridge),
             terminal_worker_backend: PlatformTerminalWorkerBackend::new(
                 runtime_event_dispatcher,
@@ -250,6 +255,7 @@ impl App {
             app.snapshot_wake_pending(),
             app.surface_snapshot_sender(),
         );
+        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
         app.gnative_tunnel.configure_media_bridge(media_bridge);
 
         app.restore_workspace()
@@ -270,6 +276,7 @@ impl App {
         let window_attributes = winit::window::Window::default_attributes()
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
+            .with_decorations(self.config.window.decorations)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
                 f64::from(self.config.window.height_px),
@@ -1137,6 +1144,7 @@ impl App {
         self.route_window_input(gshell_id, WindowInputEvent::PointerLeft);
     }
 
+    #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
     fn drain_media_bridge_frames(&self) {
         let Some(render_runtime) = self.render_runtime.as_ref() else {
             return;
@@ -1150,6 +1158,9 @@ impl App {
             }
         }
     }
+
+    #[cfg(not(all(feature = "media-gstreamer", target_os = "linux")))]
+    fn drain_media_bridge_frames(&self) {}
 
     fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.persist_workspace() {
@@ -1375,6 +1386,17 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     size.height.max(1),
                 ));
                 self.resize_workspace_gshells(size_info.window_size());
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let Some(render_runtime) = self.render_runtime.as_mut() else {
+                    return;
+                };
+                match render_runtime.update_scale_factor(scale_factor) {
+                    Ok(size_info) => self.resize_workspace_gshells(size_info.window_size()),
+                    Err(source) => {
+                        warn!(scale_factor, %source, "failed to update terminal DPI scale factor");
+                    }
+                }
             }
             WindowEvent::Focused(focused) => {
                 if self.window_focused != focused {

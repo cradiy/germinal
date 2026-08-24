@@ -282,7 +282,7 @@ Priority: optional
 Architecture: $germinal_deb_arch
 Installed-Size: $germinal_installed_size
 Maintainer: Germinal maintainers
-Depends: libfontconfig1, libfreetype6, libglib2.0-0, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0
+Depends: libfontconfig1, libfreetype6
 Homepage: https://github.com/cradiy/germinal
 Description: GPU-rendered terminal and structured UI host
  Germinal is a keyboard-first GPU-rendered terminal that combines PTY shell

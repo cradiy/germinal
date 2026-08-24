@@ -13,8 +13,6 @@ Source5:        PACKAGE-README.md
 
 Requires:       fontconfig
 Requires:       freetype
-Requires:       gstreamer1
-Requires:       gstreamer1-plugins-base
 
 %description
 Germinal is a keyboard-first GPU-rendered terminal that combines PTY shell

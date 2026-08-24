@@ -46,6 +46,10 @@ impl WgpuTerminalSurfaceFramePresenter {
         &self.frame_renderer
     }
 
+    pub fn frame_renderer_mut(&mut self) -> &mut WgpuTerminalFrameRenderer {
+        &mut self.frame_renderer
+    }
+
     pub fn present_workspace_frame(
         &self,
         input: WgpuTerminalWorkspacePresentInput<'_, '_>,

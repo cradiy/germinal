@@ -92,6 +92,14 @@ impl WgpuTerminalFrameBuilder {
         &self.video_surface_registry
     }
 
+    pub fn with_video_surface_registry(
+        mut self,
+        video_surface_registry: WgpuVideoSurfaceRegistry,
+    ) -> Self {
+        self.video_surface_registry = video_surface_registry;
+        self
+    }
+
     pub fn remove_render_target(&self, target_id: RenderTargetId) {
         self.glyph_atlas_frame_builder
             .remove_render_target(target_id);

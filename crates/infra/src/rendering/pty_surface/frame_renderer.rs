@@ -59,6 +59,12 @@ impl WgpuTerminalFrameRenderer {
         self.frame_builder.video_surface_registry()
     }
 
+    pub fn replace_frame_builder(&mut self, frame_builder: WgpuTerminalFrameBuilder) {
+        let video_surface_registry = self.frame_builder.video_surface_registry().clone();
+        self.frame_builder = frame_builder.with_video_surface_registry(video_surface_registry);
+        self.glyph_atlas_gpu_cache = WgpuTerminalGlyphAtlasGpuCache::new();
+    }
+
     pub fn remove_render_target(&self, target_id: RenderTargetId) {
         self.frame_builder.remove_render_target(target_id);
         self.buffer_uploader.remove_render_target(target_id);

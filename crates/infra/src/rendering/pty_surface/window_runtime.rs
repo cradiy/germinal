@@ -113,6 +113,7 @@ pub struct WgpuTerminalWindowRuntime {
     tab_bar: Option<TabBarSnapshot>,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
+    scale_factor: TerminalScaleFactor,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     background_shader_enabled: bool,
@@ -375,14 +376,14 @@ impl WgpuTerminalWindowRuntime {
         let pipeline_factory = WgpuTerminalPipelineFactory::new(pipeline_spec);
         let pipeline = pipeline_factory.create(&device);
 
-        let profile =
-            terminal_profile_from_alacritty_crossfont_metrics(profile, window.scale_factor())?;
-        let size_info = terminal_size_info(&profile, width, height, window.scale_factor());
+        let scale_factor = TerminalScaleFactor::new(window.scale_factor());
+        let profile = terminal_profile_from_alacritty_crossfont_metrics(profile, scale_factor)?;
+        let size_info = terminal_size_info(&profile, width, height, scale_factor);
 
         let frame_builder = build_terminal_frame_builder(
             &profile,
             size_info,
-            window.scale_factor(),
+            scale_factor,
             device.limits().max_texture_dimension_2d,
             color_theme,
         )?;
@@ -430,6 +431,7 @@ impl WgpuTerminalWindowRuntime {
             tab_bar: None,
             size_info,
             profile,
+            scale_factor,
             color_theme,
             background_opacity,
             background_shader_enabled,
@@ -537,7 +539,7 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
-        let scale_factor = self.window.scale_factor();
+        let scale_factor = self.scale_factor.value();
         for plugin in &mut self.render_plugins {
             let Some(placement) = placements
                 .iter()
@@ -623,6 +625,58 @@ impl WgpuTerminalWindowRuntime {
         self.terminal_size_info()
     }
 
+    pub fn update_scale_factor(
+        &mut self,
+        scale_factor: f64,
+    ) -> Result<TerminalSizeInfo, WindowRuntimeError> {
+        let scale_factor = TerminalScaleFactor::new(scale_factor);
+        if self.scale_factor == scale_factor {
+            return Ok(self.terminal_size_info());
+        }
+
+        let profile =
+            terminal_profile_from_alacritty_crossfont_metrics(self.profile.clone(), scale_factor)?;
+        let window_size = self.window.inner_size();
+        let size_info = terminal_size_info(
+            &profile,
+            window_size.width.max(1),
+            window_size.height.max(1),
+            scale_factor,
+        );
+        let frame_builder = build_terminal_frame_builder(
+            &profile,
+            size_info,
+            scale_factor,
+            self.device.limits().max_texture_dimension_2d,
+            self.color_theme,
+        )?;
+
+        self.presenter
+            .frame_renderer_mut()
+            .replace_frame_builder(frame_builder);
+        self.profile = profile;
+        self.scale_factor = scale_factor;
+        self.size_info = size_info;
+
+        for plugin in &mut self.render_plugins {
+            let Some(placement) = self
+                .workspace_layout
+                .iter()
+                .find(|placement| placement.target_id == plugin.target_id())
+                .copied()
+            else {
+                continue;
+            };
+            let _ = plugin.resize(WgpuPaneResizeEvent {
+                placement,
+                scale_factor: scale_factor.value(),
+            });
+        }
+
+        self.request_redraw();
+        Ok(self.terminal_size_info())
+    }
+
     fn request_redraw(&mut self) {
         self.needs_redraw = true;
     }
@@ -649,7 +703,7 @@ impl WgpuTerminalWindowRuntime {
         self.profile
             .size_info_for_window_metrics(TerminalWindowMetrics::new(
                 window_size,
-                TerminalScaleFactor::new(self.window.scale_factor()),
+                self.scale_factor,
             ))
     }
 
@@ -668,7 +722,7 @@ impl WgpuTerminalWindowRuntime {
             .map(WgpuPaneRenderPlugin::target_id)
             .collect::<Vec<_>>();
         let profile = &self.profile;
-        let scale_factor = TerminalScaleFactor::new(self.window.scale_factor());
+        let scale_factor = self.scale_factor;
         let mut surfaces =
             self.workspace_layout
                 .iter()
@@ -742,7 +796,7 @@ impl WgpuTerminalWindowRuntime {
                 color_format: self.surface_config.format,
                 width_px: self.surface_config.width,
                 height_px: self.surface_config.height,
-                scale_factor: self.window.scale_factor(),
+                scale_factor: self.scale_factor.value(),
                 elapsed: self.started_at.elapsed(),
                 background_opacity: self.background_opacity,
                 visual_bell,
@@ -1138,7 +1192,7 @@ fn truncate_title_to_cells(title: &str, max_width: u32) -> String {
 fn build_terminal_frame_builder(
     profile: &TerminalProfile,
     size_info: TerminalSizeInfo,
-    scale_factor: f64,
+    scale_factor: TerminalScaleFactor,
     max_texture_dimension_2d: u32,
     color_theme: TerminalColorTheme,
 ) -> Result<WgpuTerminalFrameBuilder, WindowRuntimeError> {
@@ -1146,8 +1200,7 @@ fn build_terminal_frame_builder(
         WgpuRendererConfig::from(size_info).with_color_theme(color_theme),
     );
 
-    let glyph_config =
-        profile.glyph_render_config(size_info, TerminalScaleFactor::new(scale_factor));
+    let glyph_config = profile.glyph_render_config(size_info, scale_factor);
     let terminal_cell_size = glyph_config.cell_size();
     let crossfont_builder = WgpuCrossfontGlyphAtlasBuilder::from_terminal_font_config(
         glyph_config.font_config(),
@@ -1167,9 +1220,8 @@ fn build_terminal_frame_builder(
 
 fn terminal_profile_from_alacritty_crossfont_metrics(
     profile: TerminalProfile,
-    scale_factor: f64,
+    scale_factor: TerminalScaleFactor,
 ) -> Result<TerminalProfile, WindowRuntimeError> {
-    let scale_factor = TerminalScaleFactor::new(scale_factor);
     let font_px = profile.font_physical_px(scale_factor);
     let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics_for_font_config(
         profile.font_config(),
@@ -1187,11 +1239,10 @@ fn terminal_size_info(
     profile: &TerminalProfile,
     width: u32,
     height: u32,
-    scale_factor: f64,
+    scale_factor: TerminalScaleFactor,
 ) -> TerminalSizeInfo {
-    profile.size_info_for_window_metrics(TerminalWindowMetrics::from_physical_size(
-        width,
-        height,
+    profile.size_info_for_window_metrics(TerminalWindowMetrics::new(
+        TerminalWindowSize::new(width, height),
         scale_factor,
     ))
 }

@@ -439,6 +439,7 @@ pub struct WindowConfig {
     pub width_px: u32,
     pub height_px: u32,
     pub opacity: f32,
+    pub decorations: bool,
 }
 
 impl Default for WindowConfig {
@@ -448,6 +449,7 @@ impl Default for WindowConfig {
             width_px: 960,
             height_px: 540,
             opacity: 1.0,
+            decorations: true,
         }
     }
 }
@@ -842,6 +844,7 @@ mod tests {
 
         let value: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
+        assert_eq!(value["window"]["decorations"].as_bool(), Some(true));
         assert!(value.get("background").is_none());
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
         assert_eq!(
@@ -882,6 +885,19 @@ mod tests {
             TerminalCursorStyle::new(TerminalCursorShape::Beam, true)
         );
         assert_eq!(config.cursor.blink_interval_ms, 320);
+    }
+
+    #[test]
+    fn parses_frameless_window_configuration() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [window]
+            decorations = false
+            "#,
+        )
+        .unwrap();
+
+        assert!(!config.window.decorations);
     }
 
     #[test]

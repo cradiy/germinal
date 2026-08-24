@@ -51,6 +51,14 @@ architecture:
 
 Targeted builds are written to `target/<rust-target>/product/germinal`.
 
+Local video playback for GNative applications is available through an optional GStreamer backend:
+
+```sh
+cargo build --locked --profile product -p germinal --features media-gstreamer
+```
+
+The standard build does not require GStreamer.
+
 ## Linux packages
 
 Create a portable Linux archive with:
@@ -90,10 +98,9 @@ Build and package a musl archive on a musl system or with a configured musl sysr
 ./scripts/package-linux.nu --libc musl --skip-build
 ```
 
-musl releases are distributed as portable archives. Germinal uses musl builds of Fontconfig,
-FreeType, GLib, GStreamer, and the required GStreamer plugins, so these libraries must be available
-on the target system. Cross-compilation also requires the Rust musl target, a matching C linker, and
-a pkg-config sysroot.
+musl releases are distributed as portable archives. Germinal uses musl builds of Fontconfig and
+FreeType, so these libraries must be available on the target system. Cross-compilation also requires
+the Rust musl target, a matching C linker, and a pkg-config sysroot.
 
 ## Terminal images
 
@@ -272,7 +279,9 @@ style = "Bold Italic"
 
 Styled faces are optional. When omitted, Germinal asks the primary family for the matching
 weight and slant. Fallback families are checked in their configured order for glyphs missing from
-the selected primary face; the system font fallback remains the final fallback.
+the selected primary face; the system font fallback remains the final fallback. Font size follows
+the display scale automatically when a window starts on or moves between displays with different
+pixel densities.
 
 ## Background opacity
 
@@ -286,6 +295,17 @@ opacity = 0.92
 The value must be between `0.0` (fully transparent background) and `1.0` (opaque). Text, images,
 cursor content, and explicit application background colors remain opaque. Transparency also
 depends on support from the window system and compositor.
+
+## Window decorations
+
+Native title bars and window borders are enabled by default. Disable them for a frameless window:
+
+```toml
+[window]
+decorations = false
+```
+
+The compositor may still draw its own focus border around a frameless window.
 
 ## Shader backgrounds
 

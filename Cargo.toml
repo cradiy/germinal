@@ -63,7 +63,6 @@ rayon = "1"
 ash = "0.38"
 gstreamer = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-app = { version = "0.25.2", features = ["v1_28"] }
-gstreamer-audio = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-video = { version = "0.25.3", features = ["v1_28"] }
 gstreamer-allocators = { version = "0.25.2", features = ["v1_28"] }
 arboard = { version = "3", features = ["wayland-data-control"] }

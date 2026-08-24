@@ -5,7 +5,7 @@ pkgdesc='GPU-rendered terminal and structured UI host'
 arch=('@ARCH@')
 url='https://github.com/cradiy/germinal'
 license=('MIT')
-depends=('fontconfig' 'freetype2' 'glib2' 'gstreamer' 'gst-plugins-base-libs')
+depends=('fontconfig' 'freetype2')
 source=(
     'germinal'
     'io.github.cradiy.Germinal.desktop'
