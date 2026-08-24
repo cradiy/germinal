@@ -182,6 +182,58 @@ def package-rpm [
     write-checksum $artifact
 }
 
+def arch-architecture [architecture: string] {
+    match $architecture {
+        "x86_64" => "x86_64"
+        "aarch64" => "aarch64"
+        _ => {
+            fail $"Unsupported Arch Linux package architecture: ($architecture)"
+        }
+    }
+}
+
+def package-arch [
+    repo_root: string,
+    binary: string,
+    temp_root: string,
+    output_dir: string,
+    version: string,
+    architecture: string,
+] {
+    require-command makepkg
+    let arch_root = ($temp_root | path join "arch-package")
+    let package_architecture = (arch-architecture $architecture)
+    mkdir $arch_root
+    run-checked install "-m0755" $binary ($arch_root | path join "germinal")
+    for source in [
+        "io.github.cradiy.Germinal.desktop",
+        "io.github.cradiy.Germinal.svg",
+        "PACKAGE-README.md",
+    ] {
+        run-checked install "-m0644" ($repo_root | path join "packaging" "linux" $source) ($arch_root | path join $source)
+    }
+    for source in ["LICENSE", "README.md"] {
+        run-checked install "-m0644" ($repo_root | path join $source) ($arch_root | path join $source)
+    }
+
+    open --raw ($repo_root | path join "packaging" "linux" "PKGBUILD.in")
+    | str replace --all "@VERSION@" $version
+    | str replace --all "@ARCH@" $package_architecture
+    | save --force ($arch_root | path join "PKGBUILD")
+
+    let artifact = (do {
+        cd $arch_root
+        with-env { PKGDEST: $output_dir } {
+            run-checked makepkg "--force" "--nodeps" "--noconfirm"
+            capture-checked makepkg "--packagelist" | lines | first
+        }
+    })
+    if not ($artifact | path exists) {
+        fail "makepkg completed without producing a Germinal package"
+    }
+    write-checksum $artifact
+}
+
 def cleanup [temp_root: string] {
     if ($temp_root | path exists) and (($temp_root | path basename) starts-with "germinal-package.") {
         rm --recursive --force $temp_root
@@ -190,7 +242,7 @@ def cleanup [temp_root: string] {
 
 # Build and package Germinal for Linux.
 def main [
-    --format: string = "tar.gz"  # tar.gz, deb, rpm, or all.
+    --format: string = "tar.gz"  # tar.gz, deb, rpm, arch, or all.
     --output-dir: string          # Output directory; defaults to ./dist.
     --skip-build                  # Package an existing product binary.
     --target: string              # Package a specific Linux Rust target.
@@ -199,7 +251,7 @@ def main [
     if ($target != null) and ($libc != null) {
         fail "--target and --libc cannot be used together" 2
     }
-    if $format not-in ["tar.gz", "deb", "rpm", "all"] {
+    if $format not-in ["tar.gz", "deb", "rpm", "arch", "all"] {
         fail $"Unsupported package format: ($format)" 2
     }
     if (capture-checked uname "-s") != "Linux" {
@@ -227,7 +279,7 @@ def main [
     let architecture = ($selected_target | split row "-" | first)
     let target_libc = if ($selected_target | str contains "-musl") { "musl" } else { "gnu" }
     if ($target_libc == "musl") and ($format != "tar.gz") {
-        fail "musl builds are distributed as tar.gz; DEB and RPM target glibc systems" 2
+        fail "musl builds are distributed as tar.gz; DEB, RPM, and Arch packages target glibc systems" 2
     }
 
     let configured_target_dir = ($env.CARGO_TARGET_DIR? | default ($repo_root | path join "target"))
@@ -269,10 +321,14 @@ def main [
             "rpm" => {
                 package-rpm $repo_root $binary $temp_root $normalized_output $version
             }
+            "arch" => {
+                package-arch $repo_root $binary $temp_root $normalized_output $version $architecture
+            }
             "all" => {
                 package-tarball $repo_root $binary $temp_root $normalized_output $version $architecture $target_libc
                 package-deb $repo_root $binary $temp_root $normalized_output $version $architecture
                 package-rpm $repo_root $binary $temp_root $normalized_output $version
+                package-arch $repo_root $binary $temp_root $normalized_output $version $architecture
             }
         }
     } catch {|error|

@@ -1,0 +1,29 @@
+pkgname=germinal
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='GPU-rendered terminal and structured UI host'
+arch=('@ARCH@')
+url='https://github.com/cradiy/germinal'
+license=('MIT')
+depends=('fontconfig' 'freetype2' 'glib2' 'gstreamer' 'gst-plugins-base-libs')
+source=(
+    'germinal'
+    'io.github.cradiy.Germinal.desktop'
+    'io.github.cradiy.Germinal.svg'
+    'LICENSE'
+    'README.md'
+    'PACKAGE-README.md'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+    install -Dm0755 "$srcdir/germinal" "$pkgdir/usr/bin/germinal"
+    install -Dm0644 "$srcdir/io.github.cradiy.Germinal.desktop" \
+        "$pkgdir/usr/share/applications/io.github.cradiy.Germinal.desktop"
+    install -Dm0644 "$srcdir/io.github.cradiy.Germinal.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.cradiy.Germinal.svg"
+    install -Dm0644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/germinal/LICENSE"
+    install -Dm0644 "$srcdir/README.md" "$pkgdir/usr/share/doc/germinal/README.md"
+    install -Dm0644 "$srcdir/PACKAGE-README.md" \
+        "$pkgdir/usr/share/doc/germinal/PACKAGE-README.md"
+}

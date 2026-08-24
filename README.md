@@ -60,11 +60,12 @@ Create a portable Linux archive with:
 ```
 
 Release files and their SHA-256 checksums are written to `dist/`. Use `--format` to create a DEB,
-an RPM, or every available package format:
+an RPM, an Arch Linux package, or every available package format:
 
 ```nu
 ./scripts/package-linux.nu --format deb
 ./scripts/package-linux.nu --format rpm
+./scripts/package-linux.nu --format arch
 ./scripts/package-linux.nu --format all
 ```
 
@@ -75,8 +76,8 @@ Use an existing product binary without rebuilding it:
 ```
 
 Choose another output directory with `--output-dir <directory>`. DEB packaging requires
-`dpkg-deb`, and RPM packaging requires `rpmbuild`. Packages include the executable, desktop entry,
-application icon, license, and user documentation.
+`dpkg-deb`, RPM packaging requires `rpmbuild`, and Arch Linux packaging requires `makepkg`.
+Packages include the executable, desktop entry, application icon, license, and user documentation.
 
 Bash users can replace the `.nu` suffix with `.sh`. Both scripts accept the same options.
 

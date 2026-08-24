@@ -17,7 +17,7 @@ Usage: scripts/package-linux.sh [options]
 Build and package Germinal for the current Linux architecture.
 
 Options:
-  --format FORMAT  tar.gz (default), deb, rpm, or all.
+  --format FORMAT  tar.gz (default), deb, rpm, arch, or all.
   --output-dir DIR Write packages to DIR instead of ./dist.
   --skip-build     Package an existing target/product/germinal binary.
   --target TARGET  Package a specific Linux Rust target.
@@ -87,7 +87,7 @@ if [[ -n "$germinal_target" || -n "$germinal_libc" ]]; then
 fi
 
 case "$germinal_format" in
-    tar.gz | deb | rpm | all) ;;
+    tar.gz | deb | rpm | arch | all) ;;
     *)
         printf 'Unsupported package format: %s\n' "$germinal_format" >&2
         exit 2
@@ -160,7 +160,7 @@ case "$germinal_target" in
 esac
 
 if [[ "$germinal_target_libc" == musl && "$germinal_format" != tar.gz ]]; then
-    printf '%s\n' 'musl builds are distributed as tar.gz; DEB and RPM target glibc systems' >&2
+    printf '%s\n' 'musl builds are distributed as tar.gz; DEB, RPM, and Arch packages target glibc systems' >&2
     exit 2
 fi
 
@@ -329,13 +329,69 @@ package_rpm() {
     write_checksum "$germinal_artifact"
 }
 
+arch_architecture() {
+    case "$germinal_arch" in
+        x86_64) printf '%s\n' x86_64 ;;
+        aarch64) printf '%s\n' aarch64 ;;
+        *)
+            printf 'Unsupported Arch Linux package architecture: %s\n' "$germinal_arch" >&2
+            exit 1
+            ;;
+    esac
+}
+
+package_arch() {
+    if ! command -v makepkg >/dev/null 2>&1; then
+        printf '%s\n' 'makepkg is required for --format arch' >&2
+        exit 1
+    fi
+
+    local germinal_arch_root="$germinal_temp_root/arch-package"
+    local germinal_arch_name
+    local germinal_pkgbuild="$germinal_arch_root/PKGBUILD"
+    germinal_arch_name=$(arch_architecture)
+    mkdir -p "$germinal_arch_root"
+    install -m0755 "$germinal_binary" "$germinal_arch_root/germinal"
+    install -m0644 "$germinal_repo_root/packaging/linux/io.github.cradiy.Germinal.desktop" \
+        "$germinal_arch_root/io.github.cradiy.Germinal.desktop"
+    install -m0644 "$germinal_repo_root/packaging/linux/io.github.cradiy.Germinal.svg" \
+        "$germinal_arch_root/io.github.cradiy.Germinal.svg"
+    install -m0644 "$germinal_repo_root/LICENSE" "$germinal_arch_root/LICENSE"
+    install -m0644 "$germinal_repo_root/README.md" "$germinal_arch_root/README.md"
+    install -m0644 "$germinal_repo_root/packaging/linux/PACKAGE-README.md" \
+        "$germinal_arch_root/PACKAGE-README.md"
+    sed \
+        -e "s/@VERSION@/$germinal_version/g" \
+        -e "s/@ARCH@/$germinal_arch_name/g" \
+        "$germinal_repo_root/packaging/linux/PKGBUILD.in" >"$germinal_pkgbuild"
+
+    (
+        cd -- "$germinal_arch_root"
+        PKGDEST="$germinal_output_dir" makepkg --force --nodeps --noconfirm
+    )
+
+    local germinal_artifact
+    germinal_artifact=$(
+        cd -- "$germinal_arch_root"
+        PKGDEST="$germinal_output_dir" makepkg --packagelist
+    )
+    germinal_artifact=${germinal_artifact%%$'\n'*}
+    if [[ -z "$germinal_artifact" || ! -f "$germinal_artifact" ]]; then
+        printf '%s\n' 'makepkg completed without producing a Germinal package' >&2
+        exit 1
+    fi
+    write_checksum "$germinal_artifact"
+}
+
 case "$germinal_format" in
     tar.gz) package_tarball ;;
     deb) package_deb ;;
     rpm) package_rpm ;;
+    arch) package_arch ;;
     all)
         package_tarball
         package_deb
         package_rpm
+        package_arch
         ;;
 esac
