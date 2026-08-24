@@ -9,7 +9,9 @@ use germinal_ports::{
 };
 
 use crate::rendering::pty_surface::{
-    crossfont_glyph_atlas::{WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError},
+    crossfont_glyph_atlas::{
+        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphAtlasError, WgpuCrossfontUnderlineMetrics,
+    },
     glyph_atlas::{WgpuDebugGlyphAtlasBuilder, WgpuTerminalGlyphAtlas, WgpuTerminalGlyphKey},
     glyph_atlas_texture::{
         WgpuTerminalGlyphAtlasTextureFactory, WgpuTerminalGlyphAtlasUploadBytes,
@@ -104,6 +106,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
 
     pub fn ligatures(&self) -> bool {
         self.source.ligatures()
+    }
+
+    pub fn underline_metrics(&self) -> Option<WgpuCrossfontUnderlineMetrics> {
+        self.source.underline_metrics()
     }
 
     pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
@@ -212,6 +218,13 @@ impl WgpuTerminalGlyphAtlasSource {
         match self {
             Self::Debug5x7(_) => false,
             Self::Crossfont(builder) => builder.ligatures(),
+        }
+    }
+
+    pub fn underline_metrics(&self) -> Option<WgpuCrossfontUnderlineMetrics> {
+        match self {
+            Self::Debug5x7(_) => None,
+            Self::Crossfont(builder) => builder.underline_metrics(),
         }
     }
 

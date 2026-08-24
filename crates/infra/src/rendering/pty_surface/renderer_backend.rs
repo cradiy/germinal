@@ -28,6 +28,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::rendering::pty_surface::{
+    crossfont_glyph_atlas::WgpuCrossfontUnderlineMetrics,
     glyph_atlas::WgpuTerminalGlyphKey,
     text_shaping::{terminal_grapheme_cell_width, terminal_text_segments_with_ligatures},
 };
@@ -37,11 +38,20 @@ const CURSOR_TEXT_COLOR: RgbColorDto = RgbColorDto::new(0, 0, 0);
 const PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX: u32 = 8;
 const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
 
+fn fallback_underline_metrics(row_height_px: u32) -> WgpuCrossfontUnderlineMetrics {
+    let thickness_px = row_height_px.div_ceil(16).max(1);
+    WgpuCrossfontUnderlineMetrics::new(
+        row_height_px.saturating_sub(thickness_px.saturating_add(1)),
+        thickness_px,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
     text_shaping: Cell<bool>,
     ligatures: Cell<bool>,
+    underline_metrics: Cell<Option<WgpuCrossfontUnderlineMetrics>>,
 }
 
 impl WgpuRendererBackend {
@@ -53,6 +63,7 @@ impl WgpuRendererBackend {
             }),
             text_shaping: Cell::new(false),
             ligatures: Cell::new(true),
+            underline_metrics: Cell::new(None),
         }
     }
 
@@ -66,6 +77,10 @@ impl WgpuRendererBackend {
 
     pub fn set_ligatures(&self, enabled: bool) {
         self.ligatures.set(enabled);
+    }
+
+    pub fn set_underline_metrics(&self, metrics: Option<WgpuCrossfontUnderlineMetrics>) {
+        self.underline_metrics.set(metrics);
     }
 
     pub fn with_quads<T>(&self, f: impl FnOnce(&[WgpuQuadDrawItem]) -> T) -> T {
@@ -109,8 +124,13 @@ impl RendererBackend for WgpuRendererBackend {
 
         for row_y in dirty_rows {
             if let Some(row) = snapshot_rows.get(&row_y) {
-                let rendered_row =
-                    render_row(row, config, self.text_shaping.get(), self.ligatures.get());
+                let rendered_row = render_row(
+                    row,
+                    config,
+                    self.text_shaping.get(),
+                    self.ligatures.get(),
+                    self.underline_metrics.get(),
+                );
                 inner
                     .draw_rows
                     .insert(row_y, Arc::clone(&rendered_row.draw_row));
@@ -132,6 +152,7 @@ impl RendererBackend for WgpuRendererBackend {
                 config,
                 self.text_shaping.get(),
                 self.ligatures.get(),
+                self.underline_metrics.get(),
             );
             if let Some((x, y)) = preedit.cursor_cell(cursor, config.grid_columns, config.grid_rows)
             {
@@ -214,6 +235,7 @@ fn render_ime_preedit(
     config: WgpuRendererConfig,
     text_shaping: bool,
     ligatures: bool,
+    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
 ) -> Vec<WgpuRenderedRow> {
     if preedit.text.is_empty() || config.grid_columns == 0 || config.grid_rows == 0 {
         return Vec::new();
@@ -294,7 +316,7 @@ fn render_ime_preedit(
     }
 
     rows.values()
-        .map(|row| render_row(row, config, text_shaping, ligatures))
+        .map(|row| render_row(row, config, text_shaping, ligatures, underline_metrics))
         .collect()
 }
 
@@ -356,9 +378,10 @@ fn render_row(
     config: WgpuRendererConfig,
     text_shaping: bool,
     ligatures: bool,
+    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
 ) -> WgpuRenderedRow {
     if text_shaping {
-        return render_shaped_row(row, config, ligatures);
+        return render_shaped_row(row, config, ligatures, underline_metrics);
     }
 
     let mut draw_row = WgpuDrawRow {
@@ -414,7 +437,12 @@ fn render_row(
             }
             if run.style.underline {
                 underline_quads.push(WgpuQuadDrawItem::underline(
-                    x, row.y, cell_width, config, run.style,
+                    x,
+                    row.y,
+                    cell_width,
+                    config,
+                    run.style,
+                    underline_metrics,
                 ));
             }
             previous_glyph_x = Some(x);
@@ -433,6 +461,7 @@ fn render_shaped_row(
     row: &RenderSurfaceRowSnapshot,
     config: WgpuRendererConfig,
     ligatures: bool,
+    underline_metrics: Option<WgpuCrossfontUnderlineMetrics>,
 ) -> WgpuRenderedRow {
     let mut draw_row = WgpuDrawRow {
         y: row.y,
@@ -469,6 +498,7 @@ fn render_shaped_row(
                         segment.cell_width,
                         config,
                         run.style,
+                        underline_metrics,
                     ));
                 }
             }
@@ -1045,15 +1075,20 @@ impl WgpuQuadDrawItem {
         cell_width: u32,
         config: WgpuRendererConfig,
         style: TextStyleDto,
+        metrics: Option<WgpuCrossfontUnderlineMetrics>,
     ) -> Self {
+        let row_height_px = config.row_height_px(y);
+        let metrics = metrics.unwrap_or_else(|| fallback_underline_metrics(row_height_px));
+        let thickness_px = metrics.thickness_px().min(row_height_px).max(1);
+        let offset_y_px = metrics
+            .offset_y_px()
+            .min(row_height_px.saturating_sub(thickness_px));
         Self {
             kind: WgpuQuadKind::Underline,
             x_px: config.content_origin_x + x * config.cell_width_px,
-            y_px: config
-                .row_top_px(y)
-                .saturating_add(config.row_height_px(y).saturating_sub(2)),
+            y_px: config.row_top_px(y).saturating_add(offset_y_px),
             width_px: cell_width.max(1) * config.cell_width_px,
-            height_px: 1,
+            height_px: thickness_px,
             style,
             alpha: u8::MAX,
         }
@@ -1134,7 +1169,9 @@ mod tests {
         CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
         append_pixel_rect_quads_from_row,
     };
-    use crate::rendering::pty_surface::glyph_atlas::WgpuTerminalGlyphKey;
+    use crate::rendering::pty_surface::{
+        crossfont_glyph_atlas::WgpuCrossfontUnderlineMetrics, glyph_atlas::WgpuTerminalGlyphKey,
+    };
 
     fn pixel_row(command: RenderCommandDto) -> RenderSurfaceRowSnapshot {
         let text = encode_pixel_fill_rect_command(&command).expect("pixel command should encode");
@@ -1235,6 +1272,38 @@ mod tests {
         assert_eq!(backgrounds[0].height_px, 35);
         assert_eq!(backgrounds[0].style.background, Some(background));
         assert_eq!(backgrounds[0].alpha, 128);
+    }
+
+    #[test]
+    fn underlines_use_the_active_font_metrics() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        backend.set_underline_metrics(Some(WgpuCrossfontUnderlineMetrics::new(11, 3)));
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "a".to_string(),
+                    style: TextStyleDto {
+                        underline: true,
+                        ..TextStyleDto::plain()
+                    },
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        });
+
+        let underlines = backend.state().underline_quads();
+        assert_eq!(underlines.len(), 1);
+        assert_eq!(underlines[0].y_px, 11);
+        assert_eq!(underlines[0].height_px, 3);
     }
 
     #[test]

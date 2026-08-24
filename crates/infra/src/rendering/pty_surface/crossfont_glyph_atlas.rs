@@ -35,6 +35,29 @@ pub struct WgpuCrossfontCellMetrics {
     baseline_y_px: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgpuCrossfontUnderlineMetrics {
+    offset_y_px: u32,
+    thickness_px: u32,
+}
+
+impl WgpuCrossfontUnderlineMetrics {
+    pub const fn new(offset_y_px: u32, thickness_px: u32) -> Self {
+        Self {
+            offset_y_px,
+            thickness_px,
+        }
+    }
+
+    pub const fn offset_y_px(self) -> u32 {
+        self.offset_y_px
+    }
+
+    pub const fn thickness_px(self) -> u32 {
+        self.thickness_px
+    }
+}
+
 impl WgpuCrossfontCellMetrics {
     pub const fn new(cell_width_px: u32, cell_height_px: u32, baseline_y_px: i32) -> Self {
         Self {
@@ -229,6 +252,13 @@ impl WgpuCrossfontGlyphAtlasBuilder {
 
     pub const fn ligatures(&self) -> bool {
         self.ligatures
+    }
+
+    pub fn underline_metrics(&self) -> Option<WgpuCrossfontUnderlineMetrics> {
+        self.backend
+            .borrow()
+            .as_ref()
+            .map(WgpuCrossfontGlyphBackend::underline_metrics)
     }
 
     pub fn build_for_texts<I, S>(&self, texts: I) -> WgpuTerminalGlyphAtlas
@@ -436,6 +466,7 @@ struct WgpuCrossfontGlyphBackend {
     average_advance_px: u32,
     line_height_px: u32,
     baseline_y_px: i32,
+    underline_metrics: WgpuCrossfontUnderlineMetrics,
     glyph_cache: HashMap<WgpuTerminalGlyphKey, RasterizedTerminalGlyph>,
     cluster_rasterizer: Option<CosmicTextClusterRasterizer>,
     cluster_font_faces: WgpuCrossfontFontFaces,
@@ -516,6 +547,17 @@ impl WgpuCrossfontGlyphBackend {
             .as_ref()
             .map(|metrics| alacritty_baseline_y_px(line_height_px, metrics.descent))
             .unwrap_or_else(|| ((line_height_px as f32) * 0.80).round() as i32);
+        let underline_metrics = metrics
+            .as_ref()
+            .map(|metrics| {
+                crossfont_underline_metrics(
+                    line_height_px,
+                    baseline_y_px,
+                    metrics.underline_position,
+                    metrics.underline_thickness,
+                )
+            })
+            .unwrap_or_else(|| fallback_underline_metrics(line_height_px));
 
         Ok(Self {
             rasterizer,
@@ -527,6 +569,7 @@ impl WgpuCrossfontGlyphBackend {
             average_advance_px,
             line_height_px,
             baseline_y_px,
+            underline_metrics,
             glyph_cache: HashMap::new(),
             cluster_rasterizer: None,
             cluster_font_faces: font_faces,
@@ -543,6 +586,10 @@ impl WgpuCrossfontGlyphBackend {
 
     fn baseline_y_px(&self) -> i32 {
         self.baseline_y_px
+    }
+
+    fn underline_metrics(&self) -> WgpuCrossfontUnderlineMetrics {
+        self.underline_metrics
     }
 
     fn rasterize_terminal_glyph(
@@ -1291,6 +1338,30 @@ fn alacritty_baseline_y_px(cell_height_px: u32, descent: f32) -> i32 {
     }
 }
 
+fn crossfont_underline_metrics(
+    cell_height_px: u32,
+    baseline_y_px: i32,
+    underline_position: f32,
+    underline_thickness: f32,
+) -> WgpuCrossfontUnderlineMetrics {
+    let thickness_px = underline_thickness.round().max(1.0) as u32;
+    let underline_center_y = baseline_y_px as f32 - underline_position;
+    let offset_y_px = (underline_center_y - thickness_px as f32 / 2.0)
+        .round()
+        .clamp(0.0, cell_height_px.saturating_sub(thickness_px) as f32)
+        as u32;
+
+    WgpuCrossfontUnderlineMetrics::new(offset_y_px, thickness_px)
+}
+
+fn fallback_underline_metrics(cell_height_px: u32) -> WgpuCrossfontUnderlineMetrics {
+    let thickness_px = cell_height_px.div_ceil(16).max(1);
+    WgpuCrossfontUnderlineMetrics::new(
+        cell_height_px.saturating_sub(thickness_px.saturating_add(1)),
+        thickness_px,
+    )
+}
+
 fn terminal_glyph_draw_offset(
     glyph: &RasterizedTerminalGlyph,
     base_cell_width: u32,
@@ -1580,8 +1651,16 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontGlyphAtlasBuilder, WgpuTerminalGlyphKey,
+        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontGlyphAtlasBuilder,
+        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_underline_metrics,
     };
+
+    #[test]
+    fn converts_crossfont_underline_metrics_to_cell_pixels() {
+        let metrics = crossfont_underline_metrics(32, 25, -3.0, 1.6);
+
+        assert_eq!(metrics, WgpuCrossfontUnderlineMetrics::new(27, 2));
+    }
 
     #[test]
     fn rasterizes_normal_bold_italic_and_bold_italic_glyphs() {
