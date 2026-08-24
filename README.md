@@ -104,7 +104,7 @@ the Rust musl target, a matching C linker, and a pkg-config sysroot.
 
 ## Terminal images
 
-Germinal supports direct Kitty Graphics Protocol images using raw RGB, raw RGBA, or PNG payloads. Chunked base64 payloads, zlib compression, image/placement IDs, Unicode placeholders used by Yazi, source rectangles, cell sizing, z-index layering, deletion, and query responses are supported.
+Germinal supports Kitty Graphics Protocol images using raw RGB, raw RGBA, or PNG payloads. Images can be transferred directly, through regular or temporary files, or through POSIX shared memory. Chunked Base64 payloads, zlib compression, image and placement IDs, Unicode placeholders used by Yazi and Neovim, source rectangles, cell sizing, protocol z-index layering, deletion, query responses, alternate screens, and scrolling-margin clipping are supported.
 
 To render the standalone checkerboard example, run this command inside Germinal:
 
@@ -112,7 +112,7 @@ To render the standalone checkerboard example, run this command inside Germinal:
 cargo run -p germinal --example kitty_image
 ```
 
-File, temporary-file, shared-memory, and animation actions are not supported yet. Unsupported requests receive a protocol error when an image ID is provided.
+Animated image actions are not supported yet. Unsupported requests receive a protocol error when an image ID is provided.
 
 ## Desktop notifications
 

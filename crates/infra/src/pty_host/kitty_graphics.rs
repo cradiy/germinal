@@ -220,6 +220,8 @@ struct KittyPlacement {
     horizontal_offset: i32,
     vertical_offset: i32,
     scroll_offset_y: i64,
+    clip_top_cell: Option<i64>,
+    clip_bottom_cell: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -417,23 +419,43 @@ impl KittyGraphicsState {
             return;
         }
 
-        let range = i64::from(start_row)..i64::from(end_row);
+        let start_row = i64::from(start_row);
+        let end_row = i64::from(end_row);
         let roots = self
             .placements
             .values()
             .filter(|placement| placement.relative_to.is_none())
             .filter(|placement| {
-                let row = i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y);
-                range.contains(&row)
+                let origin = i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y);
+                let visible_top = placement.clip_top_cell.unwrap_or(origin);
+                let visible_bottom = placement
+                    .clip_bottom_cell
+                    .unwrap_or_else(|| origin.saturating_add(i64::from(placement.occupied_rows)));
+                visible_top >= start_row && visible_bottom <= end_row
             })
             .map(|placement| placement.key)
             .collect::<Vec<_>>();
 
+        let mut fully_clipped = Vec::new();
         for key in roots {
             if let Some(placement) = self.placements.get_mut(&key) {
+                let origin = i64::from(placement.y_cell).saturating_add(placement.scroll_offset_y);
+                let visible_top = placement.clip_top_cell.unwrap_or(origin);
+                let visible_bottom = placement
+                    .clip_bottom_cell
+                    .unwrap_or_else(|| origin.saturating_add(i64::from(placement.occupied_rows)));
                 placement.scroll_offset_y = placement.scroll_offset_y.saturating_add(delta);
+                let clipped_top = visible_top.saturating_add(delta).max(start_row);
+                let clipped_bottom = visible_bottom.saturating_add(delta).min(end_row);
+                if clipped_top >= clipped_bottom {
+                    fully_clipped.push(key);
+                } else {
+                    placement.clip_top_cell = Some(clipped_top);
+                    placement.clip_bottom_cell = Some(clipped_bottom);
+                }
             }
         }
+        self.remove_placement_trees(fully_clipped.into_iter().collect(), false);
         self.resolved_positions.clear();
     }
 
@@ -1041,6 +1063,8 @@ impl KittyGraphicsState {
             horizontal_offset: command.i32(b'H', 0)?,
             vertical_offset: command.i32(b'V', 0)?,
             scroll_offset_y: 0,
+            clip_top_cell: None,
+            clip_bottom_cell: None,
         };
 
         let cursor_move = if relative_to.is_some() || command.u32(b'C', 0)? == 1 {
@@ -1146,8 +1170,10 @@ impl KittyGraphicsState {
             .filter_map(|placement| {
                 let image = self.images.get(&placement.image_key)?;
                 let &(x_cell, y_cell) = positions.get(&placement.key)?;
+                let (clip_top_cell, clip_bottom_cell) = self.placement_clip_cells(placement.key);
                 Some(RenderSurfaceImageSnapshot {
                     id: format!("{}:{}", image.key, placement.key),
+                    image_id: placement.image_id,
                     image_generation: image.generation,
                     x_cell: signed_cell_to_i32(x_cell),
                     y_cell: signed_cell_to_i32(y_cell),
@@ -1161,6 +1187,8 @@ impl KittyGraphicsState {
                     source_height_px: placement.source_height_px,
                     image_width_px: image.width_px,
                     image_height_px: image.height_px,
+                    clip_top_cell: clip_top_cell.map(signed_cell_to_i32),
+                    clip_bottom_cell: clip_bottom_cell.map(signed_cell_to_i32),
                     z_index: placement.z_index,
                     rgba: Arc::clone(&image.rgba),
                 })
@@ -1241,6 +1269,7 @@ impl KittyGraphicsState {
 
                 snapshots.push(RenderSurfaceImageSnapshot {
                     id: format!("virtual:{placement_key}:{min_x}:{min_y}"),
+                    image_id: placement.image_id,
                     image_generation: image.generation,
                     x_cell: i32::try_from(min_x).unwrap_or(i32::MAX),
                     y_cell: i32::try_from(min_y).unwrap_or(i32::MAX),
@@ -1254,12 +1283,36 @@ impl KittyGraphicsState {
                     source_height_px: placement.source_height_px,
                     image_width_px: image.width_px,
                     image_height_px: image.height_px,
+                    clip_top_cell: None,
+                    clip_bottom_cell: None,
                     z_index: placement.z_index,
                     rgba: Arc::clone(&image.rgba),
                 });
             }
         }
         (snapshots, virtual_positions)
+    }
+
+    fn placement_clip_cells(&self, mut key: u64) -> (Option<i64>, Option<i64>) {
+        let mut top = None::<i64>;
+        let mut bottom = None::<i64>;
+        for _ in 0..=MAX_RELATIVE_PLACEMENT_DEPTH {
+            let Some(placement) = self.placement_by_key(key) else {
+                break;
+            };
+            if let Some(placement_top) = placement.clip_top_cell {
+                top = Some(top.map_or(placement_top, |current| current.max(placement_top)));
+            }
+            if let Some(placement_bottom) = placement.clip_bottom_cell {
+                bottom =
+                    Some(bottom.map_or(placement_bottom, |current| current.min(placement_bottom)));
+            }
+            let Some(parent) = placement.relative_to else {
+                break;
+            };
+            key = parent;
+        }
+        (top, bottom)
     }
 
     fn resolve_placement_position(
@@ -1939,6 +1992,52 @@ mod tests {
         assert_eq!(snapshots.len(), 1);
         assert_eq!((snapshots[0].x_cell, snapshots[0].y_cell), (5, 6));
         assert_eq!(&*snapshots[0].rgba, &[255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn page_margin_scroll_moves_only_fully_contained_images_and_clips_exits() {
+        let mut graphics = KittyGraphicsState::default();
+        let payload = STANDARD.encode([255; 12]);
+        graphics.handle(
+            command("a=T,f=32,s=1,v=3,i=7,c=1,r=3,C=1", payload.as_bytes()),
+            (0, 2),
+        );
+        graphics.handle(
+            command("a=T,f=32,s=1,v=3,i=8,c=1,r=3,C=1", payload.as_bytes()),
+            (1, 1),
+        );
+
+        graphics.scroll_up(2, 6, 1);
+
+        let snapshots = graphics.snapshots(&[]);
+        let moved = snapshots
+            .iter()
+            .find(|snapshot| snapshot.x_cell == 0)
+            .unwrap();
+        let crossing_margin = snapshots
+            .iter()
+            .find(|snapshot| snapshot.x_cell == 1)
+            .unwrap();
+        assert_eq!(moved.y_cell, 1);
+        assert_eq!(
+            (moved.clip_top_cell, moved.clip_bottom_cell),
+            (Some(2), Some(4))
+        );
+        assert_eq!(crossing_margin.y_cell, 1);
+        assert_eq!(crossing_margin.clip_top_cell, None);
+        assert_eq!(crossing_margin.clip_bottom_cell, None);
+
+        graphics.scroll_down(2, 6, 1);
+        let snapshots = graphics.snapshots(&[]);
+        let moved = snapshots
+            .iter()
+            .find(|snapshot| snapshot.x_cell == 0)
+            .unwrap();
+        assert_eq!(moved.y_cell, 2);
+        assert_eq!(
+            (moved.clip_top_cell, moved.clip_bottom_cell),
+            (Some(3), Some(5))
+        );
     }
 
     #[test]

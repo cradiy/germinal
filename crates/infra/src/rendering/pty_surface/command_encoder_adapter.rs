@@ -10,6 +10,14 @@ use crate::rendering::pty_surface::{
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WgpuTerminalCommandEncoderAdapter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuTerminalTextLayer {
+    All,
+    SurfaceBackground,
+    CellBackground,
+    Foreground,
+}
+
 impl WgpuTerminalCommandEncoderAdapter {
     pub fn new() -> Self {
         Self
@@ -23,16 +31,47 @@ impl WgpuTerminalCommandEncoderAdapter {
         pipeline: &WgpuTerminalPipeline,
         uploaded_frame: &WgpuTerminalUploadedFrame<'_>,
     ) -> WgpuTerminalCommandEncoderResult {
+        self.encode_frame_layer(
+            command_encoder,
+            target_view,
+            render_target_plan,
+            pipeline,
+            uploaded_frame,
+            WgpuTerminalTextLayer::All,
+        )
+    }
+
+    pub fn encode_frame_layer(
+        &self,
+        command_encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        render_target_plan: WgpuTerminalRenderTargetPlan,
+        pipeline: &WgpuTerminalPipeline,
+        uploaded_frame: &WgpuTerminalUploadedFrame<'_>,
+        layer: WgpuTerminalTextLayer,
+    ) -> WgpuTerminalCommandEncoderResult {
         if render_target_plan.is_empty() {
-            return WgpuTerminalCommandEncoderResult {
-                target_id: uploaded_frame.target_id,
-                seq: uploaded_frame.seq,
-                began_render_pass: false,
-                encoded_frame: false,
-                command_count: 0,
-                draw_count: 0,
-                index_count: 0,
-            };
+            return WgpuTerminalCommandEncoderResult::empty(
+                uploaded_frame.target_id,
+                uploaded_frame.seq,
+            );
+        }
+
+        let total_indices = uploaded_frame.uploaded_buffers.index_count;
+        let background_indices = uploaded_frame.background_index_count.min(total_indices);
+        let requested_indices = text_layer_index_range(layer, total_indices, background_indices);
+        let Some(render_pass_plan) = uploaded_frame.render_pass_plan else {
+            return WgpuTerminalCommandEncoderResult::empty(
+                uploaded_frame.target_id,
+                uploaded_frame.seq,
+            );
+        };
+        let render_pass_plan = render_pass_plan.restricted_to_indices(requested_indices);
+        if render_pass_plan.is_empty() {
+            return WgpuTerminalCommandEncoderResult::empty(
+                uploaded_frame.target_id,
+                uploaded_frame.seq,
+            );
         }
 
         let color_attachment = Some(wgpu::RenderPassColorAttachment {
@@ -59,8 +98,20 @@ impl WgpuTerminalCommandEncoderAdapter {
         let frame_encoder = WgpuTerminalFrameEncoder::new();
         render_target_plan.apply_viewport(&mut render_pass);
 
-        let encode_result =
-            frame_encoder.encode_render_pass(&mut render_pass, pipeline, uploaded_frame);
+        let mut adapter =
+            crate::rendering::pty_surface::render_pass_adapter::WgpuTerminalRenderPassAdapter::new(
+                &mut render_pass,
+                pipeline,
+                &uploaded_frame.viewport_bind_group,
+                uploaded_frame.glyph_atlas_bind_group.as_deref(),
+                &uploaded_frame.uploaded_buffers,
+            );
+        let encode_result = frame_encoder.encode_plan(
+            uploaded_frame.target_id,
+            uploaded_frame.seq,
+            &render_pass_plan,
+            &mut adapter,
+        );
 
         drop(render_pass);
 
@@ -76,6 +127,21 @@ impl WgpuTerminalCommandEncoderAdapter {
     }
 }
 
+fn text_layer_index_range(
+    layer: WgpuTerminalTextLayer,
+    total_indices: u32,
+    background_indices: u32,
+) -> std::ops::Range<u32> {
+    let background_indices = background_indices.min(total_indices);
+    let surface_background_indices = background_indices.min(6);
+    match layer {
+        WgpuTerminalTextLayer::All => 0..total_indices,
+        WgpuTerminalTextLayer::SurfaceBackground => 0..surface_background_indices,
+        WgpuTerminalTextLayer::CellBackground => surface_background_indices..background_indices,
+        WgpuTerminalTextLayer::Foreground => background_indices..total_indices,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WgpuTerminalCommandEncoderResult {
     pub target_id: RenderTargetId,
@@ -88,6 +154,18 @@ pub struct WgpuTerminalCommandEncoderResult {
 }
 
 impl WgpuTerminalCommandEncoderResult {
+    pub fn empty(target_id: RenderTargetId, seq: Seq) -> Self {
+        Self {
+            target_id,
+            seq,
+            began_render_pass: false,
+            encoded_frame: false,
+            command_count: 0,
+            draw_count: 0,
+            index_count: 0,
+        }
+    }
+
     pub fn encoded_frame(&self) -> bool {
         self.encoded_frame
     }
@@ -165,5 +243,25 @@ mod tests {
     fn maps_store_flag_to_wgpu_store_op() {
         assert_eq!(store_op_of(true), wgpu::StoreOp::Store);
         assert_eq!(store_op_of(false), wgpu::StoreOp::Discard);
+    }
+
+    #[test]
+    fn splits_surface_cell_background_and_foreground_index_ranges() {
+        assert_eq!(
+            text_layer_index_range(WgpuTerminalTextLayer::SurfaceBackground, 30, 18),
+            0..6
+        );
+        assert_eq!(
+            text_layer_index_range(WgpuTerminalTextLayer::CellBackground, 30, 18),
+            6..18
+        );
+        assert_eq!(
+            text_layer_index_range(WgpuTerminalTextLayer::Foreground, 30, 18),
+            18..30
+        );
+        assert_eq!(
+            text_layer_index_range(WgpuTerminalTextLayer::All, 30, 18),
+            0..30
+        );
     }
 }

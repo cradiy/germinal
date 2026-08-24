@@ -91,6 +91,7 @@ impl<'a> WgpuTerminalFrameUploadPlan<'a> {
         WgpuTerminalUploadedFrame {
             target_id: self.target_id,
             seq: self.seq,
+            background_index_count: self.vertex_upload.background_index_count(),
             uploaded_buffers,
             viewport_bind_group,
             glyph_atlas_texture: glyph_atlas_gpu.texture,
@@ -116,6 +117,7 @@ pub struct WgpuTerminalUploadContext<'gpu, 'frame> {
 pub struct WgpuTerminalUploadedFrame<'a> {
     pub target_id: RenderTargetId,
     pub seq: Seq,
+    pub background_index_count: u32,
     pub uploaded_buffers: WgpuUploadedBuffers,
     pub viewport_bind_group: WgpuViewportBindGroup,
     pub glyph_atlas_texture: Option<std::sync::Arc<WgpuTerminalGlyphAtlasTexture>>,

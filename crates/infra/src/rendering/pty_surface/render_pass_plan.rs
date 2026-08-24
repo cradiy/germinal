@@ -44,6 +44,46 @@ impl WgpuTerminalRenderPassPlan {
             .iter()
             .any(|command| matches!(command, WgpuRenderPassCommand::DrawIndexed { .. }))
     }
+
+    pub fn restricted_to_indices(&self, requested: Range<u32>) -> Self {
+        if requested.is_empty() {
+            return Self {
+                commands: Vec::new(),
+            };
+        }
+
+        let mut commands = Vec::with_capacity(self.commands.len());
+        let mut has_draw = false;
+        for command in &self.commands {
+            match command {
+                WgpuRenderPassCommand::DrawIndexed {
+                    indices,
+                    base_vertex,
+                    instances,
+                } => {
+                    let start = indices.start.max(requested.start);
+                    let end = indices.end.min(requested.end);
+                    if start < end {
+                        commands.push(WgpuRenderPassCommand::DrawIndexed {
+                            indices: start..end,
+                            base_vertex: *base_vertex,
+                            instances: instances.clone(),
+                        });
+                        has_draw = true;
+                    }
+                }
+                _ => commands.push(command.clone()),
+            }
+        }
+
+        if has_draw {
+            Self { commands }
+        } else {
+            Self {
+                commands: Vec::new(),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,5 +214,30 @@ mod tests {
 
         assert_eq!(recorder.command_count(), 0);
         assert_eq!(recorder.draw_count(), 0);
+    }
+
+    #[test]
+    fn restricts_draw_indices_for_split_terminal_layers() {
+        let plan = WgpuTerminalRenderPassPlan::new(WgpuDrawIndexedPlan {
+            vertex_slot: 0,
+            index_format: wgpu::IndexFormat::Uint32,
+            index_count: 24,
+            base_vertex: 0,
+            first_instance: 0,
+            instance_count: 1,
+        });
+
+        let background = plan.restricted_to_indices(0..12);
+        let foreground = plan.restricted_to_indices(12..24);
+
+        assert!(matches!(
+            background.commands.last(),
+            Some(WgpuRenderPassCommand::DrawIndexed { indices, .. }) if indices == &(0..12)
+        ));
+        assert!(matches!(
+            foreground.commands.last(),
+            Some(WgpuRenderPassCommand::DrawIndexed { indices, .. }) if indices == &(12..24)
+        ));
+        assert!(plan.restricted_to_indices(24..24).is_empty());
     }
 }

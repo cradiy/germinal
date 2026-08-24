@@ -2554,7 +2554,7 @@ mod tests {
         store.apply_bytes(target_id, Seq::new(3), b"\x1b[1S");
         assert_eq!(first_image_y(&store, target_id), 0);
         store.apply_bytes(target_id, Seq::new(4), b"\x1b[1S");
-        assert_eq!(first_image_y(&store, target_id), -1);
+        assert_eq!(image_count(&store, target_id), 0);
     }
 
     #[test]

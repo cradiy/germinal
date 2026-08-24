@@ -17,6 +17,7 @@ use crate::rendering::pty_surface::{
 };
 
 const IMAGE_VERTEX_COUNT: u32 = 6;
+const KITTY_BELOW_CELL_BACKGROUND_Z_INDEX: i32 = i32::MIN / 2;
 const IMAGE_SHADER_WGSL: &str = r#"
 @group(0) @binding(0)
 var image_texture: texture_2d<f32>;
@@ -50,6 +51,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WgpuImageLayer {
+    BelowCellBackground,
     BelowText,
     AboveText,
 }
@@ -86,11 +88,14 @@ impl WgpuImageSurfaceRenderer {
         config: WgpuRendererConfig,
     ) -> WgpuImagePreparedFrame {
         self.sync_textures(device, queue, snapshot);
+        let mut below_cell_background = Vec::new();
         let mut below_text = Vec::new();
         let mut above_text = Vec::new();
 
         if !plan.is_empty() {
-            for image in &snapshot.image_surfaces {
+            let mut images = snapshot.image_surfaces.iter().collect::<Vec<_>>();
+            images.sort_by_key(|image| (image.z_index, image.image_id));
+            for image in images {
                 let Some(vertices) = vertices_for_image(image, plan, config) else {
                     continue;
                 };
@@ -98,10 +103,10 @@ impl WgpuImageSurfaceRenderer {
                     generation: image.image_generation,
                     vertices,
                 };
-                if image.z_index < 0 {
-                    below_text.push(prepared);
-                } else {
-                    above_text.push(prepared);
+                match image_layer(image.z_index) {
+                    WgpuImageLayer::BelowCellBackground => below_cell_background.push(prepared),
+                    WgpuImageLayer::BelowText => below_text.push(prepared),
+                    WgpuImageLayer::AboveText => above_text.push(prepared),
                 }
             }
         }
@@ -109,6 +114,7 @@ impl WgpuImageSurfaceRenderer {
         WgpuImagePreparedFrame {
             target_id: snapshot.target_id,
             seq: snapshot.latest_seq,
+            below_cell_background,
             below_text,
             above_text,
         }
@@ -129,6 +135,7 @@ impl WgpuImageSurfaceRenderer {
             load_op,
         } = context;
         let surfaces = match layer {
+            WgpuImageLayer::BelowCellBackground => &prepared.below_cell_background,
             WgpuImageLayer::BelowText => &prepared.below_text,
             WgpuImageLayer::AboveText => &prepared.above_text,
         };
@@ -234,6 +241,14 @@ impl WgpuImageSurfaceRenderer {
     }
 }
 
+fn image_layer(z_index: i32) -> WgpuImageLayer {
+    match z_index {
+        ..KITTY_BELOW_CELL_BACKGROUND_Z_INDEX => WgpuImageLayer::BelowCellBackground,
+        KITTY_BELOW_CELL_BACKGROUND_Z_INDEX..0 => WgpuImageLayer::BelowText,
+        0.. => WgpuImageLayer::AboveText,
+    }
+}
+
 pub(crate) struct WgpuImageEncodeContext<'a> {
     pub device: &'a wgpu::Device,
     pub encoder: &'a mut wgpu::CommandEncoder,
@@ -247,13 +262,24 @@ pub(crate) struct WgpuImageEncodeContext<'a> {
 pub(crate) struct WgpuImagePreparedFrame {
     pub target_id: RenderTargetId,
     pub seq: Seq,
+    below_cell_background: Vec<WgpuImagePrepared>,
     below_text: Vec<WgpuImagePrepared>,
     above_text: Vec<WgpuImagePrepared>,
 }
 
 impl WgpuImagePreparedFrame {
     pub fn is_empty(&self) -> bool {
-        self.below_text.is_empty() && self.above_text.is_empty()
+        self.below_cell_background.is_empty()
+            && self.below_text.is_empty()
+            && self.above_text.is_empty()
+    }
+
+    pub fn has_below_text_images(&self) -> bool {
+        !self.below_text.is_empty()
+    }
+
+    pub fn has_below_cell_background_images(&self) -> bool {
+        !self.below_cell_background.is_empty()
     }
 }
 
@@ -512,10 +538,16 @@ fn vertices_for_image(
     let content_bottom = config
         .content_origin_y
         .saturating_add(config.content_height_px) as f32;
+    let clip_top = image.clip_top_cell.map_or(f32::NEG_INFINITY, |row| {
+        config.content_origin_y as f32 + row as f32 * config.cell_height_px as f32
+    });
+    let clip_bottom = image.clip_bottom_cell.map_or(f32::INFINITY, |row| {
+        config.content_origin_y as f32 + row as f32 * config.cell_height_px as f32
+    });
     let left_px = raw_left.max(config.content_origin_x as f32);
-    let top_px = raw_top.max(config.content_origin_y as f32);
+    let top_px = raw_top.max(config.content_origin_y as f32).max(clip_top);
     let right_px = raw_right.min(content_right);
-    let bottom_px = raw_bottom.min(content_bottom);
+    let bottom_px = raw_bottom.min(content_bottom).min(clip_bottom);
     if left_px >= right_px || top_px >= bottom_px {
         return None;
     }
@@ -572,6 +604,7 @@ mod tests {
     fn image() -> RenderSurfaceImageSnapshot {
         RenderSurfaceImageSnapshot {
             id: "1:1".to_owned(),
+            image_id: 1,
             image_generation: 1,
             x_cell: 2,
             y_cell: 3,
@@ -585,6 +618,8 @@ mod tests {
             source_height_px: 20,
             image_width_px: 40,
             image_height_px: 20,
+            clip_top_cell: None,
+            clip_bottom_cell: None,
             z_index: 0,
             rgba: Arc::from(vec![0; 40 * 20 * 4]),
         }
@@ -669,5 +704,54 @@ mod tests {
 
         assert!((vertices[0].position_ndc[1] - 1.0).abs() < f32::EPSILON);
         assert_eq!(vertices[0].uv, [0.0, 0.5]);
+    }
+
+    #[test]
+    fn kitty_z_index_selects_all_three_protocol_layers() {
+        assert_eq!(
+            image_layer(KITTY_BELOW_CELL_BACKGROUND_Z_INDEX - 1),
+            WgpuImageLayer::BelowCellBackground
+        );
+        assert_eq!(
+            image_layer(KITTY_BELOW_CELL_BACKGROUND_Z_INDEX),
+            WgpuImageLayer::BelowText
+        );
+        assert_eq!(image_layer(-1), WgpuImageLayer::BelowText);
+        assert_eq!(image_layer(0), WgpuImageLayer::AboveText);
+    }
+
+    #[test]
+    fn clips_scrolled_image_to_page_margins_and_adjusts_uvs() {
+        let mut image = image();
+        image.y_cell = 1;
+        image.rows = 3;
+        image.source_height_px = 30;
+        image.image_height_px = 30;
+        image.rgba = Arc::from(vec![0; 40 * 30 * 4]);
+        image.clip_top_cell = Some(2);
+        image.clip_bottom_cell = Some(4);
+
+        let vertices = vertices_for_image(
+            &image,
+            WgpuTerminalRenderTargetPlan::new(100, 100),
+            WgpuRendererConfig {
+                cell_width_px: 10,
+                cell_height_px: 10,
+                content_origin_x: 0,
+                content_origin_y: 0,
+                content_width_px: 100,
+                content_height_px: 100,
+                grid_columns: 10,
+                grid_rows: 10,
+                blinking_cursor_visible: true,
+                ..WgpuRendererConfig::default()
+            },
+        )
+        .unwrap();
+
+        assert!((vertices[0].position_ndc[1] - 0.6).abs() < 1e-6);
+        assert!((vertices[2].position_ndc[1] - 0.2).abs() < 1e-6);
+        assert!((vertices[0].uv[1] - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(vertices[2].uv[1], 1.0);
     }
 }

@@ -236,14 +236,14 @@ impl RendererBackend for WgpuRendererBackend {
         for row in inner.rendered_rows.values() {
             quads.extend(row.background_quads.iter().copied());
         }
+        for row in &ime_rows {
+            quads.extend(row.background_quads.iter().copied());
+        }
         for row in inner.rendered_rows.values() {
             quads.extend(row.glyph_quads.iter().copied());
         }
         for row in inner.rendered_rows.values() {
             quads.extend(row.underline_quads.iter().copied());
-        }
-        for row in &ime_rows {
-            quads.extend(row.background_quads.iter().copied());
         }
         for row in &ime_rows {
             quads.extend(row.glyph_quads.iter().copied());

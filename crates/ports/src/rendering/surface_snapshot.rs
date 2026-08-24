@@ -114,6 +114,7 @@ pub struct RenderSurfaceVideoSurfaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSurfaceImageSnapshot {
     pub id: String,
+    pub image_id: u32,
     pub image_generation: u64,
     pub x_cell: i32,
     pub y_cell: i32,
@@ -127,6 +128,8 @@ pub struct RenderSurfaceImageSnapshot {
     pub source_height_px: u32,
     pub image_width_px: u32,
     pub image_height_px: u32,
+    pub clip_top_cell: Option<i32>,
+    pub clip_bottom_cell: Option<i32>,
     pub z_index: i32,
     pub rgba: Arc<[u8]>,
 }

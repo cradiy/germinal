@@ -10,7 +10,7 @@ use crate::rendering::pty_surface::video_surface_dmabuf_importer::import_nv12_dm
 use crate::rendering::pty_surface::{
     buffer_uploader::WgpuBufferUploader,
     command_encoder_adapter::{
-        WgpuTerminalCommandEncoderAdapter, WgpuTerminalCommandEncoderResult,
+        WgpuTerminalCommandEncoderAdapter, WgpuTerminalCommandEncoderResult, WgpuTerminalTextLayer,
     },
     frame_builder::{
         WgpuTerminalFrameBuilder, WgpuTerminalPreparedFrame, WgpuTerminalPreparedFrameTimings,
@@ -258,45 +258,104 @@ impl WgpuTerminalFrameRenderer {
             };
 
         let encode_started_at = Instant::now();
-        let below_image_result = self.image_surface_renderer.encode_layer(
+        let split_text_layers = prepared_image_frame.has_below_cell_background_images()
+            || prepared_image_frame.has_below_text_images();
+        let first_text_result = if let Some(uploaded_frame) = uploaded_frame.as_ref() {
+            self.command_encoder_adapter.encode_frame_layer(
+                view.command_encoder,
+                view.target_view,
+                view.render_target_plan,
+                view.pipeline,
+                uploaded_frame,
+                if split_text_layers {
+                    WgpuTerminalTextLayer::SurfaceBackground
+                } else {
+                    WgpuTerminalTextLayer::All
+                },
+            )
+        } else {
+            WgpuTerminalCommandEncoderResult::empty(prepared.target_id, prepared.seq)
+        };
+        let below_background_load_op = if first_text_result.encoded_frame {
+            wgpu::LoadOp::Load
+        } else {
+            view.render_target_plan.wgpu_load_op()
+        };
+        let below_background_image_result = self.image_surface_renderer.encode_layer(
             WgpuImageEncodeContext {
                 device: gpu.device,
                 encoder: view.command_encoder,
                 target_view: view.target_view,
                 color_format: view.pipeline.spec.color_format,
                 plan: view.render_target_plan,
-                load_op: view.render_target_plan.wgpu_load_op(),
+                load_op: below_background_load_op,
+            },
+            &prepared_image_frame,
+            WgpuImageLayer::BelowCellBackground,
+        );
+        let cell_background_result = if split_text_layers {
+            if let Some(uploaded_frame) = uploaded_frame.as_ref() {
+                self.command_encoder_adapter.encode_frame_layer(
+                    view.command_encoder,
+                    view.target_view,
+                    view.render_target_plan.with_load_op(
+                        crate::rendering::pty_surface::render_target_plan::WgpuTerminalLoadOp::Load,
+                    ),
+                    view.pipeline,
+                    uploaded_frame,
+                    WgpuTerminalTextLayer::CellBackground,
+                )
+            } else {
+                WgpuTerminalCommandEncoderResult::empty(prepared.target_id, prepared.seq)
+            }
+        } else {
+            WgpuTerminalCommandEncoderResult::empty(prepared.target_id, prepared.seq)
+        };
+        let below_text_load_op = if first_text_result.encoded_frame
+            || below_background_image_result.encoded
+            || cell_background_result.encoded_frame
+        {
+            wgpu::LoadOp::Load
+        } else {
+            view.render_target_plan.wgpu_load_op()
+        };
+        let below_text_image_result = self.image_surface_renderer.encode_layer(
+            WgpuImageEncodeContext {
+                device: gpu.device,
+                encoder: view.command_encoder,
+                target_view: view.target_view,
+                color_format: view.pipeline.spec.color_format,
+                plan: view.render_target_plan,
+                load_op: below_text_load_op,
             },
             &prepared_image_frame,
             WgpuImageLayer::BelowText,
         );
-        let text_render_target_plan = if below_image_result.encoded {
-            view.render_target_plan.with_load_op(
-                crate::rendering::pty_surface::render_target_plan::WgpuTerminalLoadOp::Load,
-            )
-        } else {
-            view.render_target_plan
-        };
-        let encode_result = if let Some(uploaded_frame) = uploaded_frame.as_ref() {
-            self.encode_uploaded_frame(
-                view.command_encoder,
-                view.target_view,
-                text_render_target_plan,
-                view.pipeline,
-                uploaded_frame,
-            )
-        } else {
-            WgpuTerminalCommandEncoderResult {
-                target_id: prepared.target_id,
-                seq: prepared.seq,
-                began_render_pass: false,
-                encoded_frame: false,
-                command_count: 0,
-                draw_count: 0,
-                index_count: 0,
+        let foreground_text_render_target_plan = view.render_target_plan.with_load_op(
+            crate::rendering::pty_surface::render_target_plan::WgpuTerminalLoadOp::Load,
+        );
+        let foreground_text_result = if split_text_layers {
+            if let Some(uploaded_frame) = uploaded_frame.as_ref() {
+                self.command_encoder_adapter.encode_frame_layer(
+                    view.command_encoder,
+                    view.target_view,
+                    foreground_text_render_target_plan,
+                    view.pipeline,
+                    uploaded_frame,
+                    WgpuTerminalTextLayer::Foreground,
+                )
+            } else {
+                WgpuTerminalCommandEncoderResult::empty(prepared.target_id, prepared.seq)
             }
+        } else {
+            WgpuTerminalCommandEncoderResult::empty(prepared.target_id, prepared.seq)
         };
-        let above_load_op = if below_image_result.encoded || encode_result.encoded_frame {
+        let above_load_op = if below_background_image_result.encoded
+            || first_text_result.encoded_frame
+            || cell_background_result.encoded_frame
+            || below_text_image_result.encoded
+            || foreground_text_result.encoded_frame
+        {
             wgpu::LoadOp::Load
         } else {
             view.render_target_plan.wgpu_load_op()
@@ -328,19 +387,30 @@ impl WgpuTerminalFrameRenderer {
             seq: prepared.seq,
             prepared: true,
             uploaded: upload_plan.has_draw_work(),
-            encoded: encode_result.encoded_frame
-                || below_image_result.encoded
+            encoded: first_text_result.encoded_frame
+                || cell_background_result.encoded_frame
+                || foreground_text_result.encoded_frame
+                || below_background_image_result.encoded
+                || below_text_image_result.encoded
                 || above_image_result.encoded
                 || video_result.encoded(),
-            command_count: encode_result.command_count
-                + usize::from(below_image_result.encoded)
+            command_count: first_text_result.command_count
+                + cell_background_result.command_count
+                + foreground_text_result.command_count
+                + usize::from(below_background_image_result.encoded)
+                + usize::from(below_text_image_result.encoded)
                 + usize::from(above_image_result.encoded)
                 + usize::from(video_result.encoded()),
-            draw_count: encode_result.draw_count
-                + below_image_result.draw_count
+            draw_count: first_text_result.draw_count
+                + cell_background_result.draw_count
+                + foreground_text_result.draw_count
+                + below_background_image_result.draw_count
+                + below_text_image_result.draw_count
                 + above_image_result.draw_count
                 + video_result.draw_count,
-            index_count: encode_result.index_count,
+            index_count: first_text_result.index_count
+                + cell_background_result.index_count
+                + foreground_text_result.index_count,
             vertex_count: prepared.vertex_count(),
             quad_count: prepared.quad_count(),
             glyph_count: prepared.glyph_count,
@@ -349,9 +419,12 @@ impl WgpuTerminalFrameRenderer {
             glyph_atlas_gpu_cache_hit,
             video_surface_count: video_result.surface_count,
             video_draw_count: video_result.draw_count,
-            image_surface_count: below_image_result.surface_count
+            image_surface_count: below_background_image_result.surface_count
+                + below_text_image_result.surface_count
                 + above_image_result.surface_count,
-            image_draw_count: below_image_result.draw_count + above_image_result.draw_count,
+            image_draw_count: below_background_image_result.draw_count
+                + below_text_image_result.draw_count
+                + above_image_result.draw_count,
             timings: WgpuTerminalFrameRenderTimings {
                 prepare: prepare_time,
                 upload_plan: upload_plan_time,

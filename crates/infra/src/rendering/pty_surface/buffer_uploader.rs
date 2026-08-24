@@ -101,6 +101,20 @@ impl WgpuBufferUploadBytes {
     pub fn index_byte_len(&self) -> usize {
         self.index_bytes().len()
     }
+
+    pub fn background_index_count(&self) -> u32 {
+        let background_quads = self
+            .vertex_data
+            .chunks_exact(4)
+            .take_while(|quad| {
+                quad.iter()
+                    .all(|vertex| vertex.kind == WGPU_VERTEX_KIND_BACKGROUND)
+            })
+            .count();
+        u32::try_from(background_quads.saturating_mul(6))
+            .unwrap_or(u32::MAX)
+            .min(self.index_count)
+    }
 }
 
 #[derive(Debug)]
@@ -199,6 +213,37 @@ mod tests {
         );
 
         assert!(!upload_bytes.is_empty());
+    }
+
+    #[test]
+    fn counts_only_the_contiguous_terminal_background_indices() {
+        let style = TextStyleDto::plain();
+        let quads = [
+            WgpuQuadDrawItem {
+                kind: WgpuQuadKind::Background,
+                x_px: 0,
+                y_px: 0,
+                width_px: 8,
+                height_px: 16,
+                style,
+                alpha: u8::MAX,
+            },
+            WgpuQuadDrawItem {
+                kind: WgpuQuadKind::Glyph {
+                    glyph_key: WgpuTerminalGlyphKey::plain('x'),
+                },
+                x_px: 0,
+                y_px: 0,
+                width_px: 8,
+                height_px: 16,
+                style,
+                alpha: u8::MAX,
+            },
+        ];
+        let vertex_buffer = WgpuQuadVertexBufferBuilder::new().build(&quads);
+        let upload_bytes = WgpuBufferUploader::new().build_upload_bytes(&vertex_buffer);
+
+        assert_eq!(upload_bytes.background_index_count(), 6);
     }
 
     #[test]

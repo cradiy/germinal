@@ -2,8 +2,6 @@ use germinal_ports::{rendering::render_target_id::RenderTargetId, seq::Seq};
 
 use crate::rendering::pty_surface::{
     frame_upload_plan::{WgpuTerminalFrameUploadPlan, WgpuTerminalUploadedFrame},
-    pipeline_factory::WgpuTerminalPipeline,
-    render_pass_adapter::WgpuTerminalRenderPassAdapter,
     render_pass_encoder::{WgpuTerminalRenderPassEncoder, WgpuTerminalRenderPassPlanEncoder},
     render_pass_plan::{WgpuRenderPassCommand, WgpuTerminalRenderPassPlan},
 };
@@ -52,21 +50,17 @@ impl WgpuTerminalFrameEncoder {
         )
     }
 
-    pub fn encode_render_pass<'resource>(
+    pub fn encode_plan<E>(
         &self,
-        render_pass: &mut wgpu::RenderPass<'resource>,
-        pipeline: &'resource WgpuTerminalPipeline,
-        uploaded_frame: &'resource WgpuTerminalUploadedFrame<'resource>,
-    ) -> WgpuTerminalFrameEncodeResult {
-        let mut adapter = WgpuTerminalRenderPassAdapter::new(
-            render_pass,
-            pipeline,
-            &uploaded_frame.viewport_bind_group,
-            uploaded_frame.glyph_atlas_bind_group.as_deref(),
-            &uploaded_frame.uploaded_buffers,
-        );
-
-        self.encode_uploaded_frame(uploaded_frame, &mut adapter)
+        target_id: RenderTargetId,
+        seq: Seq,
+        render_pass_plan: &WgpuTerminalRenderPassPlan,
+        encoder: &mut E,
+    ) -> WgpuTerminalFrameEncodeResult
+    where
+        E: WgpuTerminalRenderPassEncoder,
+    {
+        self.encode_optional_plan(target_id, seq, Some(render_pass_plan), encoder)
     }
 
     fn encode_optional_plan<E>(
