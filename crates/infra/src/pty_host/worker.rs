@@ -1129,7 +1129,12 @@ fn terminal_worker_pool_size() -> usize {
 }
 
 fn to_alacritty_term_size(size: TerminalPtySize) -> AlacrittyTermSize {
-    AlacrittyTermSize::new(size.columns() as usize, size.rows() as usize)
+    AlacrittyTermSize::with_pixels(
+        size.columns() as usize,
+        size.rows() as usize,
+        u32::from(size.pixel_width()),
+        u32::from(size.pixel_height()),
+    )
 }
 
 pub struct PlatformTerminalWorkerBackend<Dispatch> {

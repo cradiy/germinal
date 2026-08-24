@@ -64,6 +64,8 @@ const KITTY_IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
 pub struct AlacrittyTermSize {
     columns: usize,
     screen_lines: usize,
+    pixel_width: u32,
+    pixel_height: u32,
 }
 
 impl AlacrittyTermSize {
@@ -71,6 +73,22 @@ impl AlacrittyTermSize {
         Self {
             columns,
             screen_lines,
+            pixel_width: columns as u32,
+            pixel_height: screen_lines as u32,
+        }
+    }
+
+    pub const fn with_pixels(
+        columns: usize,
+        screen_lines: usize,
+        pixel_width: u32,
+        pixel_height: u32,
+    ) -> Self {
+        Self {
+            columns,
+            screen_lines,
+            pixel_width,
+            pixel_height,
         }
     }
 
@@ -81,6 +99,17 @@ impl AlacrittyTermSize {
     pub const fn screen_lines(self) -> usize {
         self.screen_lines
     }
+
+    fn cell_size_px(self) -> (u32, u32) {
+        (
+            self.pixel_width
+                .saturating_div(self.columns.max(1) as u32)
+                .max(1),
+            self.pixel_height
+                .saturating_div(self.screen_lines.max(1) as u32)
+                .max(1),
+        )
+    }
 }
 
 impl Default for AlacrittyTermSize {
@@ -88,6 +117,8 @@ impl Default for AlacrittyTermSize {
         Self {
             columns: 80,
             screen_lines: 24,
+            pixel_width: 80,
+            pixel_height: 24,
         }
     }
 }
@@ -296,7 +327,11 @@ impl AlacrittyTerminalStore {
                         u32::try_from(point.column.0).unwrap_or(0),
                         u32::try_from(point.line.0).unwrap_or(0),
                     );
-                    let result = state.graphics.handle(command, cursor);
+                    let result = state.graphics.handle_with_cell_size(
+                        command,
+                        cursor,
+                        state.size.cell_size_px(),
+                    );
                     if let Some(response) = result.response {
                         let _ = state
                             .pending_write_tx
@@ -1753,6 +1788,12 @@ fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlace
             };
             Some(KittyPlaceholderCell {
                 image_id: u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b),
+                placement_id: match cell.underline_color() {
+                    Some(Color::Spec(rgb)) => {
+                        u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)
+                    }
+                    _ => 0,
+                },
                 x_cell: u32::try_from(point.column.0).ok()?,
                 y_cell: u32::try_from(point.line).ok()?,
             })
