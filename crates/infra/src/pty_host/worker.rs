@@ -57,6 +57,7 @@ use crate::{
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 64;
 const MAX_PENDING_BYTES_BEFORE_APPLY: usize = 256 * 1024;
 const MAX_EVENTS_PER_WORKER_TICK: usize = 256;
+const INPUT_COALESCE_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_PENDING_OSC52_LOADS: usize = 64;
 const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(2);
 const PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
@@ -356,19 +357,27 @@ where
         rx: &Receiver<TerminalWorkerInput>,
     ) {
         self.collect_input(first_input);
+        let mut deadline =
+            (self.pending_bytes_len > 0).then(|| Instant::now() + INPUT_COALESCE_INTERVAL);
 
         for _ in 0..MAX_EVENTS_PER_WORKER_TICK {
             if self.pending_bytes_len >= MAX_PENDING_BYTES_BEFORE_APPLY {
                 break;
             }
 
-            match rx.try_recv() {
-                Ok(input) => {
-                    self.collect_input(input);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
+            let received = if let Some(deadline) = deadline {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                rx.recv_timeout(remaining).ok()
+            } else {
+                rx.try_recv().ok()
+            };
+
+            let Some(input) = received else { break };
+            self.collect_input(input);
+            deadline = (self.pending_bytes_len > 0)
+                .then(|| deadline.unwrap_or_else(|| Instant::now() + INPUT_COALESCE_INTERVAL));
         }
     }
 
@@ -527,6 +536,16 @@ where
     }
 
     fn apply_byte_chunks(&mut self, chunks: &[Vec<u8>]) -> Option<Seq> {
+        let combined;
+        let bytes = match chunks {
+            [] => return None,
+            [bytes] => bytes.as_slice(),
+            chunks => {
+                combined = chunks.concat();
+                combined.as_slice()
+            }
+        };
+
         self.seq += 1;
 
         let seq = Seq::new(self.seq);
@@ -534,21 +553,19 @@ where
         let mut applied_visible_bytes = false;
         let mut enter_gnative = false;
 
-        for bytes in chunks {
-            let decode_result = self.gnative_enter_decoder.decode(bytes);
-            enter_gnative |= decode_result.enter_gnative;
+        let decode_result = self.gnative_enter_decoder.decode(bytes);
+        enter_gnative |= decode_result.enter_gnative;
 
-            for event in self
-                .compatibility_decoder
-                .feed(&decode_result.visible_bytes)
-            {
-                match event {
-                    CompatibilityProtocolEvent::Bytes(bytes) => {
-                        self.apply_compatible_bytes(seq, &bytes, &mut applied_visible_bytes);
-                    }
-                    CompatibilityProtocolEvent::PtyWrite(bytes) => {
-                        self.forward_pty_writes(vec![bytes]);
-                    }
+        for event in self
+            .compatibility_decoder
+            .feed(&decode_result.visible_bytes)
+        {
+            match event {
+                CompatibilityProtocolEvent::Bytes(bytes) => {
+                    self.apply_compatible_bytes(seq, &bytes, &mut applied_visible_bytes);
+                }
+                CompatibilityProtocolEvent::PtyWrite(bytes) => {
+                    self.forward_pty_writes(vec![bytes]);
                 }
             }
         }

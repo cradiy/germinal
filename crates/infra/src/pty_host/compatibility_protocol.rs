@@ -88,6 +88,13 @@ impl TerminalCompatibilityProtocolDecoder {
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<CompatibilityProtocolEvent> {
+        if matches!(self.state, DecoderState::Ground)
+            && self.utf8_continuations == 0
+            && is_plain_ascii(input)
+        {
+            return vec![CompatibilityProtocolEvent::Bytes(input.to_vec())];
+        }
+
         let mut events = Vec::new();
         let mut visible = Vec::new();
 
@@ -397,6 +404,10 @@ impl TerminalCompatibilityProtocolDecoder {
             _ => None,
         }
     }
+}
+
+fn is_plain_ascii(input: &[u8]) -> bool {
+    !input.is_empty() && input.is_ascii() && !input.contains(&0x1b)
 }
 
 fn parse_cursor_style(

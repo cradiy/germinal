@@ -24,6 +24,13 @@ pub fn terminal_text_segments_with_ligatures(
     style: TextStyleDto,
     ligatures: bool,
 ) -> Vec<TerminalTextSegment> {
+    if text
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    {
+        return ascii_text_segments(text, style, ligatures);
+    }
+
     let normalized: String = text.nfc().collect();
     let graphemes: Vec<&str> = normalized.graphemes(true).collect();
     let mut segments = Vec::new();
@@ -47,8 +54,14 @@ pub fn terminal_text_segments_with_ligatures(
             while index < graphemes.len() && is_code_operator_grapheme(graphemes[index]) {
                 index += 1;
             }
-            if index - start > 1 {
+            if should_shape_operator_run(&graphemes[start..index]) {
                 push_shaped_segment(&mut segments, &graphemes[start..index], style, true);
+                continue;
+            }
+            if index - start > 4 {
+                for grapheme in &graphemes[start..index] {
+                    push_plain_ascii_segment(&mut segments, grapheme.as_bytes()[0], style);
+                }
                 continue;
             }
             index = start;
@@ -80,6 +93,79 @@ pub fn terminal_text_segments_with_ligatures(
     }
 
     segments
+}
+
+fn ascii_text_segments(
+    text: &str,
+    style: TextStyleDto,
+    ligatures: bool,
+) -> Vec<TerminalTextSegment> {
+    let bytes = text.as_bytes();
+    let mut segments = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if ligatures && is_code_operator_byte(bytes[index]) {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && is_code_operator_byte(bytes[index]) {
+                index += 1;
+            }
+            if should_shape_ascii_operator_run(&bytes[start..index]) {
+                push_ascii_shaped_segment(&mut segments, &text[start..index], style, true);
+                continue;
+            }
+            if index - start > 4 {
+                for byte in &bytes[start..index] {
+                    push_plain_ascii_segment(&mut segments, *byte, style);
+                }
+                continue;
+            }
+            index = start;
+        }
+
+        if ligatures && let Some(ligature_len) = standard_ascii_ligature_len(&bytes[index..]) {
+            let end = index + ligature_len;
+            push_ascii_shaped_segment(&mut segments, &text[index..end], style, true);
+            index = end;
+            continue;
+        }
+
+        push_plain_ascii_segment(&mut segments, bytes[index], style);
+        index += 1;
+    }
+
+    segments
+}
+
+fn push_plain_ascii_segment(
+    segments: &mut Vec<TerminalTextSegment>,
+    byte: u8,
+    style: TextStyleDto,
+) {
+    let character = char::from(byte);
+    segments.push(TerminalTextSegment {
+        text: character.to_string(),
+        cell_width: 1,
+        glyph_key: WgpuTerminalGlyphKey::styled(character, style.bold, style.italic),
+        shaped: false,
+        ligature: false,
+    });
+}
+
+fn push_ascii_shaped_segment(
+    segments: &mut Vec<TerminalTextSegment>,
+    text: &str,
+    style: TextStyleDto,
+    ligature: bool,
+) {
+    segments.push(TerminalTextSegment {
+        text: text.to_owned(),
+        cell_width: text.len() as u32,
+        glyph_key: WgpuTerminalGlyphKey::cluster(stable_text_hash(text), style.bold, style.italic),
+        shaped: true,
+        ligature,
+    });
 }
 
 fn push_shaped_segment(
@@ -146,29 +232,55 @@ fn is_contextual_script_grapheme(grapheme: &str) -> bool {
 }
 
 fn is_code_operator_grapheme(grapheme: &str) -> bool {
+    grapheme
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| grapheme.len() == 1 && is_code_operator_byte(*byte))
+}
+
+fn is_code_operator_byte(byte: u8) -> bool {
     matches!(
-        grapheme.as_bytes(),
-        [b'!']
-            | [b'#']
-            | [b'$']
-            | [b'%']
-            | [b'&']
-            | [b'*']
-            | [b'+']
-            | [b'-']
-            | [b'.']
-            | [b'/']
-            | [b':']
-            | [b'<']
-            | [b'=']
-            | [b'>']
-            | [b'?']
-            | [b'@']
-            | [b'\\']
-            | [b'^']
-            | [b'|']
-            | [b'~']
+        byte,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'/'
+            | b':'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'\\'
+            | b'^'
+            | b'|'
+            | b'~'
     )
+}
+
+fn should_shape_ascii_operator_run(bytes: &[u8]) -> bool {
+    bytes.len() > 1 && (bytes.len() <= 4 || bytes.windows(2).any(|pair| pair[0] != pair[1]))
+}
+
+fn should_shape_operator_run(graphemes: &[&str]) -> bool {
+    graphemes.len() > 1
+        && (graphemes.len() <= 4
+            || graphemes
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() != pair[1].as_bytes()))
+}
+
+fn standard_ascii_ligature_len(bytes: &[u8]) -> Option<usize> {
+    const STANDARD_LIGATURES: [&[u8]; 6] = [b"ffi", b"ffl", b"www", b"ff", b"fi", b"fl"];
+
+    STANDARD_LIGATURES
+        .iter()
+        .find_map(|ligature| bytes.starts_with(ligature).then_some(ligature.len()))
 }
 
 fn standard_ligature_len(graphemes: &[&str]) -> Option<usize> {
@@ -316,5 +428,13 @@ mod tests {
                 .iter()
                 .any(|segment| segment.text == "=" && !segment.shaped)
         );
+    }
+
+    #[test]
+    fn keeps_long_homogeneous_operator_fill_out_of_the_ligature_atlas() {
+        let segments = terminal_text_segments("..........", TextStyleDto::plain());
+
+        assert_eq!(segments.len(), 10);
+        assert!(segments.iter().all(|segment| !segment.shaped));
     }
 }

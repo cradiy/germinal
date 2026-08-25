@@ -115,6 +115,11 @@ impl Default for KittyGraphicsStreamDecoder {
 
 impl KittyGraphicsStreamDecoder {
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<KittyStreamEvent> {
+        if matches!(self.state, DecoderState::Ground) && !input.is_empty() && !input.contains(&0x1b)
+        {
+            return vec![KittyStreamEvent::Bytes(input.to_vec())];
+        }
+
         let mut events = Vec::new();
         let mut visible = Vec::new();
 
@@ -387,6 +392,14 @@ pub(crate) struct KittyGraphicsState {
 }
 
 impl KittyGraphicsState {
+    pub(crate) fn has_any_placements(&self) -> bool {
+        !self.placements.is_empty()
+            || !self.virtual_placements.is_empty()
+            || self.primary_screen.as_ref().is_some_and(|screen| {
+                !screen.placements.is_empty() || !screen.virtual_placements.is_empty()
+            })
+    }
+
     pub(crate) fn advance_animations(&mut self, now: Instant) -> bool {
         let mut changed = false;
         for image in self.images.values_mut() {
@@ -2531,6 +2544,21 @@ mod tests {
                 KittyStreamEvent::Command(command("f=32,s=1,v=1", b"AAAAAA==")),
                 KittyStreamEvent::Bytes(b"after".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn decoder_fast_path_preserves_plain_bytes() {
+        let mut decoder = KittyGraphicsStreamDecoder::default();
+
+        assert_eq!(
+            decoder.feed(b"plain text\r\n"),
+            vec![KittyStreamEvent::Bytes(b"plain text\r\n".to_vec())]
+        );
+        assert!(decoder.feed(b"\x1b_").is_empty());
+        assert_eq!(
+            decoder.feed(b"Xnot-kitty"),
+            vec![KittyStreamEvent::Bytes(b"\x1b_Xnot-kitty".to_vec())]
         );
     }
 

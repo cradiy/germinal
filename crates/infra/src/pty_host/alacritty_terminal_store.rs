@@ -1399,6 +1399,23 @@ impl AlacrittyTermState {
     }
 
     fn advance_terminal_bytes(&mut self, bytes: &[u8]) {
+        if !self.graphics.has_any_placements() {
+            let before = terminal_cursor_observation(&self.term);
+            self.graphics_lifecycle_observer
+                .set_record_position_events(false);
+            self.graphics_lifecycle_processor
+                .advance(&mut self.graphics_lifecycle_observer, bytes);
+            self.graphics_lifecycle_observer
+                .set_record_position_events(true);
+            self.processor.advance(&mut self.term, bytes);
+            let after = terminal_cursor_observation(&self.term);
+
+            for event in self.graphics_lifecycle_observer.take_events() {
+                self.apply_graphics_lifecycle_event(event, before, after);
+            }
+            return;
+        }
+
         for byte in bytes {
             let before = terminal_cursor_observation(&self.term);
             self.graphics_lifecycle_processor.advance(
@@ -2577,6 +2594,21 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(6), primary.as_bytes());
         store.apply_bytes(target_id, Seq::new(7), b"\x1bc");
+        assert_eq!(image_count(&store, target_id), 0);
+    }
+
+    #[test]
+    fn alternate_screen_is_tracked_before_the_first_kitty_placement() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(105);
+        let payload = STANDARD.encode([255, 0, 0, 255]);
+        let alternate = format!("\x1b_Ga=T,f=32,s=1,v=1,i=8,p=1,C=1;{payload}\x1b\\");
+
+        store.apply_bytes(target_id, Seq::new(1), b"plain text\x1b[?1049h");
+        store.apply_bytes(target_id, Seq::new(2), alternate.as_bytes());
+        assert_eq!(image_count(&store, target_id), 1);
+
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[?1049l");
         assert_eq!(image_count(&store, target_id), 0);
     }
 

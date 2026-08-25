@@ -20,6 +20,7 @@ pub(crate) struct KittyTerminalLifecycleObserver {
     screen_lines: u32,
     scroll_start: u32,
     scroll_end: u32,
+    record_position_events: bool,
     events: Vec<KittyTerminalLifecycleEvent>,
 }
 
@@ -30,8 +31,13 @@ impl KittyTerminalLifecycleObserver {
             screen_lines,
             scroll_start: 0,
             scroll_end: screen_lines,
+            record_position_events: true,
             events: Vec::new(),
         }
+    }
+
+    pub(crate) fn set_record_position_events(&mut self, record: bool) {
+        self.record_position_events = record;
     }
 
     pub(crate) fn resize(&mut self, screen_lines: usize) {
@@ -45,10 +51,12 @@ impl KittyTerminalLifecycleObserver {
     }
 
     fn push_input_event(&mut self) {
-        self.events.push(KittyTerminalLifecycleEvent::Input {
-            start: self.scroll_start,
-            end: self.scroll_end,
-        });
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::Input {
+                start: self.scroll_start,
+                end: self.scroll_end,
+            });
+        }
     }
 }
 
@@ -62,41 +70,51 @@ impl Handler for KittyTerminalLifecycleObserver {
     }
 
     fn linefeed(&mut self) {
-        self.events.push(KittyTerminalLifecycleEvent::Linefeed {
-            start: self.scroll_start,
-            end: self.scroll_end,
-        });
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::Linefeed {
+                start: self.scroll_start,
+                end: self.scroll_end,
+            });
+        }
     }
 
     fn scroll_up(&mut self, lines: usize) {
-        self.events.push(KittyTerminalLifecycleEvent::ScrollUp {
-            start: self.scroll_start,
-            end: self.scroll_end,
-            lines: u32::try_from(lines).unwrap_or(u32::MAX),
-        });
-    }
-
-    fn scroll_down(&mut self, lines: usize) {
-        self.events.push(KittyTerminalLifecycleEvent::ScrollDown {
-            start: self.scroll_start,
-            end: self.scroll_end,
-            lines: u32::try_from(lines).unwrap_or(u32::MAX),
-        });
-    }
-
-    fn insert_blank_lines(&mut self, lines: usize) {
-        self.events
-            .push(KittyTerminalLifecycleEvent::InsertBlankLines {
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::ScrollUp {
+                start: self.scroll_start,
                 end: self.scroll_end,
                 lines: u32::try_from(lines).unwrap_or(u32::MAX),
             });
+        }
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::ScrollDown {
+                start: self.scroll_start,
+                end: self.scroll_end,
+                lines: u32::try_from(lines).unwrap_or(u32::MAX),
+            });
+        }
+    }
+
+    fn insert_blank_lines(&mut self, lines: usize) {
+        if self.record_position_events {
+            self.events
+                .push(KittyTerminalLifecycleEvent::InsertBlankLines {
+                    end: self.scroll_end,
+                    lines: u32::try_from(lines).unwrap_or(u32::MAX),
+                });
+        }
     }
 
     fn delete_lines(&mut self, lines: usize) {
-        self.events.push(KittyTerminalLifecycleEvent::DeleteLines {
-            end: self.scroll_end,
-            lines: u32::try_from(lines).unwrap_or(u32::MAX),
-        });
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::DeleteLines {
+                end: self.scroll_end,
+                lines: u32::try_from(lines).unwrap_or(u32::MAX),
+            });
+        }
     }
 
     fn clear_screen(&mut self, mode: ClearMode) {
@@ -111,10 +129,12 @@ impl Handler for KittyTerminalLifecycleObserver {
     }
 
     fn reverse_index(&mut self) {
-        self.events.push(KittyTerminalLifecycleEvent::ReverseIndex {
-            start: self.scroll_start,
-            end: self.scroll_end,
-        });
+        if self.record_position_events {
+            self.events.push(KittyTerminalLifecycleEvent::ReverseIndex {
+                start: self.scroll_start,
+                end: self.scroll_end,
+            });
+        }
     }
 
     fn set_private_mode(&mut self, mode: PrivateMode) {

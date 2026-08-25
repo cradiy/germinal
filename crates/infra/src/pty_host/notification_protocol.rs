@@ -88,6 +88,13 @@ impl Default for TerminalNotificationProtocolDecoder {
 
 impl TerminalNotificationProtocolDecoder {
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<NotificationProtocolEvent> {
+        if matches!(self.state, DecoderState::Ground)
+            && self.utf8_continuations == 0
+            && is_plain_ascii(input)
+        {
+            return vec![NotificationProtocolEvent::Bytes(input.to_vec())];
+        }
+
         let mut events = Vec::new();
         let mut visible = Vec::new();
 
@@ -303,6 +310,10 @@ impl TerminalNotificationProtocolDecoder {
             None => self.pending_anonymous = Some(pending),
         }
     }
+}
+
+fn is_plain_ascii(input: &[u8]) -> bool {
+    !input.is_empty() && input.is_ascii() && !input.contains(&0x1b)
 }
 
 fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
