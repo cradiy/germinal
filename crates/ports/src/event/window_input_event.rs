@@ -124,7 +124,13 @@ pub enum WindowInputEvent {
         logical_key: WindowInputKey,
         text: Option<String>,
     },
+    ImeEnabled,
+    ImePreedit {
+        text: String,
+        cursor_range: Option<(usize, usize)>,
+    },
     Ime(String),
+    ImeDisabled,
     Paste(String),
     PointerMoved {
         position: WindowPointerPosition,

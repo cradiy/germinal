@@ -28,6 +28,7 @@ use germinal_gnative_protocol::gnative::{
         GNativeHostToApp,
     },
 };
+use germinal_gnative_protocol::seq::Seq;
 use germinal_ports::{
     event::{
         runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -636,8 +637,12 @@ async fn read_frames_loop<Dispatch>(
     let mut exit_dispatched = false;
 
     loop {
-        let Ok(message) = read_app_message(&mut reader, &mut read_buffer).await else {
-            break;
+        let message = match read_app_message(&mut reader, &mut read_buffer).await {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(gshell_id = gshell_id.value(), error = %error, "failed to read gnative app message");
+                break;
+            }
         };
         let Some(message) = message else {
             break;
@@ -730,6 +735,7 @@ fn present_frame<Dispatch>(
     let Some(mut snapshot) = presenter.surface_snapshot_of(target_id) else {
         return;
     };
+    snapshot.latest_seq = gnative_surface_seq(frame.seq);
     snapshot.cursor = frame.cursor.map(cursor_snapshot);
 
     if let Err(error) = surface_snapshot_tx.send(snapshot) {
@@ -751,6 +757,11 @@ fn present_frame<Dispatch>(
             "failed to dispatch gnative frame-ready event"
         );
     }
+}
+
+fn gnative_surface_seq(seq: Seq) -> Seq {
+    const GNATIVE_SEQUENCE_EPOCH: u64 = 1 << 63;
+    Seq::new(GNATIVE_SEQUENCE_EPOCH | (seq.value() & (GNATIVE_SEQUENCE_EPOCH - 1)))
 }
 
 fn cursor_snapshot(cursor: GNativeFrameCursor) -> RenderSurfaceCursorSnapshot {
@@ -968,11 +979,11 @@ mod tests {
         );
         assert_eq!(
             snapshot_rx.recv().expect("first snapshot").latest_seq,
-            Seq::new(1)
+            super::gnative_surface_seq(Seq::new(1))
         );
         assert_eq!(
             snapshot_rx.recv().expect("second snapshot").latest_seq,
-            Seq::new(2)
+            super::gnative_surface_seq(Seq::new(2))
         );
     }
 

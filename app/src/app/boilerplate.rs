@@ -428,6 +428,10 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).set_ime_preedit(target_id, preedit)
     }
 
+    fn reset_surface_sequence(&mut self, target_id: RenderTargetId) {
+        RenderService::inj_ref_mut(self).reset_surface_sequence(target_id)
+    }
+
     fn remove_render_target(&mut self, target_id: RenderTargetId) {
         RenderService::inj_ref_mut(self).remove_render_target(target_id)
     }

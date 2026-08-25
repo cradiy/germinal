@@ -1211,6 +1211,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::GNativeConnected { accepted }) => {
                 let gshell_id = accepted.gshell_id;
+                self.reset_surface_sequence(RenderTargetId::new(gshell_id.value()));
                 self.activate_gnative_session(accepted);
                 self.enter_gnative_mode(gshell_id);
                 if let Some(size_info) = self.current_gshell_size_info(gshell_id) {
@@ -1235,6 +1236,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.clear_ime_preedit(gshell_id);
                 self.exit_gnative_session(gshell_id);
                 self.exit_gnative_mode(gshell_id);
+                self.reset_surface_sequence(RenderTargetId::new(gshell_id.value()));
                 self.consume_latest_terminal_snapshot();
                 self.request_redraw();
             }
@@ -1509,10 +1511,30 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::Ime(Ime::Enabled) => {
                 self.ime_enabled = true;
+                self.route_window_input(self.focused_gshell(), WindowInputEvent::ImeEnabled);
                 self.update_ime_cursor_area();
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor_range)) => {
-                let target_id = RenderTargetId::new(self.focused_gshell().value());
+                let focused_gshell = self.focused_gshell();
+                let target_id = RenderTargetId::new(focused_gshell.value());
+                if self.render_runtime.as_mut().is_some_and(|runtime| {
+                    runtime.route_wgpu_pane_input(
+                        target_id,
+                        &WindowInputEvent::ImePreedit {
+                            text: text.clone(),
+                            cursor_range,
+                        },
+                    )
+                }) {
+                    return;
+                }
+                self.route_window_input(
+                    focused_gshell,
+                    WindowInputEvent::ImePreedit {
+                        text: text.clone(),
+                        cursor_range,
+                    },
+                );
                 let preedit = (!text.is_empty())
                     .then_some(RenderSurfaceImePreeditSnapshot { text, cursor_range });
                 self.set_ime_preedit(target_id, preedit);
@@ -1526,7 +1548,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::Ime(Ime::Disabled) => {
                 self.ime_enabled = false;
-                self.clear_ime_preedit(self.focused_gshell());
+                let focused_gshell = self.focused_gshell();
+                self.route_window_input(focused_gshell, WindowInputEvent::ImeDisabled);
+                self.clear_ime_preedit(focused_gshell);
             }
             _ => {}
         }

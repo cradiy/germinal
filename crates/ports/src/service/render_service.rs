@@ -32,6 +32,7 @@ pub trait IRenderService {
         target_id: RenderTargetId,
         preedit: Option<RenderSurfaceImePreeditSnapshot>,
     );
+    fn reset_surface_sequence(&mut self, target_id: RenderTargetId);
     fn remove_render_target(&mut self, target_id: RenderTargetId);
     fn request_redraw(&mut self);
     fn flush_redraw_request(&mut self);

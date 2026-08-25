@@ -184,7 +184,12 @@ fn gnative_input_event_from(
                 text: text.as_deref().map(ToOwned::to_owned),
                 modifiers: gnative_input_modifiers_from(modifiers),
             }),
+            WindowInputEvent::ImeEnabled => Some(GNativeInputEvent::ImeEnabled),
+            WindowInputEvent::ImePreedit { text, cursor_range } => {
+                Some(GNativeInputEvent::ImePreedit { text, cursor_range })
+            }
             WindowInputEvent::Ime(text) => Some(GNativeInputEvent::Ime(text)),
+            WindowInputEvent::ImeDisabled => Some(GNativeInputEvent::ImeDisabled),
             WindowInputEvent::Paste(text) => Some(GNativeInputEvent::Paste(text)),
             WindowInputEvent::PointerMoved {
                 position,

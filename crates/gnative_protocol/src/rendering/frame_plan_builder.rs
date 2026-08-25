@@ -34,6 +34,26 @@ pub enum RenderCommandDto {
         width_px: u32,
         height_px: u32,
     },
+    PngSurface {
+        id: String,
+        generation: u64,
+        x_px: u32,
+        y_px: u32,
+        width_px: u32,
+        height_px: u32,
+        png: Vec<u8>,
+    },
+    SharedRgbaSurface {
+        id: String,
+        generation: u64,
+        path: String,
+        slot: u32,
+        x_px: u32,
+        y_px: u32,
+        width_px: u32,
+        height_px: u32,
+        stride_bytes: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

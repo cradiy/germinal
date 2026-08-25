@@ -69,7 +69,13 @@ pub enum GNativeInputEvent {
         text: Option<String>,
         modifiers: GNativeInputModifiers,
     },
+    ImeEnabled,
+    ImePreedit {
+        text: String,
+        cursor_range: Option<(usize, usize)>,
+    },
     Ime(String),
+    ImeDisabled,
     ModifiersChanged(GNativeInputModifiers),
     FocusChanged(bool),
     PointerMoved {

@@ -281,6 +281,9 @@ where
                         send_pty_host_bytes(state, pty_host_id, bytes);
                     }
                 }
+                WindowInputEvent::ImeEnabled
+                | WindowInputEvent::ImePreedit { .. }
+                | WindowInputEvent::ImeDisabled => {}
                 WindowInputEvent::Paste(text) => send_pty_host_paste(state, pty_host_id, &text),
                 WindowInputEvent::PointerMoved {
                     position,

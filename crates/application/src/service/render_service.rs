@@ -298,6 +298,11 @@ where
         }
     }
 
+    fn reset_surface_sequence(&mut self, target_id: RenderTargetId) {
+        let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
+        state.latest_surface_seqs.borrow_mut().remove(&target_id);
+    }
+
     fn remove_render_target(&mut self, target_id: RenderTargetId) {
         {
             let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();

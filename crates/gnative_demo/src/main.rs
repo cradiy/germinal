@@ -197,6 +197,9 @@ fn handle_input(app: &mut DemoHostApp, input: GNativeInputEvent) {
             app.push_notice(format!("resize {}x{}", columns, rows));
         }
         GNativeInputEvent::Paste(text) | GNativeInputEvent::Ime(text) => app.paste(&text),
+        GNativeInputEvent::ImeEnabled
+        | GNativeInputEvent::ImePreedit { .. }
+        | GNativeInputEvent::ImeDisabled => {}
         GNativeInputEvent::Bytes(bytes) => {
             app.push_notice(format!("unsupported input: bytes {:?}", bytes));
         }
@@ -425,7 +428,10 @@ impl FullUiFrame {
                 RenderCommandDto::TextRun { y, .. } | RenderCommandDto::StyledTextRun { y, .. } => {
                     rows.entry(*y).or_default().push(command.clone());
                 }
-                RenderCommandDto::PixelFillRect { .. } | RenderCommandDto::VideoSurface { .. } => {
+                RenderCommandDto::PixelFillRect { .. }
+                | RenderCommandDto::VideoSurface { .. }
+                | RenderCommandDto::PngSurface { .. }
+                | RenderCommandDto::SharedRgbaSurface { .. } => {
                     structural_commands.push(command.clone());
                 }
                 RenderCommandDto::Clear | RenderCommandDto::ClearLine { .. } => return None,
