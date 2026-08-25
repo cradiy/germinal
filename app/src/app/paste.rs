@@ -70,6 +70,11 @@ impl HostPasteController {
         }
     }
 
+    pub fn reset_modifiers(&mut self) {
+        self.modifiers = HostPasteModifiers::default();
+        self.pressed = HostPressedModifiers::default();
+    }
+
     pub fn clipboard_paste_input(
         &mut self,
         gshell_id: GShellId,
@@ -187,6 +192,30 @@ mod tests {
                 control: true,
                 shift: true,
             }
+        );
+    }
+
+    #[test]
+    fn focus_reset_clears_reported_and_physically_tracked_modifiers() {
+        let mut controller = HostPasteController::default();
+        controller.set_modifiers(HostPasteModifiers {
+            control: true,
+            shift: true,
+        });
+        controller.observe_key_event(
+            WindowInputElementState::Pressed,
+            PhysicalKey::Code(KeyCode::ControlLeft),
+        );
+        controller.observe_key_event(
+            WindowInputElementState::Pressed,
+            PhysicalKey::Code(KeyCode::ShiftRight),
+        );
+
+        controller.reset_modifiers();
+
+        assert_eq!(
+            controller.effective_modifiers(),
+            HostPasteModifiers::default()
         );
     }
 }

@@ -732,6 +732,12 @@ impl App {
                         gshell_id,
                         event: GShellInputEvent::ToggleViMode,
                     });
+                    // Consume the shortcut chord immediately. On some Wayland
+                    // compositor/input-stack combinations, modifier releases
+                    // arrive late or not at all; carrying Ctrl into the first
+                    // Vi key turns `d` into terminal Ctrl+D (EOF) and can close
+                    // the last shell before Vi visibly updates.
+                    self.reset_input_modifiers();
                 }
                 KeyboardAction::ToggleSearch => {
                     let gshell_id = self.focused_gshell();
@@ -838,6 +844,12 @@ impl App {
             self.focused_gshell(),
             WindowInputEvent::ModifiersChanged(modifiers),
         );
+    }
+
+    fn reset_input_modifiers(&mut self) {
+        self.window_input_modifiers = WindowInputModifiers::new(false, false, false, false);
+        self.paste_controller.reset_modifiers();
+        self.route_effective_input_modifiers();
     }
 
     fn write_selection_to_clipboard(&mut self, gshell_id: GShellId, text: Option<String>) {
@@ -1414,6 +1426,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         self.clear_ime_preedit(self.focused_gshell());
                         self.pointer_capture = None;
                         self.route_pointer_left();
+                        // Some compositors do not deliver modifier key releases after
+                        // focus moves away. Never carry those stale keys into the next
+                        // focus session, where exact shortcuts would otherwise stop
+                        // matching and normal input could be routed as Ctrl/Shift input.
+                        self.reset_input_modifiers();
                     }
                     self.route_focus_changed(self.focused_gshell(), focused);
                 }

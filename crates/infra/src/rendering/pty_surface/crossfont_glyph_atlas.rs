@@ -13,6 +13,7 @@ use germinal_ports::pty_host::{
     font_config::TerminalFontConfig, font_face::TerminalFontFace, font_weight::TerminalFontWeight,
 };
 use thiserror::Error;
+use tracing::warn;
 
 use crate::rendering::pty_surface::{
     glyph_atlas::{
@@ -792,19 +793,40 @@ fn rasterize_terminal_glyph(
         size,
     };
 
-    let Ok(glyph) = rasterizer.get_glyph(glyph_key) else {
-        return RasterizedTerminalGlyph {
-            key,
-            cell_width,
-            width_px: 1,
-            height_px: 1,
-            left_px: 0,
-            top_px: 0,
-            advance_px: 0,
-            pixels: vec![0, 0, 0, 0],
-            is_color: false,
-            direct_draw_offset: None,
-        };
+    let glyph = match rasterizer.get_glyph(glyph_key) {
+        Ok(glyph) => glyph,
+        Err(source) => {
+            warn!(
+                codepoint = c as u32,
+                character = %c.escape_unicode(),
+                %source,
+                "failed to rasterize terminal glyph"
+            );
+            let replacement = ['\u{fffd}', '?'].into_iter().find_map(|character| {
+                rasterizer
+                    .get_glyph(GlyphKey {
+                        character,
+                        font_key,
+                        size,
+                    })
+                    .ok()
+            });
+            let Some(glyph) = replacement else {
+                return RasterizedTerminalGlyph {
+                    key,
+                    cell_width,
+                    width_px: 1,
+                    height_px: 1,
+                    left_px: 0,
+                    top_px: 0,
+                    advance_px: 0,
+                    pixels: vec![0, 0, 0, 0],
+                    is_color: false,
+                    direct_draw_offset: None,
+                };
+            };
+            glyph
+        }
     };
 
     let width_px = glyph.width.max(0) as u32;
@@ -905,6 +927,24 @@ impl CosmicTextClusterRasterizer {
                     break;
                 }
             }
+        }
+        if drawn_pixels.is_empty()
+            && segment.text.chars().any(|character| {
+                !character.is_whitespace() && terminal_char_cell_width(character) > 0
+            })
+        {
+            let escaped_text = segment
+                .text
+                .chars()
+                .flat_map(char::escape_unicode)
+                .collect::<String>();
+            warn!(
+                text = %escaped_text,
+                primary_family,
+                "font shaper produced no pixels for a visible terminal cluster"
+            );
+            drawn_pixels =
+                self.draw_cluster("\u{fffd}", &primary_family, weight, style, cell_height_px);
         }
 
         let is_color = is_emoji_text_cluster(&segment.text)
@@ -1163,7 +1203,7 @@ fn is_emoji_text_cluster(text: &str) -> bool {
 }
 
 fn build_atlas_from_rasterized_glyphs(
-    glyphs: Vec<RasterizedTerminalGlyph>,
+    mut glyphs: Vec<RasterizedTerminalGlyph>,
     base_cell_width: u32,
     base_cell_height: u32,
     baseline_y_px: i32,
@@ -1173,6 +1213,38 @@ fn build_atlas_from_rasterized_glyphs(
 ) -> WgpuTerminalGlyphAtlas {
     if glyphs.is_empty() {
         return WgpuTerminalGlyphAtlas::empty();
+    }
+
+    // A single malformed fallback glyph must not make wgpu create a texture
+    // larger than the selected adapter supports. Keep the atlas at a practical
+    // upper bound as well; a 4096x4096 RGBA atlas already holds tens of
+    // thousands of ordinary terminal glyphs and uses 64 MiB at the limit.
+    let max_texture_dimension_2d = max_texture_dimension_2d.clamp(1, 4096);
+    let padding_px = padding_px.min(max_texture_dimension_2d.saturating_sub(1));
+    let max_bitmap_dimension = max_texture_dimension_2d
+        .saturating_sub(padding_px.saturating_mul(2))
+        .max(1);
+    for glyph in &mut glyphs {
+        if glyph.width_px.max(1) <= max_bitmap_dimension
+            && glyph.height_px.max(1) <= max_bitmap_dimension
+        {
+            continue;
+        }
+
+        warn!(
+            codepoint = glyph.key.packed_id(),
+            width_px = glyph.width_px,
+            height_px = glyph.height_px,
+            max_bitmap_dimension,
+            "discarding oversized rasterized glyph bitmap"
+        );
+        glyph.width_px = 1;
+        glyph.height_px = 1;
+        glyph.left_px = 0;
+        glyph.top_px = 0;
+        glyph.pixels = vec![0, 0, 0, 0];
+        glyph.is_color = false;
+        glyph.direct_draw_offset = None;
     }
 
     // Alacritty never scales a rasterized glyph bitmap into the terminal cell.
@@ -1206,10 +1278,34 @@ fn build_atlas_from_rasterized_glyphs(
     let atlas_width = layout.atlas_width;
     let atlas_height = layout.atlas_height;
 
-    let mut pixels = vec![0u8; (atlas_width * atlas_height * 4) as usize];
+    let pixel_len = u64::from(atlas_width)
+        .saturating_mul(u64::from(atlas_height))
+        .saturating_mul(4);
+    let Ok(pixel_len) = usize::try_from(pixel_len) else {
+        warn!(
+            atlas_width,
+            atlas_height, "glyph atlas allocation is too large"
+        );
+        return WgpuTerminalGlyphAtlas::empty();
+    };
+    let mut pixels = vec![0u8; pixel_len];
     let mut entries = HashMap::new();
 
-    for (index, glyph) in glyphs.into_iter().enumerate() {
+    if layout.glyph_capacity < glyphs.len() as u32 {
+        warn!(
+            glyph_count = glyphs.len(),
+            glyph_capacity = layout.glyph_capacity,
+            atlas_width,
+            atlas_height,
+            "glyph atlas reached the device-safe capacity; excess glyphs were skipped"
+        );
+    }
+
+    for (index, glyph) in glyphs
+        .into_iter()
+        .take(layout.glyph_capacity as usize)
+        .enumerate()
+    {
         let index = index as u32;
         let col = index % layout.columns;
         let row = index / layout.columns;
@@ -1264,6 +1360,7 @@ struct GlyphAtlasGridLayout {
     row_count: u32,
     atlas_width: u32,
     atlas_height: u32,
+    glyph_capacity: u32,
 }
 
 impl GlyphAtlasGridLayout {
@@ -1276,18 +1373,19 @@ impl GlyphAtlasGridLayout {
         max_texture_dimension_2d: u32,
     ) -> Self {
         let glyph_count = glyph_count.max(1);
-        let preferred_columns = preferred_columns.max(1).min(glyph_count);
         let usable_dimension = max_texture_dimension_2d.max(padding_px.saturating_add(1));
         let usable_width = usable_dimension.saturating_sub(padding_px).max(1);
         let usable_height = usable_dimension.saturating_sub(padding_px).max(1);
         let max_columns = (usable_width / cell_stride_width).max(1).min(glyph_count);
         let max_rows = (usable_height / cell_stride_height).max(1);
-        let min_columns_needed = glyph_count.div_ceil(max_rows).max(1);
+        let glyph_capacity = glyph_count.min(max_columns.saturating_mul(max_rows));
+        let preferred_columns = preferred_columns.max(1).min(glyph_capacity);
+        let min_columns_needed = glyph_capacity.div_ceil(max_rows).max(1);
         let columns = preferred_columns
             .max(min_columns_needed)
             .min(max_columns)
             .max(1);
-        let row_count = glyph_count.div_ceil(columns);
+        let row_count = glyph_capacity.div_ceil(columns);
         let atlas_width = padding_px.saturating_add(columns.saturating_mul(cell_stride_width));
         let atlas_height = padding_px.saturating_add(row_count.saturating_mul(cell_stride_height));
 
@@ -1296,6 +1394,7 @@ impl GlyphAtlasGridLayout {
             row_count,
             atlas_width,
             atlas_height,
+            glyph_capacity,
         }
     }
 }
@@ -1820,5 +1919,14 @@ mod tests {
 
         assert_eq!(layout.columns, 11);
         assert!(layout.atlas_width <= 8192);
+    }
+
+    #[test]
+    fn caps_glyph_count_when_the_texture_cannot_hold_every_entry() {
+        let layout = GlyphAtlasGridLayout::new(100, 16, 20, 30, 2, 64);
+
+        assert_eq!(layout.glyph_capacity, 6);
+        assert!(layout.atlas_width <= 64);
+        assert!(layout.atlas_height <= 64);
     }
 }

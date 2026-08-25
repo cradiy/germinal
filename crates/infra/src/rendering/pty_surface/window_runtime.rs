@@ -31,7 +31,7 @@ use germinal_ports::{
     seq::Seq,
 };
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     window::{UserAttentionType, Window, WindowId},
@@ -380,6 +380,26 @@ impl WgpuTerminalWindowRuntime {
             .await
             .map_err(|source| WindowRuntimeError::RequestDevice { source })?;
 
+        let adapter_info = adapter.get_info();
+        let device_limits = device.limits();
+        info!(
+            adapter = %adapter_info.name,
+            backend = ?adapter_info.backend,
+            device_type = ?adapter_info.device_type,
+            driver = %adapter_info.driver,
+            driver_info = %adapter_info.driver_info,
+            vendor_id = adapter_info.vendor,
+            device_id = adapter_info.device,
+            max_texture_dimension_2d = device_limits.max_texture_dimension_2d,
+            "selected terminal GPU adapter"
+        );
+        device.on_uncaptured_error(Arc::new(|source| {
+            error!(?source, "uncaptured terminal GPU error");
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            error!(?reason, %message, "terminal GPU device was lost");
+        });
+
         let mut surface_config = surface.get_default_config(&adapter, width, height).ok_or(
             WindowRuntimeError::MissingSurfaceConfig {
                 width_px: width,
@@ -412,7 +432,7 @@ impl WgpuTerminalWindowRuntime {
             &profile,
             size_info,
             scale_factor,
-            device.limits().max_texture_dimension_2d,
+            device_limits.max_texture_dimension_2d,
             color_theme,
         )?;
         let frame_renderer = WgpuTerminalFrameRenderer::new(frame_builder);

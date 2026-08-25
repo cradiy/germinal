@@ -1,6 +1,9 @@
 use std::{
+    backtrace::Backtrace,
     fs::OpenOptions,
     io::{self, Write},
+    panic,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,6 +16,8 @@ use crate::app::{
     config::{AppPaths, LogLevel, LoggingConfig, create_dir_all},
     error::{AppError, AppResult},
 };
+
+const CRASH_LOG_FILE_NAME: &str = "germinal-crash.log";
 
 pub fn init_logging(config: &LoggingConfig, paths: &AppPaths) -> AppResult<()> {
     create_dir_all(paths.log_dir())?;
@@ -41,7 +46,60 @@ pub fn init_logging(config: &LoggingConfig, paths: &AppPaths) -> AppResult<()> {
                 .with_filter(level_filter(config.file_level)),
         )
         .try_init()
-        .map_err(AppError::LoggingInit)
+        .map_err(AppError::LoggingInit)?;
+
+    install_panic_hook(paths.log_dir().join(CRASH_LOG_FILE_NAME));
+    Ok(())
+}
+
+fn install_panic_hook(crash_log_path: PathBuf) {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        write_crash_record(&crash_log_path, panic_info);
+        default_hook(panic_info);
+    }));
+}
+
+fn write_crash_record(path: &Path, panic_info: &panic::PanicHookInfo<'_>) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("unnamed");
+    let payload = panic_info
+        .payload()
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            panic_info
+                .payload()
+                .downcast_ref::<String>()
+                .map(String::as_str)
+        })
+        .unwrap_or("non-string panic payload");
+    let location = panic_info
+        .location()
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let backtrace = Backtrace::force_capture();
+
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "timestamp_ms={timestamp_ms} pid={} thread={thread_name:?} location={location}\npanic: {payload}\nbacktrace:\n{backtrace}\n",
+        std::process::id(),
+    );
+    let _ = file.flush();
 }
 
 fn level_filter(level: LogLevel) -> LevelFilter {

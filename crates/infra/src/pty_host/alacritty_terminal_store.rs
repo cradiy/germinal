@@ -2912,6 +2912,31 @@ mod tests {
     }
 
     #[test]
+    fn vi_mode_accepts_immediate_motion_on_an_empty_terminal() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(20, 3));
+        let target_id = RenderTargetId::new(76);
+
+        assert!(store.set_vi_mode(target_id, Seq::new(1), true));
+        for (seq, motion) in [
+            TerminalViMotion::Left,
+            TerminalViMotion::Down,
+            TerminalViMotion::Up,
+            TerminalViMotion::Right,
+            TerminalViMotion::Top,
+            TerminalViMotion::Bottom,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(store.vi_motion(target_id, Seq::new(seq as u64 + 2), motion));
+        }
+
+        assert!(store.vi_mode_enabled(target_id));
+        assert!(store.take_pending_pty_writes(target_id).is_empty());
+        assert!(store.render_surface_snapshot_of(target_id).is_some());
+    }
+
+    #[test]
     fn vi_viewport_motions_scroll_history_and_position_the_cursor() {
         let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 4));
         let target_id = RenderTargetId::new(61);
