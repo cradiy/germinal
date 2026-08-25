@@ -927,8 +927,7 @@ impl WgpuRendererConfig {
 
     pub fn with_cursor_position_cells(mut self, x: f32, y: f32) -> Self {
         let x_px = self.content_origin_x as f32 + x * self.cell_width_px as f32;
-        let y_px = self.content_origin_y as f32 + y * self.cell_height_px as f32;
-        self.cursor_position_px = Some((x_px.round() as u32, y_px.round() as u32));
+        self.cursor_position_px = Some((x_px.round() as u32, self.row_position_px(y)));
         self
     }
 
@@ -1013,6 +1012,30 @@ impl WgpuRendererConfig {
         let row = row.min(rows);
         ((u64::from(row) * u64::from(self.content_height_px)) / u64::from(rows))
             .min(u64::from(u32::MAX)) as u32
+    }
+
+    fn row_position_px(self, row: f32) -> u32 {
+        if !row.is_finite() {
+            return self.content_origin_y;
+        }
+        let rows = self.grid_rows.max(1);
+        let row = row.max(0.0);
+        if row >= rows as f32 {
+            return self.content_origin_y.saturating_add(
+                (row * self.cell_height_px as f32)
+                    .round()
+                    .clamp(0.0, u32::MAX as f32) as u32,
+            );
+        }
+
+        let row_index = row.floor() as u32;
+        let row_top = self.row_offset_px(row_index);
+        let row_height = self
+            .row_offset_px(row_index.saturating_add(1))
+            .saturating_sub(row_top);
+        let row_offset = row_top as f32 + row.fract() * row_height as f32;
+        self.content_origin_y
+            .saturating_add(row_offset.round() as u32)
     }
 }
 impl From<TerminalRenderViewport> for WgpuRendererConfig {
@@ -1743,6 +1766,30 @@ mod tests {
 
         let cursors = backend.state().geometric_quads();
         assert_eq!((cursors[0].x_px, cursors[0].y_px), (12, 36));
+    }
+
+    #[test]
+    fn cursor_motion_uses_the_same_distributed_row_positions_as_text() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(100, 35),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let config = WgpuRendererConfig::from(size_info);
+
+        assert_eq!(config.row_top_px(1), 17);
+        assert_eq!(
+            config
+                .with_cursor_position_cells(1.5, 1.0)
+                .cursor_position_px,
+            Some((12, 17))
+        );
+        assert_eq!(
+            config
+                .with_cursor_position_cells(1.5, 0.5)
+                .cursor_position_px,
+            Some((12, 9))
+        );
     }
 
     #[test]

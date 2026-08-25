@@ -132,6 +132,8 @@ pub struct WgpuTerminalWindowRuntime {
     cursor_blink_epoch: Instant,
     next_cursor_blink_at: Option<Instant>,
     cursor_motion_duration: Duration,
+    cursor_motion_on_input: bool,
+    cursor_motion_on_enter: bool,
     cursor_motions: HashMap<RenderTargetId, CursorMotion>,
     next_cursor_motion_frame_at: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
@@ -166,6 +168,13 @@ struct CursorMotion {
     started_at: Instant,
     duration: Duration,
     waiting_for_line_feed: bool,
+}
+
+fn is_enter_cursor_motion(
+    previous: RenderSurfaceCursorSnapshot,
+    next: RenderSurfaceCursorSnapshot,
+) -> bool {
+    next.x == 0 && (previous.x != next.x || previous.y != next.y)
 }
 
 fn build_cursor_motion(
@@ -322,6 +331,8 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     base_title: String,
     cursor_blink_interval: Duration,
     cursor_motion_duration: Duration,
+    cursor_motion_on_input: bool,
+    cursor_motion_on_enter: bool,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     background_shader: Option<WgpuBackgroundShaderSource>,
@@ -332,6 +343,8 @@ struct WgpuTerminalWindowRuntimeOptions {
     base_title: String,
     cursor_blink_interval: Duration,
     cursor_motion_duration: Duration,
+    cursor_motion_on_input: bool,
+    cursor_motion_on_enter: bool,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
@@ -352,6 +365,8 @@ impl WgpuTerminalWindowRuntimeFactory {
             base_title,
             cursor_blink_interval,
             cursor_motion_duration,
+            cursor_motion_on_input: true,
+            cursor_motion_on_enter: true,
             color_theme,
             background_opacity: normalized_opacity(background_opacity),
             background_shader: None,
@@ -360,6 +375,12 @@ impl WgpuTerminalWindowRuntimeFactory {
 
     pub fn with_background_shader(mut self, shader: WgpuBackgroundShaderSource) -> Self {
         self.background_shader = Some(shader);
+        self
+    }
+
+    pub fn with_cursor_motion_modes(mut self, on_input: bool, on_enter: bool) -> Self {
+        self.cursor_motion_on_input = on_input;
+        self.cursor_motion_on_enter = on_enter;
         self
     }
 
@@ -382,6 +403,8 @@ impl WgpuTerminalWindowRuntimeFactory {
                 base_title: self.base_title.clone(),
                 cursor_blink_interval: self.cursor_blink_interval,
                 cursor_motion_duration: self.cursor_motion_duration,
+                cursor_motion_on_input: self.cursor_motion_on_input,
+                cursor_motion_on_enter: self.cursor_motion_on_enter,
                 color_theme: self.color_theme,
                 background_opacity: self.background_opacity,
                 render_plugins,
@@ -428,6 +451,8 @@ impl WgpuTerminalWindowRuntime {
                 base_title,
                 cursor_blink_interval,
                 cursor_motion_duration: DEFAULT_CURSOR_MOTION_DURATION,
+                cursor_motion_on_input: true,
+                cursor_motion_on_enter: true,
                 color_theme,
                 background_opacity,
                 render_plugins,
@@ -446,6 +471,8 @@ impl WgpuTerminalWindowRuntime {
             base_title,
             cursor_blink_interval,
             cursor_motion_duration,
+            cursor_motion_on_input,
+            cursor_motion_on_enter,
             color_theme,
             background_opacity,
             render_plugins,
@@ -607,6 +634,8 @@ impl WgpuTerminalWindowRuntime {
             cursor_blink_epoch: now,
             next_cursor_blink_at: None,
             cursor_motion_duration,
+            cursor_motion_on_input,
+            cursor_motion_on_enter,
             cursor_motions: HashMap::new(),
             next_cursor_motion_frame_at: None,
             perf: WgpuTerminalRenderPerf::new(),
@@ -1091,20 +1120,29 @@ impl WgpuTerminalWindowRuntime {
             .get(&target_id)
             .and_then(|snapshot| snapshot.cursor);
         let next = snapshot.cursor;
+        let Some((previous, next)) = previous.zip(next) else {
+            self.cursor_motions.remove(&target_id);
+            return;
+        };
         if self.cursor_motion_duration.is_zero()
-            || previous.zip(next).is_none_or(|(previous, next)| {
-                !previous.focused
-                    || !next.focused
-                    || previous.shape == RenderSurfaceCursorShape::Hidden
-                    || next.shape == RenderSurfaceCursorShape::Hidden
-            })
+            || !previous.focused
+            || !next.focused
+            || previous.shape == RenderSurfaceCursorShape::Hidden
+            || next.shape == RenderSurfaceCursorShape::Hidden
         {
             self.cursor_motions.remove(&target_id);
             return;
         }
-
-        let (previous, next) = previous.zip(next).expect("cursor pair was checked above");
         if previous.x == next.x && previous.y == next.y {
+            return;
+        }
+        let motion_enabled = if is_enter_cursor_motion(previous, next) {
+            self.cursor_motion_on_enter
+        } else {
+            self.cursor_motion_on_input
+        };
+        if !motion_enabled {
+            self.cursor_motions.remove(&target_id);
             return;
         }
 
@@ -1848,8 +1886,8 @@ mod tests {
     use super::{
         CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, accumulate_pending_surface_damage,
         build_cursor_motion, build_tab_bar_surface, cursor_blink_phase,
-        frame_interval_for_refresh_rate, ime_cursor_area, normalized_opacity,
-        terminal_wgpu_backends, transparent_surface_alpha_mode,
+        frame_interval_for_refresh_rate, ime_cursor_area, is_enter_cursor_motion,
+        normalized_opacity, terminal_wgpu_backends, transparent_surface_alpha_mode,
     };
 
     #[test]
@@ -1910,6 +1948,23 @@ mod tests {
         assert_eq!((combined.from_x, combined.from_y), (12.0, 4.0));
         assert_eq!((combined.to_x, combined.to_y), (0.0, 5.0));
         assert_eq!(combined.started_at, carriage_return.started_at);
+    }
+
+    #[test]
+    fn input_and_enter_cursor_motions_are_classified_independently() {
+        let cursor = |x, y| RenderSurfaceCursorSnapshot {
+            x,
+            y,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        };
+
+        assert!(!is_enter_cursor_motion(cursor(4, 2), cursor(5, 2)));
+        assert!(!is_enter_cursor_motion(cursor(5, 2), cursor(4, 2)));
+        assert!(is_enter_cursor_motion(cursor(4, 2), cursor(0, 2)));
+        assert!(is_enter_cursor_motion(cursor(0, 2), cursor(0, 3)));
+        assert!(is_enter_cursor_motion(cursor(4, 2), cursor(0, 3)));
     }
 
     #[test]

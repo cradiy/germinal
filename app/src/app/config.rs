@@ -363,6 +363,8 @@ pub struct CursorConfig {
     pub blinking: bool,
     pub blink_interval_ms: u64,
     pub motion_duration_ms: u64,
+    pub motion_on_input: bool,
+    pub motion_on_enter: bool,
 }
 
 impl Default for CursorConfig {
@@ -372,6 +374,8 @@ impl Default for CursorConfig {
             blinking: false,
             blink_interval_ms: 750,
             motion_duration_ms: 80,
+            motion_on_input: true,
+            motion_on_enter: true,
         }
     }
 }
@@ -862,6 +866,8 @@ mod tests {
         assert_eq!(value["cursor"]["blinking"].as_bool(), Some(false));
         assert_eq!(value["cursor"]["blink_interval_ms"].as_integer(), Some(750));
         assert_eq!(value["cursor"]["motion_duration_ms"].as_integer(), Some(80));
+        assert_eq!(value["cursor"]["motion_on_input"].as_bool(), Some(true));
+        assert_eq!(value["cursor"]["motion_on_enter"].as_bool(), Some(true));
         assert_eq!(value["terminal"]["osc52"].as_str(), Some("OnlyCopy"));
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
@@ -884,6 +890,8 @@ mod tests {
             blinking = true
             blink_interval_ms = 320
             motion_duration_ms = 65
+            motion_on_input = false
+            motion_on_enter = true
             "#,
         )
         .unwrap();
@@ -894,6 +902,8 @@ mod tests {
         );
         assert_eq!(config.cursor.blink_interval_ms, 320);
         assert_eq!(config.cursor.motion_duration_ms, 65);
+        assert!(!config.cursor.motion_on_input);
+        assert!(config.cursor.motion_on_enter);
     }
 
     #[test]

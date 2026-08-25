@@ -296,12 +296,15 @@ ligatures = false
 
 ## Cursor motion
 
-Germinal smooths terminal cursor movement over 80 milliseconds by default. Adjust the transition
-or set it to `0` for immediate cell-to-cell movement:
+Germinal smooths terminal cursor movement over 80 milliseconds by default. Input movement and
+Enter/line transitions can be enabled independently. Set the duration to `0` to disable all cursor
+motion:
 
 ```toml
 [cursor]
 motion_duration_ms = 80
+motion_on_input = true
+motion_on_enter = true
 ```
 
 ## Background opacity

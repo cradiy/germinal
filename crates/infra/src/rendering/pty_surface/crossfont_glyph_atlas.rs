@@ -1325,7 +1325,7 @@ fn build_atlas_from_rasterized_glyphs(
         };
 
         let (draw_offset_x_px, draw_offset_y_px) =
-            terminal_glyph_draw_offset(&glyph, base_cell_width, base_cell_height, baseline_y_px);
+            terminal_glyph_draw_offset(&glyph, base_cell_width, baseline_y_px);
 
         entries.insert(
             glyph.key,
@@ -1532,7 +1532,6 @@ fn fallback_strikeout_metrics(cell_height_px: u32) -> WgpuCrossfontStrikeoutMetr
 fn terminal_glyph_draw_offset(
     glyph: &RasterizedTerminalGlyph,
     base_cell_width: u32,
-    base_cell_height: u32,
     baseline_y_px: i32,
 ) -> (i32, i32) {
     if let Some(offset) = glyph.direct_draw_offset {
@@ -1547,13 +1546,7 @@ fn terminal_glyph_draw_offset(
     // Alacritty places bitmap glyphs relative to the font baseline derived from
     // crossfont metrics. The terminal cell decides layout; the bitmap keeps its
     // native size and font bearing.
-    let mut draw_y = baseline_y_px - glyph.top_px;
-
-    // Keep unusually small symbols visually centered inside the cell without
-    // scaling their bitmap.
-    if glyph.height_px > 0 && glyph.height_px < base_cell_height / 2 {
-        draw_y = ((base_cell_height as i32 - glyph.height_px as i32) / 2).max(draw_y);
-    }
+    let draw_y = baseline_y_px - glyph.top_px;
 
     // Center color emoji if it is narrower than its terminal cell span.  Text
     // glyphs keep their font bearing.
@@ -1818,9 +1811,10 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontFontFaces, WgpuCrossfontGlyphAtlasBuilder,
-        WgpuCrossfontGlyphBackend, WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics,
-        WgpuTerminalGlyphKey, crossfont_strikeout_metrics, crossfont_underline_metrics,
+        FontCoverage, GlyphAtlasGridLayout, RasterizedTerminalGlyph, WgpuCrossfontFontFaces,
+        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphBackend, WgpuCrossfontStrikeoutMetrics,
+        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_strikeout_metrics,
+        crossfont_underline_metrics, terminal_glyph_draw_offset,
     };
 
     #[test]
@@ -1846,6 +1840,24 @@ mod tests {
         let metrics = crossfont_strikeout_metrics(32, 25, 9.0, 1.6);
 
         assert_eq!(metrics, WgpuCrossfontStrikeoutMetrics::new(15, 2));
+    }
+
+    #[test]
+    fn short_text_glyph_preserves_font_baseline_offset() {
+        let glyph = RasterizedTerminalGlyph {
+            key: WgpuTerminalGlyphKey::styled('"', false, false),
+            cell_width: 1,
+            width_px: 4,
+            height_px: 6,
+            left_px: 3,
+            top_px: 18,
+            advance_px: 12,
+            pixels: vec![],
+            is_color: false,
+            direct_draw_offset: None,
+        };
+
+        assert_eq!(terminal_glyph_draw_offset(&glyph, 12, 24), (3, 6));
     }
 
     #[test]
