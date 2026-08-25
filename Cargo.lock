@@ -1320,17 +1320,20 @@ name = "germinal"
 version = "0.0.1"
 dependencies = [
  "arboard",
+ "base64",
  "eros",
  "germinal-application",
  "germinal-domain",
  "germinal-gnative-protocol",
  "germinal-infra",
  "germinal-ports",
+ "png",
  "serde",
  "thiserror 2.0.18",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "wgpu",
  "winit",
 ]
