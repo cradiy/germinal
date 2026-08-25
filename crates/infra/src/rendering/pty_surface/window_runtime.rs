@@ -151,6 +151,12 @@ fn normalized_opacity(opacity: f32) -> f32 {
     }
 }
 
+fn terminal_wgpu_backends() -> wgpu::Backends {
+    // GL is a secondary wgpu backend and initializes an additional driver stack even when Vulkan
+    // is selected. Germinal's Linux dma-buf video path also requires Vulkan.
+    wgpu::Backends::PRIMARY
+}
+
 fn frame_interval_for_refresh_rate(refresh_rate_millihertz: Option<u32>) -> Duration {
     let refresh_rate_millihertz = refresh_rate_millihertz
         .filter(|rate| *rate > 0)
@@ -343,7 +349,10 @@ impl WgpuTerminalWindowRuntime {
             background_shader,
         } = options;
         let background_opacity = normalized_opacity(background_opacity);
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: terminal_wgpu_backends(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
 
         let surface = instance
             .create_surface(Arc::clone(&window))
@@ -1635,8 +1644,16 @@ mod tests {
     use super::{
         TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
         frame_interval_for_refresh_rate, ime_cursor_area, normalized_opacity,
-        transparent_surface_alpha_mode,
+        terminal_wgpu_backends, transparent_surface_alpha_mode,
     };
+
+    #[test]
+    fn terminal_uses_primary_wgpu_backends_without_gl() {
+        let backends = terminal_wgpu_backends();
+
+        assert_eq!(backends, wgpu::Backends::PRIMARY);
+        assert!(!backends.contains(wgpu::Backends::GL));
+    }
 
     #[test]
     fn frame_interval_tracks_the_display_refresh_rate() {

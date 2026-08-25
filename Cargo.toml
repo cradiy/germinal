@@ -52,7 +52,15 @@ kudi = "0.1"
 
 # infra
 alacritty_terminal = "0.26"
-wgpu = "30.0"
+wgpu = { version = "30.0", default-features = false, features = [
+  "dx12",
+  "metal",
+  "parking_lot",
+  "std",
+  "vulkan",
+  "webgpu",
+  "wgsl",
+] }
 crossfont = "0.9"
 winit = "0.30"
 pollster = "0.4"
