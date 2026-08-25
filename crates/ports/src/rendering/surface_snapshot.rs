@@ -22,6 +22,22 @@ pub struct RenderSurfaceSnapshot {
     pub ime_preedit: Option<RenderSurfaceImePreeditSnapshot>,
 }
 
+/// Merges damage carried by an earlier snapshot into a newer full-state snapshot.
+///
+/// An empty damage list means that the whole surface must be rebuilt, so it dominates any
+/// partial row list. This is needed whenever intermediate snapshots are coalesced before the
+/// renderer has consumed them.
+pub fn merge_surface_dirty_rows(latest: &mut Vec<u32>, earlier: &[u32]) {
+    if latest.is_empty() || earlier.is_empty() {
+        latest.clear();
+        return;
+    }
+
+    latest.extend_from_slice(earlier);
+    latest.sort_unstable();
+    latest.dedup();
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSurfaceImePreeditSnapshot {
     pub text: String,
@@ -161,7 +177,28 @@ pub trait RenderSurfaceSnapshotProvider {
 mod tests {
     use super::{
         RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceImePreeditSnapshot,
+        merge_surface_dirty_rows,
     };
+
+    #[test]
+    fn merged_surface_damage_keeps_every_coalesced_row() {
+        let mut latest = vec![4, 5];
+
+        merge_surface_dirty_rows(&mut latest, &[1, 2, 4]);
+
+        assert_eq!(latest, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn full_surface_damage_dominates_partial_damage() {
+        let mut latest = vec![4, 5];
+        merge_surface_dirty_rows(&mut latest, &[]);
+        assert!(latest.is_empty());
+
+        let mut latest = Vec::new();
+        merge_surface_dirty_rows(&mut latest, &[1, 2]);
+        assert!(latest.is_empty());
+    }
 
     fn origin() -> RenderSurfaceCursorSnapshot {
         RenderSurfaceCursorSnapshot {

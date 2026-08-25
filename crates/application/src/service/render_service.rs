@@ -4,7 +4,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender},
     },
     time::Duration,
 };
@@ -13,7 +13,9 @@ use germinal_ports::{
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
     rendering::{
         render_target_id::RenderTargetId,
-        surface_snapshot::{RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot},
+        surface_snapshot::{
+            RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot, merge_surface_dirty_rows,
+        },
         tab_bar::TabBarSnapshot,
         window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
         workspace_layout::RenderSurfacePlacement,
@@ -54,26 +56,22 @@ impl RenderServiceState {
     }
 
     fn take_latest_surface_snapshots(&self) -> Vec<RenderSurfaceSnapshot> {
-        self.snapshot_wake_pending.store(false, Ordering::Release);
-
         let mut latest_by_target = HashMap::<RenderTargetId, RenderSurfaceSnapshot>::new();
 
         loop {
-            match self.surface_snapshot_rx.try_recv() {
-                Ok(snapshot) => {
-                    if self.retired_render_targets.contains(&snapshot.target_id) {
-                        continue;
-                    }
-                    let replace = latest_by_target
-                        .get(&snapshot.target_id)
-                        .is_none_or(|current| snapshot.latest_seq >= current.latest_seq);
-                    if replace {
-                        latest_by_target.insert(snapshot.target_id, snapshot);
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+            while let Ok(snapshot) = self.surface_snapshot_rx.try_recv() {
+                self.keep_latest_surface_snapshot(&mut latest_by_target, snapshot);
             }
+
+            // Clear only after draining. If a producer raced with the drain while the flag was
+            // still true, it skipped dispatching another FrameReady. The second receive closes
+            // that race: either we consume the raced snapshot and drain again, or a later
+            // producer observes false and dispatches a fresh wakeup.
+            self.snapshot_wake_pending.store(false, Ordering::Release);
+            let Ok(snapshot) = self.surface_snapshot_rx.try_recv() else {
+                break;
+            };
+            self.keep_latest_surface_snapshot(&mut latest_by_target, snapshot);
         }
 
         let mut latest_surface_seqs = self.latest_surface_seqs.borrow_mut();
@@ -90,6 +88,25 @@ impl RenderServiceState {
         });
 
         latest_by_target.into_values().collect()
+    }
+
+    fn keep_latest_surface_snapshot(
+        &self,
+        latest_by_target: &mut HashMap<RenderTargetId, RenderSurfaceSnapshot>,
+        mut snapshot: RenderSurfaceSnapshot,
+    ) {
+        if self.retired_render_targets.contains(&snapshot.target_id) {
+            return;
+        }
+
+        if let Some(current) = latest_by_target.get(&snapshot.target_id) {
+            if snapshot.latest_seq < current.latest_seq {
+                return;
+            }
+            merge_surface_dirty_rows(&mut snapshot.dirty_rows, &current.dirty_rows);
+        }
+
+        latest_by_target.insert(snapshot.target_id, snapshot);
     }
 
     fn set_window_focused(&mut self, focused: bool) -> bool {
@@ -376,6 +393,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use germinal_ports::{
         rendering::{
             render_target_id::RenderTargetId,
@@ -426,6 +445,42 @@ mod tests {
         assert_eq!(snapshots[0].latest_seq, Seq::new(3));
         assert_eq!(snapshots[1].target_id, RenderTargetId::new(2));
         assert_eq!(snapshots[1].latest_seq, Seq::new(4));
+    }
+
+    #[test]
+    fn draining_snapshots_merges_damage_from_coalesced_updates() {
+        let state = RenderServiceState::new();
+        let mut first = snapshot(1, 1);
+        first.dirty_rows = vec![1, 2];
+        let mut second = snapshot(1, 2);
+        second.dirty_rows = vec![4, 5];
+        state
+            .surface_snapshot_tx
+            .send(first)
+            .expect("first damaged snapshot");
+        state
+            .surface_snapshot_tx
+            .send(second)
+            .expect("second damaged snapshot");
+
+        let snapshots = state.take_latest_surface_snapshots();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].latest_seq, Seq::new(2));
+        assert_eq!(snapshots[0].dirty_rows, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn draining_snapshots_rearms_the_worker_wakeup() {
+        let state = RenderServiceState::new();
+        state.snapshot_wake_pending.store(true, Ordering::Release);
+        state
+            .surface_snapshot_tx
+            .send(snapshot(1, 1))
+            .expect("queued snapshot");
+
+        assert_eq!(state.take_latest_surface_snapshots().len(), 1);
+        assert!(!state.snapshot_wake_pending.load(Ordering::Acquire));
     }
 
     #[test]

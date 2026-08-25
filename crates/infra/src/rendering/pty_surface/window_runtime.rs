@@ -22,7 +22,7 @@ use germinal_ports::{
         render_target_id::RenderTargetId,
         surface_snapshot::{
             RenderSurfaceCursorShape, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
-            RenderSurfaceSnapshot,
+            RenderSurfaceSnapshot, merge_surface_dirty_rows,
         },
         tab_bar::{TabBarPosition, TabBarSnapshot},
         window_runtime::ITerminalWindowRuntime,
@@ -109,6 +109,7 @@ pub struct WgpuTerminalWindowRuntime {
     presenter: WgpuTerminalSurfaceFramePresenter,
 
     surface_snapshots: HashMap<RenderTargetId, RenderSurfaceSnapshot>,
+    pending_surface_dirty_rows: HashMap<RenderTargetId, Vec<u32>>,
     workspace_layout: Vec<RenderSurfacePlacement>,
     tab_bar: Option<TabBarSnapshot>,
     tab_bar_surface: Option<WgpuTabBarSurface>,
@@ -133,6 +134,16 @@ pub struct WgpuTerminalWindowRuntime {
     perf: WgpuTerminalRenderPerf,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     started_at: Instant,
+}
+
+fn accumulate_pending_surface_damage(
+    pending_by_target: &mut HashMap<RenderTargetId, Vec<u32>>,
+    snapshot: &mut RenderSurfaceSnapshot,
+) {
+    if let Some(pending) = pending_by_target.get(&snapshot.target_id) {
+        merge_surface_dirty_rows(&mut snapshot.dirty_rows, pending);
+    }
+    pending_by_target.insert(snapshot.target_id, snapshot.dirty_rows.clone());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +488,7 @@ impl WgpuTerminalWindowRuntime {
             pipeline,
             presenter,
             surface_snapshots: HashMap::new(),
+            pending_surface_dirty_rows: HashMap::new(),
             workspace_layout: Vec::new(),
             tab_bar: None,
             tab_bar_surface: None,
@@ -552,7 +564,8 @@ impl WgpuTerminalWindowRuntime {
         self.window.request_redraw();
     }
 
-    pub fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
+    pub fn set_surface_snapshot(&mut self, mut snapshot: RenderSurfaceSnapshot) {
+        accumulate_pending_surface_damage(&mut self.pending_surface_dirty_rows, &mut snapshot);
         self.surface_snapshots.insert(snapshot.target_id, snapshot);
         self.schedule_redraw();
     }
@@ -579,6 +592,7 @@ impl WgpuTerminalWindowRuntime {
 
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
         self.surface_snapshots.remove(&target_id);
+        self.pending_surface_dirty_rows.remove(&target_id);
         self.workspace_layout
             .retain(|placement| placement.target_id != target_id);
         self.presenter
@@ -860,6 +874,10 @@ impl WgpuTerminalWindowRuntime {
             .iter()
             .map(|surface| surface.surface_snapshot.rows.len() as u64)
             .sum();
+        let surface_target_ids = surfaces
+            .iter()
+            .map(|surface| surface.surface_snapshot.target_id)
+            .collect::<Vec<_>>();
         let run_count = surfaces
             .iter()
             .flat_map(|surface| &surface.surface_snapshot.rows)
@@ -890,6 +908,11 @@ impl WgpuTerminalWindowRuntime {
                 },
             }) {
             Ok(result) => {
+                if result.completed() {
+                    for target_id in surface_target_ids {
+                        self.pending_surface_dirty_rows.remove(&target_id);
+                    }
+                }
                 if result.plugin_redraw_requested {
                     self.schedule_redraw();
                 }
@@ -1662,10 +1685,36 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
-        frame_interval_for_refresh_rate, ime_cursor_area, normalized_opacity,
-        terminal_wgpu_backends, transparent_surface_alpha_mode,
+        TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, accumulate_pending_surface_damage,
+        build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
+        ime_cursor_area, normalized_opacity, terminal_wgpu_backends,
+        transparent_surface_alpha_mode,
     };
+
+    #[test]
+    fn pending_surface_damage_survives_snapshot_replacement_before_present() {
+        let target_id = RenderTargetId::new(1);
+        let snapshot = |seq, dirty_rows| RenderSurfaceSnapshot {
+            target_id,
+            latest_seq: Seq::new(seq),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: Vec::new(),
+            video_surfaces: Vec::new(),
+            image_surfaces: Vec::new(),
+            dirty_rows,
+            cursor: None,
+            ime_preedit: None,
+        };
+        let mut pending = std::collections::HashMap::new();
+        let mut first = snapshot(1, vec![1, 2]);
+        let mut second = snapshot(2, vec![4, 5]);
+
+        accumulate_pending_surface_damage(&mut pending, &mut first);
+        accumulate_pending_surface_damage(&mut pending, &mut second);
+
+        assert_eq!(second.dirty_rows, vec![1, 2, 4, 5]);
+        assert_eq!(pending.get(&target_id), Some(&vec![1, 2, 4, 5]));
+    }
 
     #[test]
     fn terminal_uses_primary_wgpu_backends_without_gl() {

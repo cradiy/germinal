@@ -133,10 +133,16 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         let run_count = texts.len();
         let char_count = texts.iter().map(|text| text.chars().count()).sum();
 
-        let segments = collect_text_segments(surface_snapshot, self.ligatures());
-        let glyphs = match self.source.kind() {
-            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => collect_glyphs(surface_snapshot),
-            WgpuTerminalGlyphAtlasSourceKind::Crossfont => segments.keys().copied().collect(),
+        let (segments, glyphs) = match self.source.kind() {
+            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => {
+                (BTreeMap::new(), collect_glyphs(surface_snapshot))
+            }
+            WgpuTerminalGlyphAtlasSourceKind::Crossfont => {
+                let segments = collect_text_segments(surface_snapshot, self.ligatures());
+                let mut glyphs: BTreeSet<_> = segments.keys().copied().collect();
+                glyphs.extend(core_ascii_glyphs());
+                (segments, glyphs)
+            }
         };
         let cache_key = WgpuTerminalGlyphAtlasCacheKey {
             source: self.source.kind(),
@@ -144,7 +150,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         };
 
         let (atlas, upload_bytes, cache_hit) =
-            self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key, segments.values());
+            self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key, segments);
 
         WgpuTerminalGlyphAtlasFrame {
             target_id: surface_snapshot.target_id,
@@ -158,11 +164,11 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         }
     }
 
-    fn cached_or_build_atlas<'a>(
+    fn cached_or_build_atlas(
         &self,
         target_id: RenderTargetId,
         cache_key: &WgpuTerminalGlyphAtlasCacheKey,
-        segments: impl IntoIterator<Item = &'a TerminalTextSegment>,
+        mut segments: BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment>,
     ) -> (
         Arc<WgpuTerminalGlyphAtlas>,
         Option<WgpuTerminalGlyphAtlasUploadBytes>,
@@ -183,7 +189,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => self
                 .source
                 .build_for_glyphs(cache_key.glyphs.iter().copied()),
-            WgpuTerminalGlyphAtlasSourceKind::Crossfont => self.source.build_for_segments(segments),
+            WgpuTerminalGlyphAtlasSourceKind::Crossfont => {
+                include_core_ascii_segments(&mut segments);
+                self.source.build_for_segments(segments.values())
+            }
         });
         let upload_bytes = self.texture_factory.build_upload_bytes(&atlas);
 
@@ -353,6 +362,31 @@ fn collect_text_segments(
         }
     }
     segments
+}
+
+fn include_core_ascii_segments(segments: &mut BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment>) {
+    for glyph_key in core_ascii_glyphs() {
+        segments
+            .entry(glyph_key)
+            .or_insert_with(|| TerminalTextSegment {
+                text: glyph_key
+                    .character()
+                    .expect("core ASCII glyphs are characters")
+                    .to_string(),
+                cell_width: 1,
+                glyph_key,
+                shaped: false,
+                ligature: false,
+            });
+    }
+}
+
+fn core_ascii_glyphs() -> impl Iterator<Item = WgpuTerminalGlyphKey> {
+    (' '..='~').flat_map(|character| {
+        [(false, false), (true, false), (false, true), (true, true)]
+            .into_iter()
+            .map(move |(bold, italic)| WgpuTerminalGlyphKey::styled(character, bold, italic))
+    })
 }
 
 fn insert_text_segment(
@@ -545,6 +579,49 @@ mod tests {
 
         assert!(!first.cache_hit);
         assert!(!second.cache_hit);
+    }
+
+    #[test]
+    fn crossfont_prewarming_keeps_ascii_output_on_one_atlas() {
+        let target_id = RenderTargetId::new(1);
+        let snapshot = |seq, text: &str| RenderSurfaceSnapshot {
+            target_id,
+            latest_seq: Seq::new(seq),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: text.to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![0],
+            cursor: None,
+            ime_preedit: None,
+        };
+        let builder = WgpuTerminalGlyphAtlasFrameBuilder::crossfont("monospace", 16.0)
+            .expect("the platform monospace font should load");
+
+        let first = builder.build(&snapshot(1, "prompt"));
+        let second = builder.build(&snapshot(2, "ls output 0123456789"));
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert!(Arc::ptr_eq(&first.atlas, &second.atlas));
+        assert!(
+            first
+                .atlas
+                .has_glyph_key(WgpuTerminalGlyphKey::styled('A', true, false))
+        );
+        assert!(
+            first
+                .atlas
+                .has_glyph_key(WgpuTerminalGlyphKey::styled('z', false, true))
+        );
     }
 
     #[test]
