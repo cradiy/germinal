@@ -6,6 +6,10 @@ pub struct WgpuTerminalRenderTargetPlan {
     pub y_px: u32,
     pub width_px: u32,
     pub height_px: u32,
+    pub scissor_x_px: u32,
+    pub scissor_y_px: u32,
+    pub scissor_width_px: u32,
+    pub scissor_height_px: u32,
     pub clear_color: WgpuTerminalClearColor,
     pub load_op: WgpuTerminalLoadOp,
     pub store: bool,
@@ -18,6 +22,10 @@ impl WgpuTerminalRenderTargetPlan {
             y_px: 0,
             width_px,
             height_px,
+            scissor_x_px: 0,
+            scissor_y_px: 0,
+            scissor_width_px: width_px,
+            scissor_height_px: height_px,
             clear_color: WgpuTerminalClearColor::default(),
             load_op: WgpuTerminalLoadOp::Clear,
             store: true,
@@ -25,8 +33,22 @@ impl WgpuTerminalRenderTargetPlan {
     }
 
     pub fn with_origin(mut self, x_px: u32, y_px: u32) -> Self {
+        self.scissor_x_px = x_px;
+        self.scissor_y_px = y_px;
         self.x_px = x_px;
         self.y_px = y_px;
+        self
+    }
+
+    pub fn with_scissor(mut self, x_px: u32, y_px: u32, width_px: u32, height_px: u32) -> Self {
+        let viewport_right = self.x_px.saturating_add(self.width_px);
+        let viewport_bottom = self.y_px.saturating_add(self.height_px);
+        let right = x_px.saturating_add(width_px).min(viewport_right);
+        let bottom = y_px.saturating_add(height_px).min(viewport_bottom);
+        self.scissor_x_px = x_px.max(self.x_px).min(viewport_right);
+        self.scissor_y_px = y_px.max(self.y_px).min(viewport_bottom);
+        self.scissor_width_px = right.saturating_sub(self.scissor_x_px);
+        self.scissor_height_px = bottom.saturating_sub(self.scissor_y_px);
         self
     }
 
@@ -70,7 +92,12 @@ impl WgpuTerminalRenderTargetPlan {
             0.0,
             1.0,
         );
-        render_pass.set_scissor_rect(self.x_px, self.y_px, self.width_px, self.height_px);
+        render_pass.set_scissor_rect(
+            self.scissor_x_px,
+            self.scissor_y_px,
+            self.scissor_width_px,
+            self.scissor_height_px,
+        );
     }
 
     pub fn is_empty(&self) -> bool {
@@ -151,6 +178,10 @@ mod tests {
         assert_eq!(plan.height_px, 720);
         assert_eq!(plan.x_px, 0);
         assert_eq!(plan.y_px, 0);
+        assert_eq!(plan.scissor_x_px, 0);
+        assert_eq!(plan.scissor_y_px, 0);
+        assert_eq!(plan.scissor_width_px, 1280);
+        assert_eq!(plan.scissor_height_px, 720);
         assert_eq!(plan.viewport_width_px(), 1280.0);
         assert_eq!(plan.viewport_height_px(), 720.0);
         assert_eq!(plan.clear_color, WgpuTerminalClearColor::black());
@@ -167,6 +198,24 @@ mod tests {
         assert_eq!(plan.y_px, 0);
         assert_eq!(plan.width_px, 640);
         assert_eq!(plan.height_px, 720);
+        assert_eq!(plan.scissor_x_px, 640);
+        assert_eq!(plan.scissor_y_px, 0);
+    }
+
+    #[test]
+    fn clips_damage_scissor_to_viewport_without_changing_viewport() {
+        let plan = WgpuTerminalRenderTargetPlan::new(640, 720)
+            .with_origin(640, 0)
+            .with_scissor(620, 680, 700, 80);
+
+        assert_eq!(plan.x_px, 640);
+        assert_eq!(plan.y_px, 0);
+        assert_eq!(plan.width_px, 640);
+        assert_eq!(plan.height_px, 720);
+        assert_eq!(plan.scissor_x_px, 640);
+        assert_eq!(plan.scissor_y_px, 680);
+        assert_eq!(plan.scissor_width_px, 640);
+        assert_eq!(plan.scissor_height_px, 40);
     }
 
     #[test]

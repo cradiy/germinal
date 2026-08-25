@@ -121,6 +121,7 @@ pub struct WgpuTerminalWindowRuntime {
     background_opacity: f32,
     background_shader_enabled: bool,
     background_shader_animated: bool,
+    retain_terminal_frame: bool,
     next_background_frame_at: Option<Instant>,
     needs_redraw: bool,
     display_refresh_rate_millihertz: Option<u32>,
@@ -540,8 +541,17 @@ impl WgpuTerminalWindowRuntime {
         // single monitor refresh in flight prevents a completed frame from waiting behind another
         // frame in the swapchain queue.
         surface_config.desired_maximum_frame_latency = LOW_LATENCY_SURFACE_FRAME_QUEUE;
+        let surface_capabilities = surface.get_capabilities(&adapter);
+        let retain_terminal_frame = adapter_info.device_type == wgpu::DeviceType::Cpu
+            && surface_capabilities
+                .usages
+                .contains(wgpu::TextureUsages::COPY_DST);
+        if retain_terminal_frame {
+            surface_config.usage |= wgpu::TextureUsages::COPY_DST;
+            info!("enabled retained terminal frames for CPU software rendering");
+        }
         if background_opacity < 1.0 {
-            let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
+            let alpha_modes = surface_capabilities.alpha_modes;
             surface_config.alpha_mode = transparent_surface_alpha_mode(&alpha_modes);
             if surface_config.alpha_mode != wgpu::CompositeAlphaMode::PreMultiplied {
                 warn!(
@@ -623,6 +633,7 @@ impl WgpuTerminalWindowRuntime {
             background_opacity,
             background_shader_enabled,
             background_shader_animated,
+            retain_terminal_frame,
             next_background_frame_at: background_shader_animated.then_some(now),
             needs_redraw: false,
             display_refresh_rate_millihertz,
@@ -1050,6 +1061,7 @@ impl WgpuTerminalWindowRuntime {
                 } else {
                     WgpuTerminalClearColor::black()
                 },
+                retain_terminal_frame: self.retain_terminal_frame,
             }) {
             Ok(result) => {
                 if result.completed() {

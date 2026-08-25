@@ -986,7 +986,7 @@ impl WgpuRendererConfig {
         TerminalCellSize::new(self.cell_width_px, self.row_height_px(row))
     }
 
-    fn row_top_px(self, row: u32) -> u32 {
+    pub(crate) fn row_top_px(self, row: u32) -> u32 {
         if row >= self.grid_rows.max(1) {
             return self
                 .content_origin_y
@@ -997,7 +997,7 @@ impl WgpuRendererConfig {
             .saturating_add(self.row_offset_px(row))
     }
 
-    fn row_height_px(self, row: u32) -> u32 {
+    pub(crate) fn row_height_px(self, row: u32) -> u32 {
         if row >= self.grid_rows.max(1) {
             return self.cell_height_px.max(1);
         }
@@ -1007,7 +1007,7 @@ impl WgpuRendererConfig {
             .max(1)
     }
 
-    fn row_offset_px(self, row: u32) -> u32 {
+    pub(crate) fn row_offset_px(self, row: u32) -> u32 {
         let rows = self.grid_rows.max(1);
         let row = row.min(rows);
         ((u64::from(row) * u64::from(self.content_height_px)) / u64::from(rows))
