@@ -445,6 +445,7 @@ pub struct WindowConfig {
     pub title: String,
     pub width_px: u32,
     pub height_px: u32,
+    pub maximized: bool,
     pub opacity: f32,
     pub decorations: bool,
 }
@@ -455,6 +456,7 @@ impl Default for WindowConfig {
             title: "Germinal".to_string(),
             width_px: 960,
             height_px: 540,
+            maximized: false,
             opacity: 1.0,
             decorations: true,
         }
@@ -854,6 +856,7 @@ mod tests {
         let value: toml::Value = toml::from_str(&contents).unwrap();
         assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
         assert_eq!(value["window"]["decorations"].as_bool(), Some(true));
+        assert_eq!(value["window"]["maximized"].as_bool(), Some(false));
         assert!(value.get("background").is_none());
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
         assert_eq!(value["font"]["ligatures"].as_bool(), Some(true));
@@ -907,16 +910,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_frameless_window_configuration() {
+    fn parses_window_startup_configuration() {
         let config: GerminalConfig = toml::from_str(
             r#"
             [window]
             decorations = false
+            maximized = true
             "#,
         )
         .unwrap();
 
         assert!(!config.window.decorations);
+        assert!(config.window.maximized);
     }
 
     #[test]

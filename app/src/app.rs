@@ -280,6 +280,7 @@ impl App {
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
             .with_decorations(self.config.window.decorations)
+            .with_maximized(self.config.window.maximized)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
                 f64::from(self.config.window.height_px),

@@ -13,8 +13,9 @@ source=(
     'LICENSE'
     'README.md'
     'PACKAGE-README.md'
+    'configuration.md'
 )
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
     install -Dm0755 "$srcdir/germinal" "$pkgdir/usr/bin/germinal"
@@ -26,4 +27,6 @@ package() {
     install -Dm0644 "$srcdir/README.md" "$pkgdir/usr/share/doc/germinal/README.md"
     install -Dm0644 "$srcdir/PACKAGE-README.md" \
         "$pkgdir/usr/share/doc/germinal/PACKAGE-README.md"
+    install -Dm0644 "$srcdir/configuration.md" \
+        "$pkgdir/usr/share/doc/germinal/docs/configuration.md"
 }

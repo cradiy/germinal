@@ -66,6 +66,7 @@ def install-payload [repo_root: string, binary: string, payload_root: string, pr
     run-checked install "-Dm0644" ($repo_root | path join "packaging" "linux" "io.github.cradiy.Germinal.svg") ($root | path join "share" "icons" "hicolor" "scalable" "apps" "io.github.cradiy.Germinal.svg")
     run-checked install "-Dm0644" ($repo_root | path join "LICENSE") ($root | path join "share" "licenses" "germinal" "LICENSE")
     run-checked install "-Dm0644" ($repo_root | path join "README.md") ($root | path join "share" "doc" "germinal" "README.md")
+    run-checked install "-Dm0644" ($repo_root | path join "docs" "configuration.md") ($root | path join "share" "doc" "germinal" "docs" "configuration.md")
     run-checked install "-Dm0644" ($repo_root | path join "packaging" "linux" "PACKAGE-README.md") ($root | path join "share" "doc" "germinal" "PACKAGE-README.md")
 }
 
@@ -166,6 +167,7 @@ def package-rpm [
     for source in ["LICENSE", "README.md"] {
         run-checked install "-m0644" ($repo_root | path join $source) ($sources | path join $source)
     }
+    run-checked install "-m0644" ($repo_root | path join "docs" "configuration.md") ($sources | path join "configuration.md")
 
     let spec = ($rpm_top | path join "SPECS" "germinal.spec")
     open --raw ($repo_root | path join "packaging" "linux" "germinal.spec.in")
@@ -215,6 +217,7 @@ def package-arch [
     for source in ["LICENSE", "README.md"] {
         run-checked install "-m0644" ($repo_root | path join $source) ($arch_root | path join $source)
     }
+    run-checked install "-m0644" ($repo_root | path join "docs" "configuration.md") ($arch_root | path join "configuration.md")
 
     open --raw ($repo_root | path join "packaging" "linux" "PKGBUILD.in")
     | str replace --all "@VERSION@" $version

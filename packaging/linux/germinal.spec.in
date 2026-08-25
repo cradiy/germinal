@@ -10,6 +10,7 @@ Source2:        io.github.cradiy.Germinal.svg
 Source3:        LICENSE
 Source4:        README.md
 Source5:        PACKAGE-README.md
+Source6:        configuration.md
 
 Requires:       fontconfig
 Requires:       freetype
@@ -29,6 +30,7 @@ install -Dm0644 %{SOURCE2} %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/i
 install -Dm0644 %{SOURCE3} %{buildroot}%{_licensedir}/germinal/LICENSE
 install -Dm0644 %{SOURCE4} %{buildroot}%{_docdir}/germinal/README.md
 install -Dm0644 %{SOURCE5} %{buildroot}%{_docdir}/germinal/PACKAGE-README.md
+install -Dm0644 %{SOURCE6} %{buildroot}%{_docdir}/germinal/docs/configuration.md
 
 %files
 %{_bindir}/germinal
@@ -37,6 +39,7 @@ install -Dm0644 %{SOURCE5} %{buildroot}%{_docdir}/germinal/PACKAGE-README.md
 %license %{_licensedir}/germinal/LICENSE
 %doc %{_docdir}/germinal/README.md
 %doc %{_docdir}/germinal/PACKAGE-README.md
+%doc %{_docdir}/germinal/docs/configuration.md
 
 %changelog
 * Mon Aug 24 2026 Germinal Project - @VERSION@-1

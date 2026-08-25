@@ -27,16 +27,17 @@ The germinal first start up with `PTY` mode (using alacritty-terminal for parsin
 - [GNative over SSH](docs/gnative-over-ssh.md) describes the planned remote rendering transport,
   protocol negotiation, OpenSSH integration, security boundaries, and implementation phases.
 
+## Configuration
+
+See [Configuration](docs/configuration.md) for the config file location, defaults, and every
+supported option.
+
 ## Building
 
-Germinal provides Nushell and Bash build scripts. Run either command from the repository root:
+Germinal provides Nushell build scripts. Run the command from the repository root:
 
 ```nu
 ./scripts/build-release.nu
-```
-
-```sh
-./scripts/build-release.sh
 ```
 
 The optimized executable is written to `target/product/germinal`.
@@ -91,8 +92,6 @@ Use an existing product binary without rebuilding it:
 Choose another output directory with `--output-dir <directory>`. DEB packaging requires
 `dpkg-deb`, RPM packaging requires `rpmbuild`, and Arch Linux packaging requires `makepkg`.
 Packages include the executable, desktop entry, application icon, license, and user documentation.
-
-Bash users can replace the `.nu` suffix with `.sh`. Both scripts accept the same options.
 
 ### musl packages
 
@@ -179,43 +178,6 @@ also match `Control|Shift|Alt`.
 default bindings. Directional focus, swap, and resize actions are passed to the PTY when the current
 tab has only one pane. Tab-move actions are passed to the PTY when only one tab exists.
 
-### Custom bindings
-
-Bindings use an Alacritty-style array in `~/.config/germinal/config.toml`:
-
-```toml
-[[keyboard.bindings]]
-key = "H"
-mods = "Control|Shift"
-action = "PreviousTab"
-
-[[keyboard.bindings]]
-key = "L"
-mods = "Control|Shift"
-action = "NextTab"
-```
-
-Defining `keyboard.bindings` replaces the complete default list. Include every default binding you
-want to keep; remove the entire `[keyboard]` section to restore Germinal's defaults. An empty
-binding list disables all host shortcuts.
-
-`mods` accepts `Control`, `Alt`, `Shift`, and `Super`, joined with `|`. It may be omitted for an
-unmodified key. Letter and digit keys use their printed names. Named keys are `Space`, `Enter`,
-`Tab`, `Backspace`, `Escape`, `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `Insert`, `Delete`,
-`PageUp`, `PageDown`, `F1` through `F12`, `CapsLock`, `ScrollLock`, `NumLock`, `PrintScreen`,
-`Pause`, and `ContextMenu`.
-
-Available `action` values are:
-
-- Clipboard and navigation: `Copy`, `Paste`, `ToggleViMode`, `ToggleSearch`.
-- Windows and tabs: `NewWindow`, `NewTab`, `PreviousTab`, `NextTab`, `MoveTabLeft`,
-  `MoveTabRight`.
-- Pane creation and closing: `SplitHorizontal`, `SplitVertical`, `ClosePane`.
-- Pane focus: `FocusNextPane`, `FocusPreviousPane`, `FocusPaneLeft`, `FocusPaneRight`,
-  `FocusPaneUp`, `FocusPaneDown`.
-- Pane swapping: `SwapPaneLeft`, `SwapPaneRight`, `SwapPaneUp`, `SwapPaneDown`.
-- Pane resizing: `ResizePaneLeft`, `ResizePaneRight`, `ResizePaneUp`, `ResizePaneDown`.
-
 ### Host search keys
 
 After opening host search with `Ctrl+Shift+F`:
@@ -251,163 +213,3 @@ Vi copy mode navigates and selects terminal history without changing the shell's
 
 While entering a Vi search, text updates the query, `Backspace` deletes a character, `Enter`
 accepts it, and `Escape` cancels the prompt.
-
-## Fonts
-
-The normal face, styled faces, fallback order, and size are configured together:
-
-```toml
-[font]
-size = 16
-fallback = [
-  "Noto Sans Mono CJK SC",
-  "Symbols Nerd Font Mono",
-]
-
-[font.normal]
-family = "JetBrainsMono Nerd Font"
-
-[font.bold]
-family = "JetBrainsMono Nerd Font"
-style = "Bold"
-
-[font.italic]
-family = "JetBrainsMono Nerd Font"
-style = "Italic"
-
-[font.bold_italic]
-family = "JetBrainsMono Nerd Font"
-style = "Bold Italic"
-```
-
-Styled faces are optional. When omitted, Germinal asks the primary family for the matching
-weight and slant. Fallback families are checked in their configured order for glyphs missing from
-the selected primary face; the system font fallback remains the final fallback. Font size follows
-the display scale automatically when a window starts on or moves between displays with different
-pixel densities.
-
-Programming and standard font ligatures are enabled by default in every terminal application,
-including editors such as Neovim. Disable them when a font or workflow requires separate glyphs:
-
-```toml
-[font]
-ligatures = false
-```
-
-## Cursor motion
-
-Germinal smooths terminal cursor movement over 80 milliseconds by default. Input movement and
-Enter/line transitions can be enabled independently. Set the duration to `0` to disable all cursor
-motion:
-
-```toml
-[cursor]
-motion_duration_ms = 80
-motion_on_input = true
-motion_on_enter = true
-```
-
-## Background opacity
-
-Window background opacity is configured independently from the terminal colors:
-
-```toml
-[window]
-opacity = 0.92
-```
-
-The value must be between `0.0` (fully transparent background) and `1.0` (opaque). Text, images,
-cursor content, and explicit application background colors remain opaque. Transparency also
-depends on support from the window system and compositor.
-
-## Window decorations
-
-Native title bars and window borders are enabled by default. Disable them for a frameless window:
-
-```toml
-[window]
-decorations = false
-```
-
-The compositor may still draw its own focus border around a frameless window.
-
-## Shader backgrounds
-
-Germinal includes an animated meteor-shower starfield background. Enable it in
-`~/.config/germinal/config.toml`:
-
-```toml
-[background]
-shader = "starfield"
-```
-
-You can also load a custom WGSL file. Relative paths are resolved from
-`~/.config/germinal`, and paths beginning with `~` are expanded:
-
-```toml
-[background]
-shader = "shaders/background.wgsl"
-animated = true
-```
-
-The WGSL file defines this function:
-
-```wgsl
-fn background(
-    uv: vec2<f32>,
-    time: f32,
-    resolution: vec2<f32>,
-) -> vec4<f32> {
-    return vec4<f32>(uv.x, uv.y, 0.2, 1.0);
-}
-```
-
-`uv` runs from the top-left corner `(0, 0)` to the bottom-right corner `(1, 1)`,
-`time` is the elapsed time in seconds, and `resolution` is the window size in physical pixels.
-Custom shaders are static by default; set `animated = true` when the shader uses `time`. The
-built-in starfield is animated automatically. `window.opacity` is applied to the shader output.
-
-## Kitty color themes
-
-Germinal can load a Kitty color theme directly. Set one path in
-`~/.config/germinal/config.toml` to switch the entire terminal theme:
-
-```toml
-[colors]
-theme = "~/.config/kitty/current-theme.conf"
-```
-
-The theme uses Kitty's plain-text color syntax, including `foreground`, `background`,
-`cursor`, selection colors, tab and border colors, and `color0` through `color255`.
-Paths beginning with `~` are expanded; relative paths are resolved from
-`~/.config/germinal`. Individual Kitty keys can override the selected file without
-copying the theme:
-
-```toml
-[colors]
-theme = "themes/Tokyo Night.conf"
-cursor = "#ffffff"
-active_tab_background = "#7aa2f7"
-```
-
-Built-in colors are applied first, followed by the theme file and then the inline
-overrides. Theme colors currently accept Kitty's `#RGB` and `#RRGGBB` forms.
-
-## Shell and working directory
-
-The default shell command and initial working directory can be configured in
-`~/.config/germinal/config.toml`:
-
-```toml
-[terminal]
-working_directory = "~/github"
-
-[terminal.shell]
-program = "/usr/bin/fish"
-args = ["--login"]
-```
-
-On Unix, omitting `terminal.shell` uses `$SHELL` and falls back to `/bin/sh`; Windows keeps its
-PowerShell default. Without `working_directory`, the initial shell inherits Germinal's process
-directory. On Linux, newly created tabs and panes inherit the focused shell's live working
-directory.
