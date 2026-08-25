@@ -509,7 +509,7 @@ impl WgpuCrossfontGlyphBackend {
         font_size_px: f32,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
         let mut rasterizer = Rasterizer::new().map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
-        let size = Size::new(font_size_px);
+        let size = Size::from_px(font_size_px);
         let normal = load_required_face(
             &mut rasterizer,
             &font_faces.normal,
@@ -1719,10 +1719,21 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontGlyphAtlasBuilder,
-        WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey,
-        crossfont_strikeout_metrics, crossfont_underline_metrics,
+        FontCoverage, GlyphAtlasGridLayout, WgpuCrossfontFontFaces, WgpuCrossfontGlyphAtlasBuilder,
+        WgpuCrossfontGlyphBackend, WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics,
+        WgpuTerminalGlyphKey, crossfont_strikeout_metrics, crossfont_underline_metrics,
     };
+
+    #[test]
+    fn crossfont_backend_interprets_font_size_as_physical_pixels() {
+        let backend = WgpuCrossfontGlyphBackend::new(
+            WgpuCrossfontFontFaces::new("monospace".to_owned()),
+            18.0,
+        )
+        .expect("the platform monospace font should load");
+
+        assert!((backend.size.as_px() - 18.0).abs() < 0.01);
+    }
 
     #[test]
     fn converts_crossfont_underline_metrics_to_cell_pixels() {
