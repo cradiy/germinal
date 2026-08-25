@@ -768,8 +768,12 @@ fn append_cursor_quads(
     }
 
     let (cursor_x, cursor_cell_width) = cursor_cell_span(row, cursor.x);
-    let x = config.content_origin_x + cursor_x * config.cell_width_px;
-    let y = config.row_top_px(cursor.y);
+    let (x, y) = config.cursor_position_px.unwrap_or_else(|| {
+        (
+            config.content_origin_x + cursor_x * config.cell_width_px,
+            config.row_top_px(cursor.y),
+        )
+    });
     let w = cursor_cell_width * config.cell_width_px.max(1);
     let h = config.row_height_px(cursor.y);
     let style = TextStyleDto {
@@ -857,6 +861,7 @@ fn append_cursor_text_quads(
     if !cursor.focused
         || cursor.shape != RenderSurfaceCursorShape::Block
         || (cursor.blinking && !config.blinking_cursor_visible)
+        || config.cursor_position_px.is_some()
     {
         return;
     }
@@ -900,6 +905,7 @@ pub struct WgpuRendererConfig {
     pub blinking_cursor_visible: bool,
     pub cursor_color: RgbColorDto,
     pub cursor_text_color: RgbColorDto,
+    pub cursor_position_px: Option<(u32, u32)>,
     pub background_alpha: u8,
 }
 impl WgpuRendererConfig {
@@ -919,6 +925,13 @@ impl WgpuRendererConfig {
         self
     }
 
+    pub fn with_cursor_position_cells(mut self, x: f32, y: f32) -> Self {
+        let x_px = self.content_origin_x as f32 + x * self.cell_width_px as f32;
+        let y_px = self.content_origin_y as f32 + y * self.cell_height_px as f32;
+        self.cursor_position_px = Some((x_px.round() as u32, y_px.round() as u32));
+        self
+    }
+
     pub fn from_render_viewport(viewport: TerminalRenderViewport) -> Self {
         let cell_size = viewport.cell_size();
         Self {
@@ -933,6 +946,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            cursor_position_px: None,
             background_alpha: u8::MAX,
         }
     }
@@ -952,6 +966,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            cursor_position_px: None,
             background_alpha: u8::MAX,
         }
     }
@@ -1024,6 +1039,7 @@ impl Default for WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            cursor_position_px: None,
             background_alpha: u8::MAX,
         }
     }
@@ -1699,6 +1715,34 @@ mod tests {
         assert_eq!(cursors[0].y_px, 48);
         assert_eq!(cursors[0].width_px, 8);
         assert_eq!(cursors[0].height_px, 16);
+    }
+
+    #[test]
+    fn cursor_motion_position_overrides_the_terminal_cell_position() {
+        let backend = WgpuRendererBackend::new(
+            WgpuRendererConfig::default().with_cursor_position_cells(1.5, 2.25),
+        );
+
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 4,
+                y: 5,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: None,
+        });
+
+        let cursors = backend.state().geometric_quads();
+        assert_eq!((cursors[0].x_px, cursors[0].y_px), (12, 36));
     }
 
     #[test]

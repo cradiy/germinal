@@ -362,6 +362,7 @@ pub struct CursorConfig {
     pub shape: CursorShape,
     pub blinking: bool,
     pub blink_interval_ms: u64,
+    pub motion_duration_ms: u64,
 }
 
 impl Default for CursorConfig {
@@ -370,6 +371,7 @@ impl Default for CursorConfig {
             shape: CursorShape::Block,
             blinking: false,
             blink_interval_ms: 750,
+            motion_duration_ms: 80,
         }
     }
 }
@@ -859,6 +861,7 @@ mod tests {
         assert_eq!(value["cursor"]["shape"].as_str(), Some("block"));
         assert_eq!(value["cursor"]["blinking"].as_bool(), Some(false));
         assert_eq!(value["cursor"]["blink_interval_ms"].as_integer(), Some(750));
+        assert_eq!(value["cursor"]["motion_duration_ms"].as_integer(), Some(80));
         assert_eq!(value["terminal"]["osc52"].as_str(), Some("OnlyCopy"));
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
@@ -880,6 +883,7 @@ mod tests {
             shape = "beam"
             blinking = true
             blink_interval_ms = 320
+            motion_duration_ms = 65
             "#,
         )
         .unwrap();
@@ -889,6 +893,7 @@ mod tests {
             TerminalCursorStyle::new(TerminalCursorShape::Beam, true)
         );
         assert_eq!(config.cursor.blink_interval_ms, 320);
+        assert_eq!(config.cursor.motion_duration_ms, 65);
     }
 
     #[test]

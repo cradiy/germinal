@@ -294,6 +294,16 @@ including editors such as Neovim. Disable them when a font or workflow requires 
 ligatures = false
 ```
 
+## Cursor motion
+
+Germinal smooths terminal cursor movement over 80 milliseconds by default. Adjust the transition
+or set it to `0` for immediate cell-to-cell movement:
+
+```toml
+[cursor]
+motion_duration_ms = 80
+```
+
 ## Background opacity
 
 Window background opacity is configured independently from the terminal colors:

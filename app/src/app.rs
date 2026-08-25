@@ -192,6 +192,7 @@ impl App {
         let terminal_color_theme = config.terminal_color_theme();
         let terminal_osc52_mode = config.terminal_osc52_mode();
         let cursor_blink_interval = Duration::from_millis(config.cursor.blink_interval_ms.max(1));
+        let cursor_motion_duration = Duration::from_millis(config.cursor.motion_duration_ms);
         let window_title = config.window.title.clone();
         let window_opacity = config.window.opacity;
         let background_shader = config.background_shader();
@@ -200,6 +201,7 @@ impl App {
             terminal_profile.clone(),
             window_title,
             cursor_blink_interval,
+            cursor_motion_duration,
             terminal_color_theme,
             window_opacity,
         );

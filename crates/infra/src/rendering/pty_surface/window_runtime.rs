@@ -21,8 +21,8 @@ use germinal_ports::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
         render_target_id::RenderTargetId,
         surface_snapshot::{
-            RenderSurfaceCursorShape, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
-            RenderSurfaceSnapshot, merge_surface_dirty_rows,
+            RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
+            RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, merge_surface_dirty_rows,
         },
         tab_bar::{TabBarPosition, TabBarSnapshot},
         window_runtime::ITerminalWindowRuntime,
@@ -131,6 +131,9 @@ pub struct WgpuTerminalWindowRuntime {
     cursor_blink_signature: Option<CursorBlinkSignature>,
     cursor_blink_epoch: Instant,
     next_cursor_blink_at: Option<Instant>,
+    cursor_motion_duration: Duration,
+    cursor_motions: HashMap<RenderTargetId, CursorMotion>,
+    next_cursor_motion_frame_at: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     started_at: Instant,
@@ -154,6 +157,85 @@ struct CursorBlinkSignature {
     shape: RenderSurfaceCursorShape,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CursorMotion {
+    from_x: f32,
+    from_y: f32,
+    to_x: f32,
+    to_y: f32,
+    started_at: Instant,
+    duration: Duration,
+    waiting_for_line_feed: bool,
+}
+
+fn build_cursor_motion(
+    existing: Option<CursorMotion>,
+    previous: RenderSurfaceCursorSnapshot,
+    next: RenderSurfaceCursorSnapshot,
+    now: Instant,
+    duration: Duration,
+    frame_interval: Duration,
+) -> CursorMotion {
+    let coalesce_delay = frame_interval.min(Duration::from_millis(8));
+    let line_feed_follows_carriage_return = existing.is_some_and(|motion| {
+        motion.waiting_for_line_feed
+            && previous.x == 0
+            && next.x == 0
+            && previous.y != next.y
+            && now <= motion.started_at
+    });
+    if line_feed_follows_carriage_return {
+        let motion = existing.expect("coalesced line feed requires an existing cursor motion");
+        return CursorMotion {
+            to_x: next.x as f32,
+            to_y: next.y as f32,
+            waiting_for_line_feed: false,
+            ..motion
+        };
+    }
+
+    let (from_x, from_y) = existing
+        .map(|motion| motion.position_at(now).0)
+        .unwrap_or((previous.x as f32, previous.y as f32));
+    let waiting_for_line_feed = previous.x > 0 && next.x == 0 && previous.y == next.y;
+    CursorMotion {
+        from_x,
+        from_y,
+        to_x: next.x as f32,
+        to_y: next.y as f32,
+        started_at: if waiting_for_line_feed {
+            now + coalesce_delay
+        } else {
+            now
+        },
+        duration,
+        waiting_for_line_feed,
+    }
+}
+
+impl CursorMotion {
+    fn position_at(self, now: Instant) -> ((f32, f32), bool) {
+        if self.duration.is_zero() {
+            return ((self.to_x, self.to_y), false);
+        }
+        let progress = now.saturating_duration_since(self.started_at).as_secs_f32()
+            / self.duration.as_secs_f32();
+        if progress >= 1.0 {
+            return ((self.to_x, self.to_y), false);
+        }
+
+        let remaining = 1.0 - progress.clamp(0.0, 1.0);
+        let eased = 1.0 - remaining * remaining * remaining;
+        (
+            (
+                self.from_x + (self.to_x - self.from_x) * eased,
+                self.from_y + (self.to_y - self.from_y) * eased,
+            ),
+            true,
+        )
+    }
+}
+
 fn normalized_opacity(opacity: f32) -> f32 {
     if opacity.is_finite() {
         opacity.clamp(0.0, 1.0)
@@ -167,6 +249,9 @@ fn terminal_wgpu_backends() -> wgpu::Backends {
     // is selected. Germinal's Linux dma-buf video path also requires Vulkan.
     wgpu::Backends::PRIMARY
 }
+
+const LOW_LATENCY_SURFACE_FRAME_QUEUE: u32 = 1;
+const DEFAULT_CURSOR_MOTION_DURATION: Duration = Duration::from_millis(80);
 
 fn frame_interval_for_refresh_rate(refresh_rate_millihertz: Option<u32>) -> Duration {
     let refresh_rate_millihertz = refresh_rate_millihertz
@@ -236,6 +321,7 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     profile: TerminalProfile,
     base_title: String,
     cursor_blink_interval: Duration,
+    cursor_motion_duration: Duration,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     background_shader: Option<WgpuBackgroundShaderSource>,
@@ -245,6 +331,7 @@ struct WgpuTerminalWindowRuntimeOptions {
     profile: TerminalProfile,
     base_title: String,
     cursor_blink_interval: Duration,
+    cursor_motion_duration: Duration,
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
@@ -256,6 +343,7 @@ impl WgpuTerminalWindowRuntimeFactory {
         profile: TerminalProfile,
         base_title: String,
         cursor_blink_interval: Duration,
+        cursor_motion_duration: Duration,
         color_theme: TerminalColorTheme,
         background_opacity: f32,
     ) -> Self {
@@ -263,6 +351,7 @@ impl WgpuTerminalWindowRuntimeFactory {
             profile,
             base_title,
             cursor_blink_interval,
+            cursor_motion_duration,
             color_theme,
             background_opacity: normalized_opacity(background_opacity),
             background_shader: None,
@@ -292,6 +381,7 @@ impl WgpuTerminalWindowRuntimeFactory {
                 profile: self.profile.clone(),
                 base_title: self.base_title.clone(),
                 cursor_blink_interval: self.cursor_blink_interval,
+                cursor_motion_duration: self.cursor_motion_duration,
                 color_theme: self.color_theme,
                 background_opacity: self.background_opacity,
                 render_plugins,
@@ -337,6 +427,7 @@ impl WgpuTerminalWindowRuntime {
                 profile,
                 base_title,
                 cursor_blink_interval,
+                cursor_motion_duration: DEFAULT_CURSOR_MOTION_DURATION,
                 color_theme,
                 background_opacity,
                 render_plugins,
@@ -354,6 +445,7 @@ impl WgpuTerminalWindowRuntime {
             profile,
             base_title,
             cursor_blink_interval,
+            cursor_motion_duration,
             color_theme,
             background_opacity,
             render_plugins,
@@ -417,6 +509,10 @@ impl WgpuTerminalWindowRuntime {
                 height_px: height,
             },
         )?;
+        // Terminal frames are cheap and input latency matters more than CPU/GPU overlap. Keeping a
+        // single monitor refresh in flight prevents a completed frame from waiting behind another
+        // frame in the swapchain queue.
+        surface_config.desired_maximum_frame_latency = LOW_LATENCY_SURFACE_FRAME_QUEUE;
         if background_opacity < 1.0 {
             let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
             surface_config.alpha_mode = transparent_surface_alpha_mode(&alpha_modes);
@@ -510,6 +606,9 @@ impl WgpuTerminalWindowRuntime {
             cursor_blink_signature: None,
             cursor_blink_epoch: now,
             next_cursor_blink_at: None,
+            cursor_motion_duration,
+            cursor_motions: HashMap::new(),
+            next_cursor_motion_frame_at: None,
             perf: WgpuTerminalRenderPerf::new(),
             render_plugins,
             started_at: now,
@@ -565,6 +664,7 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_surface_snapshot(&mut self, mut snapshot: RenderSurfaceSnapshot) {
+        self.update_cursor_motion(&snapshot);
         accumulate_pending_surface_damage(&mut self.pending_surface_dirty_rows, &mut snapshot);
         self.surface_snapshots.insert(snapshot.target_id, snapshot);
         self.schedule_redraw();
@@ -592,6 +692,7 @@ impl WgpuTerminalWindowRuntime {
 
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
         self.surface_snapshots.remove(&target_id);
+        self.cursor_motions.remove(&target_id);
         self.pending_surface_dirty_rows.remove(&target_id);
         self.workspace_layout
             .retain(|placement| placement.target_id != target_id);
@@ -810,6 +911,16 @@ impl WgpuTerminalWindowRuntime {
             self.refresh_display_timing();
         }
         let now = Instant::now();
+        let cursor_motion_positions = self
+            .cursor_motions
+            .iter()
+            .filter_map(|(target_id, motion)| {
+                let (position, active) = motion.position_at(now);
+                active.then_some((*target_id, position))
+            })
+            .collect::<HashMap<_, _>>();
+        self.cursor_motions
+            .retain(|_, motion| motion.position_at(now).1);
         let visual_bell = self.visual_bell_frame(now);
         let blinking_cursor_visible = self.blinking_cursor_frame(now);
         let terminal_background_opacity = if self.background_shader_enabled {
@@ -835,6 +946,13 @@ impl WgpuTerminalWindowRuntime {
                     let size_info = profile.size_info_for_window_metrics(
                         TerminalWindowMetrics::new(placement.window_size(), scale_factor),
                     );
+                    let mut renderer_config = WgpuRendererConfig::from(size_info)
+                        .with_color_theme(self.color_theme)
+                        .with_background_opacity(terminal_background_opacity)
+                        .with_blinking_cursor_visible(blinking_cursor_visible);
+                    if let Some((x, y)) = cursor_motion_positions.get(&placement.target_id) {
+                        renderer_config = renderer_config.with_cursor_position_cells(*x, *y);
+                    }
                     Some(WgpuTerminalWorkspaceSurface {
                         render_target_plan: WgpuTerminalRenderTargetPlan::new(
                             placement.width_px,
@@ -843,10 +961,7 @@ impl WgpuTerminalWindowRuntime {
                         .with_origin(placement.x_px, placement.y_px)
                         .with_load_op(WgpuTerminalLoadOp::Load),
                         surface_snapshot,
-                        renderer_config: WgpuRendererConfig::from(size_info)
-                            .with_color_theme(self.color_theme)
-                            .with_background_opacity(terminal_background_opacity)
-                            .with_blinking_cursor_visible(blinking_cursor_visible),
+                        renderer_config,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -927,11 +1042,14 @@ impl WgpuTerminalWindowRuntime {
         self.next_background_frame_at = self
             .background_shader_animated
             .then_some(now + self.frame_interval);
+        self.next_cursor_motion_frame_at =
+            (!self.cursor_motions.is_empty()).then_some(now + self.frame_interval);
     }
 
     pub fn next_render_deadline(&self) -> Option<Instant> {
         [
             self.next_cursor_blink_at,
+            self.next_cursor_motion_frame_at,
             self.next_background_frame_at,
             self.needs_redraw.then_some(self.next_present_at),
         ]
@@ -948,6 +1066,13 @@ impl WgpuTerminalWindowRuntime {
             self.next_cursor_blink_at = Some(now + self.cursor_blink_interval);
         }
 
+        let cursor_motion_due = self
+            .next_cursor_motion_frame_at
+            .is_some_and(|deadline| deadline <= now);
+        if cursor_motion_due {
+            self.next_cursor_motion_frame_at = Some(now + self.frame_interval);
+        }
+
         let background_due = self
             .next_background_frame_at
             .is_some_and(|deadline| deadline <= now);
@@ -956,7 +1081,43 @@ impl WgpuTerminalWindowRuntime {
         }
 
         let redraw_due = self.needs_redraw && self.next_present_at <= now;
-        cursor_due || background_due || redraw_due
+        cursor_due || cursor_motion_due || background_due || redraw_due
+    }
+
+    fn update_cursor_motion(&mut self, snapshot: &RenderSurfaceSnapshot) {
+        let target_id = snapshot.target_id;
+        let previous = self
+            .surface_snapshots
+            .get(&target_id)
+            .and_then(|snapshot| snapshot.cursor);
+        let next = snapshot.cursor;
+        if self.cursor_motion_duration.is_zero()
+            || previous.zip(next).is_none_or(|(previous, next)| {
+                !previous.focused
+                    || !next.focused
+                    || previous.shape == RenderSurfaceCursorShape::Hidden
+                    || next.shape == RenderSurfaceCursorShape::Hidden
+            })
+        {
+            self.cursor_motions.remove(&target_id);
+            return;
+        }
+
+        let (previous, next) = previous.zip(next).expect("cursor pair was checked above");
+        if previous.x == next.x && previous.y == next.y {
+            return;
+        }
+
+        let now = Instant::now();
+        let motion = build_cursor_motion(
+            self.cursor_motions.get(&target_id).copied(),
+            previous,
+            next,
+            now,
+            self.cursor_motion_duration,
+            self.frame_interval,
+        );
+        self.cursor_motions.insert(target_id, motion);
     }
 
     fn blinking_cursor_frame(&mut self, now: Instant) -> bool {
@@ -1685,11 +1846,142 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, accumulate_pending_surface_damage,
-        build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
-        ime_cursor_area, normalized_opacity, terminal_wgpu_backends,
-        transparent_surface_alpha_mode,
+        CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, accumulate_pending_surface_damage,
+        build_cursor_motion, build_tab_bar_surface, cursor_blink_phase,
+        frame_interval_for_refresh_rate, ime_cursor_area, normalized_opacity,
+        terminal_wgpu_backends, transparent_surface_alpha_mode,
     };
+
+    #[test]
+    fn cursor_motion_uses_time_based_easing_and_finishes_exactly_at_target() {
+        let started_at = Instant::now();
+        let motion = CursorMotion {
+            from_x: 0.0,
+            from_y: 2.0,
+            to_x: 4.0,
+            to_y: 6.0,
+            started_at,
+            duration: Duration::from_millis(80),
+            waiting_for_line_feed: false,
+        };
+
+        assert_eq!(motion.position_at(started_at), ((0.0, 2.0), true));
+        let (middle, active) = motion.position_at(started_at + Duration::from_millis(40));
+        assert!(active);
+        assert_eq!(middle, (3.5, 5.5));
+        assert_eq!(
+            motion.position_at(started_at + Duration::from_millis(80)),
+            ((4.0, 6.0), false)
+        );
+    }
+
+    #[test]
+    fn carriage_return_and_line_feed_share_one_diagonal_cursor_motion() {
+        let cursor = |x, y| RenderSurfaceCursorSnapshot {
+            x,
+            y,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        };
+        let started_at = Instant::now();
+        let frame_interval = Duration::from_millis(6);
+        let duration = Duration::from_millis(80);
+        let carriage_return = build_cursor_motion(
+            None,
+            cursor(12, 4),
+            cursor(0, 4),
+            started_at,
+            duration,
+            frame_interval,
+        );
+        assert!(carriage_return.waiting_for_line_feed);
+        assert_eq!(carriage_return.position_at(started_at).0, (12.0, 4.0));
+
+        let combined = build_cursor_motion(
+            Some(carriage_return),
+            cursor(0, 4),
+            cursor(0, 5),
+            started_at + Duration::from_millis(1),
+            duration,
+            frame_interval,
+        );
+        assert!(!combined.waiting_for_line_feed);
+        assert_eq!((combined.from_x, combined.from_y), (12.0, 4.0));
+        assert_eq!((combined.to_x, combined.to_y), (0.0, 5.0));
+        assert_eq!(combined.started_at, carriage_return.started_at);
+    }
+
+    #[test]
+    fn standalone_carriage_return_waits_for_only_one_coalesce_deadline() {
+        let cursor = |x, y| RenderSurfaceCursorSnapshot {
+            x,
+            y,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        };
+        let observed_at = Instant::now();
+        let frame_interval = Duration::from_millis(6);
+        let motion = build_cursor_motion(
+            None,
+            cursor(12, 4),
+            cursor(0, 4),
+            observed_at,
+            Duration::from_millis(80),
+            frame_interval,
+        );
+
+        assert_eq!(motion.started_at, observed_at + frame_interval);
+        assert_eq!(motion.position_at(observed_at).0, (12.0, 4.0));
+        assert_eq!(motion.position_at(motion.started_at).0, (12.0, 4.0));
+        assert!(
+            motion
+                .position_at(motion.started_at + Duration::from_millis(1))
+                .0
+                .0
+                < 12.0
+        );
+    }
+
+    #[test]
+    fn vertical_move_after_coalesce_deadline_retargets_current_motion() {
+        let cursor = |x, y| RenderSurfaceCursorSnapshot {
+            x,
+            y,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        };
+        let observed_at = Instant::now();
+        let frame_interval = Duration::from_millis(6);
+        let duration = Duration::from_millis(80);
+        let carriage_return = build_cursor_motion(
+            None,
+            cursor(12, 4),
+            cursor(0, 4),
+            observed_at,
+            duration,
+            frame_interval,
+        );
+        let vertical_move_at = carriage_return.started_at + Duration::from_millis(1);
+        let expected_origin = carriage_return.position_at(vertical_move_at).0;
+
+        let retargeted = build_cursor_motion(
+            Some(carriage_return),
+            cursor(0, 4),
+            cursor(0, 5),
+            vertical_move_at,
+            duration,
+            frame_interval,
+        );
+
+        assert!(!retargeted.waiting_for_line_feed);
+        assert_eq!((retargeted.from_x, retargeted.from_y), expected_origin);
+        assert_ne!((retargeted.from_x, retargeted.from_y), (12.0, 4.0));
+        assert_eq!((retargeted.to_x, retargeted.to_y), (0.0, 5.0));
+        assert_eq!(retargeted.started_at, vertical_move_at);
+    }
 
     #[test]
     fn pending_surface_damage_survives_snapshot_replacement_before_present() {
