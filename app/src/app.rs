@@ -1382,6 +1382,13 @@ impl ApplicationHandler<RuntimeEvent> for App {
             WindowEvent::CloseRequested => {
                 self.exit_and_persist(event_loop);
             }
+            WindowEvent::Moved(_) => {
+                if let Some(render_runtime) = self.render_runtime.as_mut()
+                    && render_runtime.refresh_display_timing()
+                {
+                    self.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 let size_info = self.resize_window_size_info(TerminalWindowSize::new(
                     size.width.max(1),

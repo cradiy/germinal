@@ -3,6 +3,7 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use germinal_ports::rendering::render_target_id::RenderTargetId;
 
 use crate::rendering::pty_surface::{
+    glyph_atlas::WgpuTerminalGlyphAtlas,
     glyph_atlas_bind_group::{
         WgpuTerminalGlyphAtlasBindGroup, WgpuTerminalGlyphAtlasBindGroupFactory,
     },
@@ -41,13 +42,12 @@ impl WgpuTerminalGlyphAtlasGpuCache {
             };
         }
 
-        let key = WgpuTerminalGlyphAtlasGpuCacheKey::from_frame(glyph_atlas_frame);
-
         {
             let cache = self.inner.borrow();
 
             if let Some(entry) = cache.get(&glyph_atlas_frame.target_id)
-                && entry.key == key
+                && entry.source == glyph_atlas_frame.source
+                && Arc::ptr_eq(&entry.atlas, &glyph_atlas_frame.atlas)
             {
                 return WgpuTerminalGlyphAtlasGpuCacheResult {
                     texture: Some(Arc::clone(&entry.texture)),
@@ -57,15 +57,15 @@ impl WgpuTerminalGlyphAtlasGpuCache {
             }
         }
 
-        let texture_factory = WgpuTerminalGlyphAtlasTextureFactory::new();
-
-        let Some(texture) = texture_factory.upload(device, queue, &glyph_atlas_frame.atlas) else {
+        let Some(upload_bytes) = glyph_atlas_frame.upload_bytes.as_ref() else {
             return WgpuTerminalGlyphAtlasGpuCacheResult {
                 texture: None,
                 bind_group: None,
                 cache_hit: false,
             };
         };
+        let texture_factory = WgpuTerminalGlyphAtlasTextureFactory::new();
+        let texture = texture_factory.upload_bytes(device, queue, upload_bytes);
 
         let texture = Arc::new(texture);
 
@@ -83,7 +83,8 @@ impl WgpuTerminalGlyphAtlasGpuCache {
             cache.insert(
                 glyph_atlas_frame.target_id,
                 WgpuTerminalGlyphAtlasGpuCacheEntry {
-                    key,
+                    source: glyph_atlas_frame.source,
+                    atlas: Arc::clone(&glyph_atlas_frame.atlas),
                     texture: Arc::clone(&texture),
                     bind_group: Arc::clone(&bind_group),
                 },
@@ -129,41 +130,8 @@ impl WgpuTerminalGlyphAtlasGpuCacheResult {
 
 #[derive(Clone)]
 struct WgpuTerminalGlyphAtlasGpuCacheEntry {
-    key: WgpuTerminalGlyphAtlasGpuCacheKey,
+    source: WgpuTerminalGlyphAtlasSourceKind,
+    atlas: Arc<WgpuTerminalGlyphAtlas>,
     texture: Arc<WgpuTerminalGlyphAtlasTexture>,
     bind_group: Arc<WgpuTerminalGlyphAtlasBindGroup>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WgpuTerminalGlyphAtlasGpuCacheKey {
-    source: WgpuTerminalGlyphAtlasSourceKind,
-    width_px: u32,
-    height_px: u32,
-    glyph_count: usize,
-    pixel_len: usize,
-    pixel_checksum: u64,
-}
-
-impl WgpuTerminalGlyphAtlasGpuCacheKey {
-    fn from_frame(frame: &WgpuTerminalGlyphAtlasFrame) -> Self {
-        Self {
-            source: frame.source,
-            width_px: frame.atlas.width_px,
-            height_px: frame.atlas.height_px,
-            glyph_count: frame.atlas.entries.len(),
-            pixel_len: frame.atlas.pixels.len(),
-            pixel_checksum: checksum_bytes(&frame.atlas.pixels),
-        }
-    }
-}
-
-fn checksum_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xCBF29CE484222325u64;
-
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001B3);
-    }
-
-    hash
 }

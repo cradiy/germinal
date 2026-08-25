@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
 };
 
 use germinal_ports::{
@@ -26,7 +27,7 @@ use crate::rendering::pty_surface::{
 pub struct WgpuTerminalGlyphAtlasFrame {
     pub target_id: RenderTargetId,
     pub seq: Seq,
-    pub atlas: WgpuTerminalGlyphAtlas,
+    pub atlas: Arc<WgpuTerminalGlyphAtlas>,
     pub upload_bytes: Option<WgpuTerminalGlyphAtlasUploadBytes>,
     pub run_count: usize,
     pub char_count: usize,
@@ -142,10 +143,8 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             glyphs: glyphs.iter().copied().collect(),
         };
 
-        let (atlas, cache_hit) =
+        let (atlas, upload_bytes, cache_hit) =
             self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key, segments.values());
-
-        let upload_bytes = self.texture_factory.build_upload_bytes(&atlas);
 
         WgpuTerminalGlyphAtlasFrame {
             target_id: surface_snapshot.target_id,
@@ -164,7 +163,11 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         target_id: RenderTargetId,
         cache_key: &WgpuTerminalGlyphAtlasCacheKey,
         segments: impl IntoIterator<Item = &'a TerminalTextSegment>,
-    ) -> (WgpuTerminalGlyphAtlas, bool) {
+    ) -> (
+        Arc<WgpuTerminalGlyphAtlas>,
+        Option<WgpuTerminalGlyphAtlasUploadBytes>,
+        bool,
+    ) {
         {
             let cache = self.cache.borrow();
 
@@ -172,16 +175,17 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                 && entry.key.source == cache_key.source
                 && entry.key == *cache_key
             {
-                return (entry.atlas.clone(), true);
+                return (Arc::clone(&entry.atlas), entry.upload_bytes.clone(), true);
             }
         }
 
-        let atlas = match self.source.kind() {
+        let atlas = Arc::new(match self.source.kind() {
             WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => self
                 .source
                 .build_for_glyphs(cache_key.glyphs.iter().copied()),
             WgpuTerminalGlyphAtlasSourceKind::Crossfont => self.source.build_for_segments(segments),
-        };
+        });
+        let upload_bytes = self.texture_factory.build_upload_bytes(&atlas);
 
         {
             let mut cache = self.cache.borrow_mut();
@@ -190,12 +194,13 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                 target_id,
                 WgpuTerminalGlyphAtlasCacheEntry {
                     key: cache_key.clone(),
-                    atlas: atlas.clone(),
+                    atlas: Arc::clone(&atlas),
+                    upload_bytes: upload_bytes.clone(),
                 },
             );
         }
 
-        (atlas, false)
+        (atlas, upload_bytes, false)
     }
 }
 
@@ -299,7 +304,8 @@ struct WgpuTerminalGlyphAtlasCacheKey {
 #[derive(Debug, Clone, PartialEq)]
 struct WgpuTerminalGlyphAtlasCacheEntry {
     key: WgpuTerminalGlyphAtlasCacheKey,
-    atlas: WgpuTerminalGlyphAtlas,
+    atlas: Arc<WgpuTerminalGlyphAtlas>,
+    upload_bytes: Option<WgpuTerminalGlyphAtlasUploadBytes>,
 }
 
 fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerminalGlyphKey> {
@@ -481,6 +487,11 @@ mod tests {
         assert!(!first.cache_hit);
         assert!(second.cache_hit);
         assert_eq!(first.atlas, second.atlas);
+        assert!(Arc::ptr_eq(&first.atlas, &second.atlas));
+        assert!(Arc::ptr_eq(
+            &first.upload_bytes.as_ref().unwrap().pixels,
+            &second.upload_bytes.as_ref().unwrap().pixels,
+        ));
     }
 
     #[test]

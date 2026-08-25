@@ -111,6 +111,8 @@ pub struct WgpuTerminalWindowRuntime {
     surface_snapshots: HashMap<RenderTargetId, RenderSurfaceSnapshot>,
     workspace_layout: Vec<RenderSurfacePlacement>,
     tab_bar: Option<TabBarSnapshot>,
+    tab_bar_surface: Option<WgpuTabBarSurface>,
+    tab_bar_generation: u64,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     scale_factor: TerminalScaleFactor,
@@ -120,6 +122,9 @@ pub struct WgpuTerminalWindowRuntime {
     background_shader_animated: bool,
     next_background_frame_at: Option<Instant>,
     needs_redraw: bool,
+    display_refresh_rate_millihertz: Option<u32>,
+    frame_interval: Duration,
+    next_present_at: Instant,
     visual_bell_until: Option<Instant>,
     cursor_blink_interval: Duration,
     cursor_blink_signature: Option<CursorBlinkSignature>,
@@ -144,6 +149,20 @@ fn normalized_opacity(opacity: f32) -> f32 {
     } else {
         1.0
     }
+}
+
+fn frame_interval_for_refresh_rate(refresh_rate_millihertz: Option<u32>) -> Duration {
+    let refresh_rate_millihertz = refresh_rate_millihertz
+        .filter(|rate| *rate > 0)
+        .unwrap_or(60_000);
+    Duration::from_nanos(1_000_000_000_000_u64 / u64::from(refresh_rate_millihertz))
+}
+
+fn display_refresh_rate_millihertz(window: &Window) -> Option<u32> {
+    window
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+        .filter(|rate| *rate > 0)
 }
 
 fn transparent_surface_alpha_mode(
@@ -417,6 +436,8 @@ impl WgpuTerminalWindowRuntime {
         }
 
         let now = Instant::now();
+        let display_refresh_rate_millihertz = display_refresh_rate_millihertz(window.as_ref());
+        let frame_interval = frame_interval_for_refresh_rate(display_refresh_rate_millihertz);
         Ok(Self {
             window,
             base_title,
@@ -429,6 +450,8 @@ impl WgpuTerminalWindowRuntime {
             surface_snapshots: HashMap::new(),
             workspace_layout: Vec::new(),
             tab_bar: None,
+            tab_bar_surface: None,
+            tab_bar_generation: 0,
             size_info,
             profile,
             scale_factor,
@@ -438,6 +461,9 @@ impl WgpuTerminalWindowRuntime {
             background_shader_animated,
             next_background_frame_at: background_shader_animated.then_some(now),
             needs_redraw: false,
+            display_refresh_rate_millihertz,
+            frame_interval,
+            next_present_at: now,
             visual_bell_until: None,
             cursor_blink_interval: cursor_blink_interval.max(Duration::from_millis(1)),
             cursor_blink_signature: None,
@@ -499,7 +525,7 @@ impl WgpuTerminalWindowRuntime {
 
     pub fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
         self.surface_snapshots.insert(snapshot.target_id, snapshot);
-        self.request_redraw();
+        self.schedule_redraw();
     }
 
     pub fn update_ime_cursor_area(&self, target_id: RenderTargetId) -> bool {
@@ -531,7 +557,7 @@ impl WgpuTerminalWindowRuntime {
             .remove_render_target(target_id);
         self.render_plugins
             .retain(|plugin| plugin.target_id() != target_id);
-        self.request_redraw();
+        self.schedule_redraw();
     }
 
     pub fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot> {
@@ -554,7 +580,7 @@ impl WgpuTerminalWindowRuntime {
             });
         }
         self.workspace_layout = placements;
-        self.request_redraw();
+        self.schedule_redraw();
     }
 
     pub fn route_wgpu_pane_input(
@@ -571,14 +597,24 @@ impl WgpuTerminalWindowRuntime {
         };
         let result = plugin.input(event);
         if result.request_redraw {
-            self.request_redraw();
+            self.schedule_redraw();
         }
         true
     }
 
     pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
         self.tab_bar = tab_bar;
-        self.request_redraw();
+        self.rebuild_tab_bar_surface();
+        self.schedule_redraw();
+    }
+
+    fn rebuild_tab_bar_surface(&mut self) {
+        self.tab_bar_generation = self.tab_bar_generation.wrapping_add(1).max(1);
+        self.tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
+            let mut surface = build_tab_bar_surface(tab_bar, self.size_info, self.color_theme)?;
+            surface.snapshot.latest_seq = Seq::new(self.tab_bar_generation);
+            Some(surface)
+        });
     }
 
     pub fn set_window_title(&mut self, title: &str) {
@@ -598,7 +634,7 @@ impl WgpuTerminalWindowRuntime {
                 self.visual_bell_until
                     .map_or(until, |current| current.max(until)),
             );
-            self.request_redraw();
+            self.schedule_redraw();
         }
 
         if request_attention {
@@ -619,8 +655,9 @@ impl WgpuTerminalWindowRuntime {
         self.surface_config.width = self.size_info.window_size().width_px();
         self.surface_config.height = self.size_info.window_size().height_px();
         self.surface.configure(&self.device, &self.surface_config);
+        self.rebuild_tab_bar_surface();
 
-        self.request_redraw();
+        self.schedule_redraw();
 
         self.terminal_size_info()
     }
@@ -657,6 +694,7 @@ impl WgpuTerminalWindowRuntime {
         self.profile = profile;
         self.scale_factor = scale_factor;
         self.size_info = size_info;
+        self.rebuild_tab_bar_surface();
 
         for plugin in &mut self.render_plugins {
             let Some(placement) = self
@@ -673,18 +711,35 @@ impl WgpuTerminalWindowRuntime {
             });
         }
 
-        self.request_redraw();
+        self.schedule_redraw();
         Ok(self.terminal_size_info())
     }
 
-    fn request_redraw(&mut self) {
+    pub fn schedule_redraw(&mut self) {
         self.needs_redraw = true;
     }
 
+    pub fn refresh_display_timing(&mut self) -> bool {
+        let Some(refresh_rate_millihertz) = display_refresh_rate_millihertz(self.window.as_ref())
+        else {
+            return false;
+        };
+        if self.display_refresh_rate_millihertz == Some(refresh_rate_millihertz) {
+            return false;
+        }
+
+        self.display_refresh_rate_millihertz = Some(refresh_rate_millihertz);
+        self.frame_interval = frame_interval_for_refresh_rate(Some(refresh_rate_millihertz));
+        self.next_present_at = Instant::now();
+        true
+    }
+
     pub fn take_redraw_request(&mut self) -> bool {
-        let needs_redraw = self.needs_redraw;
+        if !self.needs_redraw || Instant::now() < self.next_present_at {
+            return false;
+        }
         self.needs_redraw = false;
-        needs_redraw
+        true
     }
 
     pub fn terminal_size_info(&self) -> TerminalSizeInfo {
@@ -708,6 +763,9 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
+        if self.display_refresh_rate_millihertz.is_none() {
+            self.refresh_display_timing();
+        }
         let now = Instant::now();
         let visual_bell = self.visual_bell_frame(now);
         let blinking_cursor_visible = self.blinking_cursor_frame(now);
@@ -749,11 +807,7 @@ impl WgpuTerminalWindowRuntime {
                     })
                 })
                 .collect::<Vec<_>>();
-        let tab_bar_surface = self
-            .tab_bar
-            .as_ref()
-            .and_then(|tab_bar| build_tab_bar_surface(tab_bar, self.size_info, self.color_theme));
-        if let Some(tab_bar_surface) = tab_bar_surface.as_ref() {
+        if let Some(tab_bar_surface) = self.tab_bar_surface.as_ref() {
             let size_info =
                 self.terminal_size_info_for_window_size(tab_bar_surface.placement.window_size());
             surfaces.push(WgpuTerminalWorkspaceSurface {
@@ -808,7 +862,7 @@ impl WgpuTerminalWindowRuntime {
             }) {
             Ok(result) => {
                 if result.plugin_redraw_requested {
-                    self.request_redraw();
+                    self.schedule_redraw();
                 }
                 self.perf.record_frame(row_count, run_count, &result);
             }
@@ -817,18 +871,21 @@ impl WgpuTerminalWindowRuntime {
                 self.handle_present_error(error);
             }
         }
+        self.next_present_at = now + self.frame_interval;
         self.next_background_frame_at = self
             .background_shader_animated
-            .then_some(now + BACKGROUND_ANIMATION_FRAME_INTERVAL);
+            .then_some(now + self.frame_interval);
     }
 
     pub fn next_render_deadline(&self) -> Option<Instant> {
-        match (self.next_cursor_blink_at, self.next_background_frame_at) {
-            (Some(cursor), Some(background)) => Some(cursor.min(background)),
-            (Some(cursor), None) => Some(cursor),
-            (None, Some(background)) => Some(background),
-            (None, None) => None,
-        }
+        [
+            self.next_cursor_blink_at,
+            self.next_background_frame_at,
+            self.needs_redraw.then_some(self.next_present_at),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn take_due_render_deadline(&mut self, now: Instant) -> bool {
@@ -843,10 +900,11 @@ impl WgpuTerminalWindowRuntime {
             .next_background_frame_at
             .is_some_and(|deadline| deadline <= now);
         if background_due {
-            self.next_background_frame_at = Some(now + BACKGROUND_ANIMATION_FRAME_INTERVAL);
+            self.next_background_frame_at = Some(now + self.frame_interval);
         }
 
-        cursor_due || background_due
+        let redraw_due = self.needs_redraw && self.next_present_at <= now;
+        cursor_due || background_due || redraw_due
     }
 
     fn blinking_cursor_frame(&mut self, now: Instant) -> bool {
@@ -886,7 +944,7 @@ impl WgpuTerminalWindowRuntime {
             return None;
         }
 
-        self.request_redraw();
+        self.schedule_redraw();
         Some(WgpuVisualBellFrame::new(
             self.surface_config.width,
             self.surface_config.height,
@@ -898,7 +956,7 @@ impl WgpuTerminalWindowRuntime {
             WgpuTerminalSurfaceFramePresentError::Outdated
             | WgpuTerminalSurfaceFramePresentError::Lost => {
                 self.surface.configure(&self.device, &self.surface_config);
-                self.request_redraw();
+                self.schedule_redraw();
             }
             WgpuTerminalSurfaceFramePresentError::Timeout
             | WgpuTerminalSurfaceFramePresentError::Occluded
@@ -1254,7 +1312,6 @@ fn terminal_size_info(
 }
 
 const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(1);
-const BACKGROUND_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RENDER_PERF_LOG_ENV: &str = "GERMINAL_RENDER_PERF_LOG";
 
 struct WgpuTerminalRenderPerf {
@@ -1493,6 +1550,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
         WgpuTerminalWindowRuntime::request_window_redraw(self)
     }
 
+    fn schedule_redraw(&mut self) {
+        WgpuTerminalWindowRuntime::schedule_redraw(self)
+    }
+
     fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot) {
         WgpuTerminalWindowRuntime::set_surface_snapshot(self, snapshot);
     }
@@ -1552,7 +1613,9 @@ mod tests {
     use germinal_ports::{
         pty_host::{
             cell_size::TerminalCellSize,
+            color_theme::TerminalColorTheme,
             size_info::{TerminalPadding, TerminalSizeInfo},
+            terminal_progress::TerminalProgress,
             window_size::TerminalWindowSize,
         },
         rendering::{
@@ -1562,6 +1625,7 @@ mod tests {
                 RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
                 RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot,
             },
+            tab_bar::{TabBarPosition, TabBarSnapshot},
             workspace_layout::RenderSurfacePlacement,
         },
         seq::Seq,
@@ -1570,13 +1634,29 @@ mod tests {
 
     use super::{
         TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, build_tab_bar_surface, cursor_blink_phase,
-        ime_cursor_area, normalized_opacity, transparent_surface_alpha_mode,
+        frame_interval_for_refresh_rate, ime_cursor_area, normalized_opacity,
+        transparent_surface_alpha_mode,
     };
-    use germinal_ports::pty_host::{
-        color_theme::TerminalColorTheme, terminal_progress::TerminalProgress,
-    };
-    use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarSnapshot};
 
+    #[test]
+    fn frame_interval_tracks_the_display_refresh_rate() {
+        assert_eq!(
+            frame_interval_for_refresh_rate(Some(60_000)),
+            Duration::from_nanos(16_666_666),
+        );
+        assert_eq!(
+            frame_interval_for_refresh_rate(Some(120_000)),
+            Duration::from_nanos(8_333_333),
+        );
+        assert_eq!(
+            frame_interval_for_refresh_rate(None),
+            Duration::from_nanos(16_666_666),
+        );
+        assert_eq!(
+            frame_interval_for_refresh_rate(Some(0)),
+            Duration::from_nanos(16_666_666),
+        );
+    }
     #[test]
     fn opacity_is_clamped_and_non_finite_values_fall_back_to_opaque() {
         assert_eq!(normalized_opacity(-0.5), 0.0);

@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use crate::rendering::pty_surface::glyph_atlas::WgpuTerminalGlyphAtlas;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WgpuTerminalGlyphAtlasUploadBytes {
     pub width_px: u32,
     pub height_px: u32,
-    pub pixels: Vec<u8>,
+    pub pixels: Arc<Vec<u8>>,
     pub format: wgpu::TextureFormat,
 }
 
@@ -34,26 +36,28 @@ impl WgpuTerminalGlyphAtlasUploadBytes {
     }
 }
 
-fn rgba_pixels_from_atlas(atlas: &WgpuTerminalGlyphAtlas) -> Vec<u8> {
+fn rgba_pixels_from_atlas(atlas: &WgpuTerminalGlyphAtlas) -> Arc<Vec<u8>> {
     let alpha_len = (atlas.width_px * atlas.height_px) as usize;
     let rgba_len = alpha_len * 4;
 
     if atlas.pixels.len() == rgba_len {
-        return atlas.pixels.clone();
+        return Arc::new(atlas.pixels.clone());
     }
 
     if atlas.pixels.len() == alpha_len {
-        return atlas
-            .pixels
-            .iter()
-            .flat_map(|alpha| [0, 0, 0, *alpha])
-            .collect();
+        return Arc::new(
+            atlas
+                .pixels
+                .iter()
+                .flat_map(|alpha| [0, 0, 0, *alpha])
+                .collect(),
+        );
     }
 
     let mut pixels = vec![0; rgba_len];
     let copy_len = pixels.len().min(atlas.pixels.len());
     pixels[..copy_len].copy_from_slice(&atlas.pixels[..copy_len]);
-    pixels
+    Arc::new(pixels)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -116,7 +120,7 @@ impl WgpuTerminalGlyphAtlasTextureFactory {
 
         queue.write_texture(
             texture.as_image_copy(),
-            &upload_bytes.pixels,
+            upload_bytes.pixels.as_slice(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(upload_bytes.bytes_per_row()),

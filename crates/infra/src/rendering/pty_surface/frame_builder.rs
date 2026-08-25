@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -37,6 +38,7 @@ pub struct WgpuTerminalFrameBuilder {
     vertex_buffer_builder: WgpuQuadVertexBufferBuilder,
     renderer_backend: Rc<RefCell<WgpuRendererBackend>>,
     video_surface_registry: WgpuVideoSurfaceRegistry,
+    prepared_frame_cache: Rc<RefCell<HashMap<RenderTargetId, WgpuTerminalPreparedFrameCacheEntry>>>,
 }
 
 impl WgpuTerminalFrameBuilder {
@@ -47,6 +49,7 @@ impl WgpuTerminalFrameBuilder {
             vertex_buffer_builder: WgpuQuadVertexBufferBuilder::new(),
             renderer_backend: Rc::new(RefCell::new(WgpuRendererBackend::new(renderer_config))),
             video_surface_registry: WgpuVideoSurfaceRegistry::default(),
+            prepared_frame_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -104,6 +107,7 @@ impl WgpuTerminalFrameBuilder {
         self.glyph_atlas_frame_builder
             .remove_render_target(target_id);
         self.video_surface_registry.remove_render_target(target_id);
+        self.prepared_frame_cache.borrow_mut().remove(&target_id);
     }
 
     pub fn glyph_atlas_source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind {
@@ -126,6 +130,29 @@ impl WgpuTerminalFrameBuilder {
     ) -> WgpuTerminalPreparedFrame {
         let total_started_at = Instant::now();
         self.video_surface_registry.sync_snapshot(surface_snapshot);
+        let cache_key = WgpuTerminalPreparedFrameCacheKey {
+            seq: surface_snapshot.latest_seq,
+            viewport,
+            renderer_config,
+            default_background: surface_snapshot.default_background,
+            cursor: surface_snapshot.cursor,
+            ime_preedit: surface_snapshot.ime_preedit.clone(),
+        };
+        if surface_snapshot.latest_seq.value() != 0
+            && let Some(entry) = self
+                .prepared_frame_cache
+                .borrow()
+                .get(&surface_snapshot.target_id)
+            && entry.key == cache_key
+        {
+            let mut frame = entry.frame.clone();
+            frame.glyph_atlas_frame.cache_hit = true;
+            frame.timings = WgpuTerminalPreparedFrameTimings {
+                total: total_started_at.elapsed(),
+                ..Default::default()
+            };
+            return frame;
+        }
 
         let atlas_build_started_at = Instant::now();
         let glyph_atlas_frame = self.glyph_atlas_frame_builder.build(surface_snapshot);
@@ -153,7 +180,7 @@ impl WgpuTerminalFrameBuilder {
                     let vertex_build_started_at = Instant::now();
                     let (vertex_buffer, glyph_uv_map_result) = self
                         .vertex_buffer_builder
-                        .build_with_glyph_atlas(quads, &glyph_atlas_frame.atlas);
+                        .build_with_glyph_atlas(quads, glyph_atlas_frame.atlas.as_ref());
                     let vertex_build_time = vertex_build_started_at.elapsed();
                     (vertex_buffer, glyph_uv_map_result, vertex_build_time)
                 });
@@ -205,7 +232,7 @@ impl WgpuTerminalFrameBuilder {
             total: total_started_at.elapsed(),
         };
 
-        WgpuTerminalPreparedFrame {
+        let frame = WgpuTerminalPreparedFrame {
             target_id: surface_snapshot.target_id,
             seq: surface_snapshot.latest_seq,
             viewport,
@@ -219,8 +246,35 @@ impl WgpuTerminalFrameBuilder {
             glyph_atlas_frame,
             glyph_uv_map_result,
             timings,
+        };
+        if surface_snapshot.latest_seq.value() != 0 {
+            self.prepared_frame_cache.borrow_mut().insert(
+                surface_snapshot.target_id,
+                WgpuTerminalPreparedFrameCacheEntry {
+                    key: cache_key,
+                    frame: frame.clone(),
+                },
+            );
         }
+        frame
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WgpuTerminalPreparedFrameCacheKey {
+    seq: Seq,
+    viewport: WgpuViewportUniform,
+    renderer_config: WgpuRendererConfig,
+    default_background: germinal_ports::rendering::frame_plan_builder::RgbColorDto,
+    cursor: Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceCursorSnapshot>,
+    ime_preedit:
+        Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceImePreeditSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WgpuTerminalPreparedFrameCacheEntry {
+    key: WgpuTerminalPreparedFrameCacheKey,
+    frame: WgpuTerminalPreparedFrame,
 }
 
 impl Default for WgpuTerminalFrameBuilder {
@@ -323,6 +377,8 @@ fn renderer_lines_of(surface_snapshot: &RenderSurfaceSnapshot) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use germinal_ports::{
         rendering::{
             frame_plan_builder::{RgbColorDto, TextStyleDto},
@@ -336,6 +392,81 @@ mod tests {
     };
 
     use super::*;
+
+    fn debug_snapshot(seq: u64) -> RenderSurfaceSnapshot {
+        RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(seq),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "cached frame".to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![0],
+            cursor: None,
+            ime_preedit: None,
+        }
+    }
+
+    #[test]
+    fn unchanged_snapshot_reuses_prepared_vertex_and_atlas_storage() {
+        let builder = WgpuTerminalFrameBuilder::default();
+        let snapshot = debug_snapshot(1);
+        let viewport = WgpuViewportUniform::new(640.0, 480.0);
+
+        let first = builder.build(&snapshot, viewport);
+        let second = builder.build(&snapshot, viewport);
+
+        assert!(Arc::ptr_eq(
+            &first.vertex_buffer.vertices,
+            &second.vertex_buffer.vertices,
+        ));
+        assert!(Arc::ptr_eq(
+            &first.vertex_buffer.indices,
+            &second.vertex_buffer.indices,
+        ));
+        assert!(Arc::ptr_eq(
+            &first.glyph_atlas_frame.atlas,
+            &second.glyph_atlas_frame.atlas,
+        ));
+        assert!(second.glyph_atlas_frame.cache_hit);
+        assert_eq!(
+            second.timings.render_surface,
+            Duration::ZERO,
+            "cache hits must not repeat CPU surface rendering",
+        );
+        assert_eq!(second.timings.vertex_build, Duration::ZERO);
+        assert_eq!(second.timings.atlas_build, Duration::ZERO);
+    }
+
+    #[test]
+    fn changed_cursor_state_invalidates_prepared_frame_cache() {
+        let builder = WgpuTerminalFrameBuilder::default();
+        let mut snapshot = debug_snapshot(1);
+        let viewport = WgpuViewportUniform::new(640.0, 480.0);
+        let first = builder.build(&snapshot, viewport);
+        snapshot.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 2,
+            y: 0,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+
+        let second = builder.build(&snapshot, viewport);
+
+        assert!(!Arc::ptr_eq(
+            &first.vertex_buffer.vertices,
+            &second.vertex_buffer.vertices,
+        ));
+    }
 
     #[test]
     fn crossfont_frame_maps_joined_emoji_and_contextual_script_glyphs() {

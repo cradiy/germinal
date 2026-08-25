@@ -146,9 +146,14 @@ fn upload_glyph_atlas_without_cache(
 ) -> crate::rendering::pty_surface::glyph_atlas_gpu_cache::WgpuTerminalGlyphAtlasGpuCacheResult {
     let glyph_atlas_texture_factory = WgpuTerminalGlyphAtlasTextureFactory::new();
 
-    let glyph_atlas_texture = glyph_atlas_texture_factory
-        .upload(device, queue, &prepared.glyph_atlas_frame.atlas)
-        .map(Arc::new);
+    let glyph_atlas_texture =
+        prepared
+            .glyph_atlas_frame
+            .upload_bytes
+            .as_ref()
+            .map(|upload_bytes| {
+                Arc::new(glyph_atlas_texture_factory.upload_bytes(device, queue, upload_bytes))
+            });
 
     let glyph_atlas_bind_group_factory = WgpuTerminalGlyphAtlasBindGroupFactory::new();
 

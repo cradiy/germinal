@@ -60,8 +60,22 @@ impl WgpuBufferUploader {
             );
         }
 
-        queue.write_buffer(&cached.vertex_buffer, 0, upload_bytes.vertex_bytes());
-        queue.write_buffer(&cached.index_buffer, 0, upload_bytes.index_bytes());
+        let vertex_unchanged = cached
+            .vertex_data
+            .as_ref()
+            .is_some_and(|vertices| Arc::ptr_eq(vertices, &upload_bytes.vertex_data));
+        if !vertex_unchanged {
+            queue.write_buffer(&cached.vertex_buffer, 0, upload_bytes.vertex_bytes());
+            cached.vertex_data = Some(Arc::clone(&upload_bytes.vertex_data));
+        }
+        let index_unchanged = cached
+            .index_data
+            .as_ref()
+            .is_some_and(|indices| Arc::ptr_eq(indices, &upload_bytes.index_data));
+        if !index_unchanged {
+            queue.write_buffer(&cached.index_buffer, 0, upload_bytes.index_bytes());
+            cached.index_data = Some(Arc::clone(&upload_bytes.index_data));
+        }
 
         WgpuUploadedBuffers {
             vertex_buffer: Arc::clone(&cached.vertex_buffer),
@@ -132,6 +146,8 @@ struct WgpuBufferUploadCache {
     index_buffer: Arc<wgpu::Buffer>,
     vertex_capacity_bytes: u64,
     index_capacity_bytes: u64,
+    vertex_data: Option<Arc<Vec<WgpuGpuVertex>>>,
+    index_data: Option<Arc<Vec<u32>>>,
 }
 
 impl WgpuBufferUploadCache {
@@ -151,6 +167,8 @@ impl WgpuBufferUploadCache {
             })),
             vertex_capacity_bytes,
             index_capacity_bytes,
+            vertex_data: None,
+            index_data: None,
         }
     }
 }

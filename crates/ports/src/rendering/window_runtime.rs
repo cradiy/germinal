@@ -10,6 +10,7 @@ use crate::{
 
 pub trait ITerminalWindowRuntime {
     fn request_window_redraw(&self);
+    fn schedule_redraw(&mut self);
     fn set_surface_snapshot(&mut self, snapshot: RenderSurfaceSnapshot);
     fn remove_render_target(&mut self, target_id: RenderTargetId);
     fn surface_snapshots_mut(&mut self) -> Vec<&mut RenderSurfaceSnapshot>;

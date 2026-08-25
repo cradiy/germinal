@@ -335,8 +335,10 @@ where
             .window_runtime_mut()
             .expect("window runtime must be initialized before use");
 
-        let should_request = should_request || runtime.take_redraw_request();
         if should_request {
+            runtime.schedule_redraw();
+        }
+        if runtime.take_redraw_request() {
             runtime.request_window_redraw();
         }
     }
