@@ -13,6 +13,10 @@ pub struct DecodeResult {
 }
 
 impl GNativeEnterControlSequenceDecoder {
+    pub fn can_passthrough(&self, bytes: &[u8]) -> bool {
+        self.pending.is_empty() && !bytes.is_empty() && !bytes.contains(&0x1b)
+    }
+
     pub fn decode(&mut self, bytes: &[u8]) -> DecodeResult {
         self.pending.extend_from_slice(bytes);
 
@@ -112,6 +116,17 @@ mod tests {
                 enter_gnative: false,
             }
         );
+    }
+
+    #[test]
+    fn passthrough_requires_no_pending_or_escape_bytes() {
+        let mut decoder = GNativeEnterControlSequenceDecoder::default();
+
+        assert!(decoder.can_passthrough(b"plain text\r\n"));
+        assert!(!decoder.can_passthrough(b"\x1b[31mred"));
+
+        let _ = decoder.decode(b"prefix\x1bPgerminal-gnative;");
+        assert!(!decoder.can_passthrough(b"continuation"));
     }
 
     #[test]

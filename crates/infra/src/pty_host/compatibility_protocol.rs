@@ -41,6 +41,12 @@ pub(crate) struct TerminalCompatibilityProtocolDecoder {
 }
 
 impl TerminalCompatibilityProtocolDecoder {
+    pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
+        matches!(self.state, DecoderState::Ground)
+            && self.utf8_continuations == 0
+            && is_plain_ascii(input)
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         size: TerminalPtySize,
@@ -88,10 +94,7 @@ impl TerminalCompatibilityProtocolDecoder {
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<CompatibilityProtocolEvent> {
-        if matches!(self.state, DecoderState::Ground)
-            && self.utf8_continuations == 0
-            && is_plain_ascii(input)
-        {
+        if self.can_passthrough(input) {
             return vec![CompatibilityProtocolEvent::Bytes(input.to_vec())];
         }
 

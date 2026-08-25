@@ -553,19 +553,30 @@ where
         let mut applied_visible_bytes = false;
         let mut enter_gnative = false;
 
-        let decode_result = self.gnative_enter_decoder.decode(bytes);
-        enter_gnative |= decode_result.enter_gnative;
+        let passthrough = self.gnative_enter_decoder.can_passthrough(bytes)
+            && self.compatibility_decoder.can_passthrough(bytes)
+            && self.notification_decoder.can_passthrough(bytes)
+            && self
+                .terminal_store
+                .try_apply_passthrough_bytes(self.target_id, seq, bytes)
+                .is_some();
+        if passthrough {
+            applied_visible_bytes = true;
+        } else {
+            let decode_result = self.gnative_enter_decoder.decode(bytes);
+            enter_gnative |= decode_result.enter_gnative;
 
-        for event in self
-            .compatibility_decoder
-            .feed(&decode_result.visible_bytes)
-        {
-            match event {
-                CompatibilityProtocolEvent::Bytes(bytes) => {
-                    self.apply_compatible_bytes(seq, &bytes, &mut applied_visible_bytes);
-                }
-                CompatibilityProtocolEvent::PtyWrite(bytes) => {
-                    self.forward_pty_writes(vec![bytes]);
+            for event in self
+                .compatibility_decoder
+                .feed(&decode_result.visible_bytes)
+            {
+                match event {
+                    CompatibilityProtocolEvent::Bytes(bytes) => {
+                        self.apply_compatible_bytes(seq, &bytes, &mut applied_visible_bytes);
+                    }
+                    CompatibilityProtocolEvent::PtyWrite(bytes) => {
+                        self.forward_pty_writes(vec![bytes]);
+                    }
                 }
             }
         }

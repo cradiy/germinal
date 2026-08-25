@@ -369,6 +369,46 @@ impl AlacrittyTerminalStore {
         }
     }
 
+    pub(crate) fn try_apply_passthrough_bytes(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        bytes: &[u8],
+    ) -> Option<AlacrittyTermApplyStats> {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(
+                self.size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
+        });
+        if !bytes.is_ascii()
+            || !state.graphics_decoder.can_passthrough(bytes)
+            || state.graphics.has_any_placements()
+        {
+            return None;
+        }
+
+        let previous_selection = state.term.selection.clone();
+        // With no graphics placements and no escape byte, the graphics lifecycle parser cannot
+        // produce an event. Avoid feeding the same high-throughput text through a second VTE
+        // state machine; the regular path resumes as soon as graphics or an escape appears.
+        state.processor.advance(&mut state.term, bytes);
+        state.apply_pending_title_changes();
+        state.mark_selection_damage_if_changed(previous_selection);
+        state.latest_seq = seq;
+        state.total_bytes += bytes.len() as u64;
+        state.chunk_count += 1;
+
+        Some(AlacrittyTermApplyStats {
+            latest_seq: state.latest_seq,
+            total_bytes: state.total_bytes,
+            chunk_count: state.chunk_count,
+        })
+    }
+
     pub fn resize(
         &self,
         render_target_id: RenderTargetId,
@@ -2621,12 +2661,35 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(1), transfer.as_bytes());
         assert_eq!(first_image_y(&store, target_id), 2);
+        assert!(
+            store
+                .try_apply_passthrough_bytes(target_id, Seq::new(2), b"\n")
+                .is_none(),
+            "text must keep using lifecycle tracking while an image is placed"
+        );
         store.apply_bytes(target_id, Seq::new(2), b"\n");
         assert_eq!(first_image_y(&store, target_id), 1);
         store.apply_bytes(target_id, Seq::new(3), b"\x1b[1S");
         assert_eq!(first_image_y(&store, target_id), 0);
         store.apply_bytes(target_id, Seq::new(4), b"\x1b[1S");
         assert_eq!(image_count(&store, target_id), 0);
+    }
+
+    #[test]
+    fn plain_text_passthrough_updates_terminal_without_graphics() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(106);
+
+        let stats = store
+            .try_apply_passthrough_bytes(target_id, Seq::new(1), b"plain text\r\n")
+            .expect("plain text should use the passthrough path");
+
+        assert_eq!(stats.latest_seq, Seq::new(1));
+        assert_eq!(stats.total_bytes, 12);
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.rows[0].runs[0].text, "plain");
+        assert_eq!(snapshot.rows[0].runs[1].x, 6);
+        assert_eq!(snapshot.rows[0].runs[1].text, "text");
     }
 
     #[test]

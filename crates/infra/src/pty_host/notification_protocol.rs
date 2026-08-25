@@ -87,11 +87,14 @@ impl Default for TerminalNotificationProtocolDecoder {
 }
 
 impl TerminalNotificationProtocolDecoder {
-    pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<NotificationProtocolEvent> {
-        if matches!(self.state, DecoderState::Ground)
+    pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
+        matches!(self.state, DecoderState::Ground)
             && self.utf8_continuations == 0
             && is_plain_ascii(input)
-        {
+    }
+
+    pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<NotificationProtocolEvent> {
+        if self.can_passthrough(input) {
             return vec![NotificationProtocolEvent::Bytes(input.to_vec())];
         }
 

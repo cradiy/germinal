@@ -114,9 +114,12 @@ impl Default for KittyGraphicsStreamDecoder {
 }
 
 impl KittyGraphicsStreamDecoder {
+    pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
+        matches!(self.state, DecoderState::Ground) && !input.is_empty() && !input.contains(&0x1b)
+    }
+
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<KittyStreamEvent> {
-        if matches!(self.state, DecoderState::Ground) && !input.is_empty() && !input.contains(&0x1b)
-        {
+        if self.can_passthrough(input) {
             return vec![KittyStreamEvent::Bytes(input.to_vec())];
         }
 
