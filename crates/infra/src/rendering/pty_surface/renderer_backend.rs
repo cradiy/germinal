@@ -816,31 +816,20 @@ fn append_cursor_quads(
             ));
         }
         RenderSurfaceCursorShape::HollowBlock => {
+            let outline_stroke = 2.min(w).min(h);
+            quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, outline_stroke, style));
             quads.push(WgpuQuadDrawItem::solid_rect(
                 x,
-                y,
+                y + h.saturating_sub(outline_stroke),
                 w,
-                horizontal_stroke,
+                outline_stroke,
                 style,
             ));
+            quads.push(WgpuQuadDrawItem::solid_rect(x, y, outline_stroke, h, style));
             quads.push(WgpuQuadDrawItem::solid_rect(
-                x,
-                y + h.saturating_sub(horizontal_stroke),
-                w,
-                horizontal_stroke,
-                style,
-            ));
-            quads.push(WgpuQuadDrawItem::solid_rect(
-                x,
+                x + w.saturating_sub(outline_stroke),
                 y,
-                vertical_stroke,
-                h,
-                style,
-            ));
-            quads.push(WgpuQuadDrawItem::solid_rect(
-                x + w.saturating_sub(vertical_stroke),
-                y,
-                vertical_stroke,
+                outline_stroke,
                 h,
                 style,
             ));
@@ -2053,6 +2042,12 @@ mod tests {
         assert_eq!(cursors.len(), 4);
         assert_eq!((cursors[0].x_px, cursors[0].y_px), (16, 48));
         assert_eq!((cursors[0].width_px, cursors[0].height_px), (8, 2));
+        assert_eq!((cursors[1].x_px, cursors[1].y_px), (16, 62));
+        assert_eq!((cursors[1].width_px, cursors[1].height_px), (8, 2));
+        assert_eq!((cursors[2].x_px, cursors[2].y_px), (16, 48));
+        assert_eq!((cursors[2].width_px, cursors[2].height_px), (2, 16));
+        assert_eq!((cursors[3].x_px, cursors[3].y_px), (22, 48));
+        assert_eq!((cursors[3].width_px, cursors[3].height_px), (2, 16));
     }
 
     #[test]
