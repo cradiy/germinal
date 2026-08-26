@@ -327,6 +327,9 @@ impl AlacrittyTerminalStore {
                     state.advance_terminal_bytes(&visible);
                 }
                 KittyStreamEvent::Command(command) => {
+                    let resume_synchronized_update =
+                        state.graphics.command_uses_terminal_cursor(&command)
+                            && state.flush_synchronized_prefix_for_graphics();
                     let point = state.term.grid().cursor.point;
                     let cursor = (
                         u32::try_from(point.column.0).unwrap_or(0),
@@ -351,6 +354,9 @@ impl AlacrittyTerminalStore {
                             let bytes = format!("\x1b[{}B", cursor_move.rows);
                             state.processor.advance(&mut state.term, bytes.as_bytes());
                         }
+                    }
+                    if resume_synchronized_update {
+                        state.resume_synchronized_update_after_graphics();
                     }
                 }
             }
@@ -1337,12 +1343,6 @@ struct TerminalCursorObservation {
     input_needs_wrap: bool,
 }
 
-impl TerminalCursorObservation {
-    const fn point(self) -> (u32, u32) {
-        (self.column, self.line)
-    }
-}
-
 fn terminal_cursor_observation<T: EventListener>(term: &Term<T>) -> TerminalCursorObservation {
     let cursor = &term.grid().cursor;
     TerminalCursorObservation {
@@ -1473,6 +1473,32 @@ impl AlacrittyTermState {
         }
     }
 
+    fn flush_synchronized_prefix_for_graphics(&mut self) -> bool {
+        if !self.synchronized_update_pending() {
+            return false;
+        }
+
+        let before = terminal_cursor_observation(&self.term);
+        self.graphics_lifecycle_processor
+            .stop_sync(&mut self.graphics_lifecycle_observer);
+        self.processor.stop_sync(&mut self.term);
+        let after = terminal_cursor_observation(&self.term);
+        for event in self.graphics_lifecycle_observer.take_events() {
+            self.apply_graphics_lifecycle_event(event, before, after);
+        }
+        true
+    }
+
+    fn resume_synchronized_update_after_graphics(&mut self) {
+        const BEGIN_SYNCHRONIZED_UPDATE: &[u8] = b"\x1b[?2026h";
+        self.graphics_lifecycle_processor.advance(
+            &mut self.graphics_lifecycle_observer,
+            BEGIN_SYNCHRONIZED_UPDATE,
+        );
+        self.processor
+            .advance(&mut self.term, BEGIN_SYNCHRONIZED_UPDATE);
+    }
+
     fn apply_graphics_lifecycle_event(
         &mut self,
         event: KittyTerminalLifecycleEvent,
@@ -1483,13 +1509,9 @@ impl AlacrittyTermState {
             KittyTerminalLifecycleEvent::ClearScreen(ClearMode::All) => {
                 self.graphics.clear_screen_all();
             }
-            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Above) => {
-                self.graphics.clear_screen_above(before.point());
-            }
-            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Below) => {
-                self.graphics.clear_screen_below(before.point());
-            }
-            KittyTerminalLifecycleEvent::ClearScreen(ClearMode::Saved) => {}
+            KittyTerminalLifecycleEvent::ClearScreen(
+                ClearMode::Above | ClearMode::Below | ClearMode::Saved,
+            ) => {}
             KittyTerminalLifecycleEvent::Reset => self.graphics.reset_terminal(),
             KittyTerminalLifecycleEvent::EnterAlternateScreen => {
                 self.graphics.enter_alternate_screen();
@@ -2425,6 +2447,47 @@ mod tests {
     }
 
     #[test]
+    fn kitty_placements_use_buffered_cursor_inside_synchronized_updates() {
+        let store =
+            AlacrittyTerminalStore::with_size(AlacrittyTermSize::with_pixels(80, 44, 800, 880));
+        let target_id = RenderTargetId::new(107);
+        let first_payload = STANDARD.encode(vec![255; 4 * 4 * 4]);
+        let second_payload = STANDARD.encode(vec![127; 4 * 4 * 4]);
+        let first = format!(
+            "\x1b[?2026h\
+             \x1b_Ga=t,q=2,f=32,s=4,v=4,i=14;{first_payload}\x1b\\\
+             \x1b[2;53H\x1b_Ga=p,q=2,i=14,p=15,X=6,C=1\x1b\\\
+             \x1b[?2026l"
+        );
+        store.apply_bytes(target_id, Seq::new(1), first.as_bytes());
+
+        let second = format!(
+            "\x1b[?2026h\x1b[s\x1b[1;53H\
+             \x1b_Ga=p,q=2,i=14,p=15,x=0,y=2,w=4,h=2,X=6,C=1\x1b\\\
+             \x1b_Ga=t,q=2,f=32,s=4,v=4,i=15;{second_payload}\x1b\\\
+             \x1b[11;53H\x1b_Ga=p,q=2,i=15,p=16,X=6,C=1\x1b\\\
+             \x1b[?2026l"
+        );
+        store.apply_bytes(target_id, Seq::new(2), second.as_bytes());
+
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        let first = snapshot
+            .image_surfaces
+            .iter()
+            .find(|image| image.image_id == 14)
+            .unwrap();
+        let second = snapshot
+            .image_surfaces
+            .iter()
+            .find(|image| image.image_id == 15)
+            .unwrap();
+        assert_eq!((first.x_cell, first.y_cell), (52, 0));
+        assert_eq!((first.source_y_px, first.source_height_px), (2, 2));
+        assert_eq!((second.x_cell, second.y_cell), (52, 10));
+        assert!(!store.synchronized_update_pending(target_id));
+    }
+
+    #[test]
     fn exports_osc_title_changes_and_reset() {
         let store = AlacrittyTerminalStore::new();
         let target_id = RenderTargetId::new(81);
@@ -2634,6 +2697,25 @@ mod tests {
 
         store.apply_bytes(target_id, Seq::new(6), primary.as_bytes());
         store.apply_bytes(target_id, Seq::new(7), b"\x1bc");
+        assert_eq!(image_count(&store, target_id), 0);
+    }
+
+    #[test]
+    fn kitty_images_ignore_partial_text_erases() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 4));
+        let target_id = RenderTargetId::new(106);
+        let payload = STANDARD.encode([255, 0, 0, 255]);
+        let image = format!("\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1;{payload}\x1b\\");
+
+        store.apply_bytes(target_id, Seq::new(1), image.as_bytes());
+        assert_eq!(image_count(&store, target_id), 1);
+
+        for (seq, erase) in [(2, b"\x1b[J".as_slice()), (3, b"\x1b[1J"), (4, b"\x1b[3J")] {
+            store.apply_bytes(target_id, Seq::new(seq), erase);
+            assert_eq!(image_count(&store, target_id), 1);
+        }
+
+        store.apply_bytes(target_id, Seq::new(5), b"\x1b[2J");
         assert_eq!(image_count(&store, target_id), 0);
     }
 

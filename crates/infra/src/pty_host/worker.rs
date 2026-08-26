@@ -1807,11 +1807,46 @@ mod tests {
                     format!("\x1bP>|Germinal-kitty {}\x1b\\", env!("CARGO_PKG_VERSION"))
                         .into_bytes();
                 expected.extend_from_slice(
-                    b"\x1bP1+r436f=323536\x1b\\\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?6c",
+                    b"\x1bP1+r436f=323536\x1b\\\x1b[?997;1n\x1b[4;1440;2400t\x1b[6;24;12t\x1b[1;1R\x1b]10;rgb:e5e5/e5e5/e5e5\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?7u\x1b[?62;c",
                 );
                 assert_eq!(bytes, expected);
             }
             other => panic!("unexpected pty input: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_worker_forwards_fragmented_kitty_graphics_query_response() {
+        let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (pty_tx, pty_rx) = pty_input_channel();
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(12),
+            initial_size: TerminalPtySize::new(60, 200, 2_400, 1_440),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+        runtime.collect_input(TerminalWorkerInput::SetPtyInput {
+            sender: pty_tx,
+            input_modes: TerminalInputModeState::default(),
+        });
+
+        runtime.apply_byte_chunks(&[
+            b"\x1b_G".to_vec(),
+            b"a=q,f=24,s=1,v=1,S=3,i=1".to_vec(),
+            b";".to_vec(),
+            b"MTIz".to_vec(),
+            b"\x1b\\".to_vec(),
+        ]);
+
+        match pollster::block_on(pty_rx.recv()) {
+            Some(PtyInput::Bytes(bytes)) => assert_eq!(bytes, b"\x1b_Gi=1;OK\x1b\\"),
+            other => panic!("unexpected PTY input: {other:?}"),
         }
     }
 

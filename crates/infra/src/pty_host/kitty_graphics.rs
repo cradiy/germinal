@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use flate2::read::ZlibDecoder;
 use germinal_ports::rendering::surface_snapshot::RenderSurfaceImageSnapshot;
 
-const MAX_APC_BYTES: usize = 16 * 1024;
+const MAX_APC_BYTES: usize = 256 * 1024;
 const MAX_ENCODED_IMAGE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 8_192;
@@ -83,8 +83,11 @@ impl KittyCommand {
     fn has_only_chunk_continuation_keys(&self, action: char) -> bool {
         self.control
             .keys()
-            .all(|key| matches!(key, b'm' | b'q') || (action == 'f' && *key == b'a'))
-            && (action != 'f' || self.control.get(&b'a').is_some_and(|value| value == "f"))
+            .all(|key| matches!(key, b'm' | b'q' | b'a'))
+            && match self.control.get(&b'a') {
+                Some(value) => value.as_bytes() == [action as u8],
+                None => action != 'f',
+            }
     }
 }
 
@@ -442,49 +445,12 @@ impl KittyGraphicsState {
         self.remove_placement_trees(roots, false);
     }
 
-    pub(crate) fn clear_screen_above(&mut self, cursor: (u32, u32)) {
-        let cursor = (i64::from(cursor.0), i64::from(cursor.1));
-        self.clear_physical_placements(|placement, origin| {
-            let right = origin
-                .0
-                .saturating_add(i64::from(placement.occupied_columns));
-            let bottom = origin.1.saturating_add(i64::from(placement.occupied_rows));
-            origin.1 < cursor.1
-                || (origin.1 <= cursor.1 && bottom > cursor.1 && origin.0 <= cursor.0 && right > 0)
-        });
-    }
-
-    pub(crate) fn clear_screen_below(&mut self, cursor: (u32, u32)) {
-        let cursor = (i64::from(cursor.0), i64::from(cursor.1));
-        self.clear_physical_placements(|placement, origin| {
-            let right = origin
-                .0
-                .saturating_add(i64::from(placement.occupied_columns));
-            let bottom = origin.1.saturating_add(i64::from(placement.occupied_rows));
-            bottom > cursor.1.saturating_add(1)
-                || (origin.1 <= cursor.1 && bottom > cursor.1 && right > cursor.0)
-        });
-    }
-
     pub(crate) fn scroll_up(&mut self, start_row: u32, end_row: u32, lines: u32) {
         self.scroll_screen_region(start_row, end_row, -i64::from(lines));
     }
 
     pub(crate) fn scroll_down(&mut self, start_row: u32, end_row: u32, lines: u32) {
         self.scroll_screen_region(start_row, end_row, i64::from(lines));
-    }
-
-    fn clear_physical_placements(
-        &mut self,
-        predicate: impl Fn(&KittyPlacement, (i64, i64)) -> bool,
-    ) {
-        let roots = self
-            .placements
-            .values()
-            .filter(|placement| predicate(placement, self.placement_origin(placement)))
-            .map(|placement| placement.key)
-            .collect();
-        self.remove_placement_trees(roots, false);
     }
 
     fn scroll_screen_region(&mut self, start_row: u32, end_row: u32, delta: i64) {
@@ -530,6 +496,19 @@ impl KittyGraphicsState {
         }
         self.remove_placement_trees(fully_clipped.into_iter().collect(), false);
         self.resolved_positions.clear();
+    }
+
+    pub(crate) fn command_uses_terminal_cursor(&self, command: &KittyCommand) -> bool {
+        let effective_command = if let Some(pending) = &self.pending {
+            if command.u32(b'm', 0).unwrap_or(0) == 1 {
+                return false;
+            }
+            &pending.command
+        } else {
+            command
+        };
+
+        matches!(effective_command.char(b'a', 't'), 'T' | 'p' | 'd')
     }
 
     #[cfg(test)]
@@ -2142,6 +2121,7 @@ fn placement_intersects_row(placement: &KittyPlacement, origin_y: i64, y_cell: u
 fn transmission_bytes(command: &KittyCommand) -> Result<Vec<u8>, KittyGraphicsError> {
     let decoded = STANDARD
         .decode(&command.payload)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&command.payload))
         .map_err(|_| KittyGraphicsError::InvalidPayload)?;
 
     match command.char(b't', 'd') {
@@ -2252,9 +2232,13 @@ fn read_file_range(
         Some(_) => u64::from(command.u32(b'S', 0)?),
         None => available,
     };
-    if requested > available {
-        return Err(KittyGraphicsError::InvalidPayload);
-    }
+    let requested = if requested > available {
+        kitten_query_raw_data_size(command)?
+            .filter(|expected| *expected <= available)
+            .ok_or(KittyGraphicsError::InvalidPayload)?
+    } else {
+        requested
+    };
     if requested > MAX_DECODED_IMAGE_BYTES as u64 {
         return Err(KittyGraphicsError::ImageTooLarge);
     }
@@ -2269,6 +2253,23 @@ fn read_file_range(
         return Err(KittyGraphicsError::InvalidPayload);
     }
     Ok(bytes)
+}
+
+fn kitten_query_raw_data_size(command: &KittyCommand) -> Result<Option<u64>, KittyGraphicsError> {
+    if command.char(b'a', 't') != 'q' || command.control.contains_key(&b'o') {
+        return Ok(None);
+    }
+
+    let channels = match command.u32(b'f', 32)? {
+        24 => 3,
+        32 => 4,
+        _ => return Ok(None),
+    };
+    let size = u64::from(command.u32(b's', 0)?)
+        .checked_mul(u64::from(command.u32(b'v', 0)?))
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or(KittyGraphicsError::ImageTooLarge)?;
+    Ok(Some(size))
 }
 
 fn append_encoded_payload(target: &mut Vec<u8>, payload: &[u8]) -> Result<(), KittyGraphicsError> {
@@ -2571,6 +2572,20 @@ mod tests {
         assert_eq!(
             decoder.feed(b"a\x1b_Xpayload\x1b\\b"),
             vec![KittyStreamEvent::Bytes(b"a\x1b_Xpayload\x1b\\b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn decoder_accepts_modern_kitten_128_kib_apc_payloads() {
+        let payload = vec![b'A'; 128 * 1024];
+        let mut bytes = b"\x1b_Ga=T,q=2,m=1;".to_vec();
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"\x1b\\");
+        let mut decoder = KittyGraphicsStreamDecoder::default();
+
+        assert_eq!(
+            decoder.feed(&bytes),
+            vec![KittyStreamEvent::Command(command("a=T,q=2,m=1", &payload))]
         );
     }
 
@@ -2928,12 +2943,40 @@ mod tests {
     }
 
     #[test]
+    fn joins_chunked_base64_when_transfer_action_is_repeated() {
+        let mut graphics = KittyGraphicsState::default();
+        let payload = STANDARD.encode([1, 2, 3, 255]);
+        let split = 4;
+
+        let first = graphics.handle(
+            command("a=T,f=32,s=1,v=1,i=9,m=1", &payload.as_bytes()[..split]),
+            (0, 0),
+        );
+        assert!(first.response.is_none());
+
+        let second = graphics.handle(command("a=T,m=0", &payload.as_bytes()[split..]), (2, 3));
+        assert_eq!(second.response, Some(b"\x1b_Gi=9;OK\x1b\\".to_vec()));
+        assert_eq!(graphics.snapshots(&[]).len(), 1);
+    }
+
+    #[test]
     fn query_validates_without_storing() {
         let mut graphics = KittyGraphicsState::default();
         let payload = STANDARD.encode([0, 0, 0]);
         let result = graphics.handle(command("a=q,f=24,s=1,v=1,i=31", payload.as_bytes()), (0, 0));
 
         assert_eq!(result.response, Some(b"\x1b_Gi=31;OK\x1b\\".to_vec()));
+        assert!(graphics.snapshots(&[]).is_empty());
+    }
+
+    #[test]
+    fn query_accepts_unpadded_base64_payload() {
+        let mut graphics = KittyGraphicsState::default();
+        let payload = base64::engine::general_purpose::STANDARD_NO_PAD.encode([0, 0, 0, 0]);
+
+        let result = graphics.handle(command("a=q,f=32,s=1,v=1,i=32", payload.as_bytes()), (0, 0));
+
+        assert_eq!(result.response, Some(b"\x1b_Gi=32;OK\x1b\\".to_vec()));
         assert!(graphics.snapshots(&[]).is_empty());
     }
 
@@ -3084,6 +3127,22 @@ mod tests {
 
         assert_eq!(result.response, Some(b"\x1b_Gi=5;OK\x1b\\".to_vec()));
         assert_eq!(&*graphics.snapshots(&[])[0].rgba, &[4, 3, 2, 1]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn current_kitten_temporary_file_probe_uses_the_path_length_as_data_size() {
+        let path = temp_path("tty-graphics-protocol-query");
+        fs::write(&path, [1, 2, 3]).unwrap();
+        let path_bytes = path.to_string_lossy();
+        let encoded_path = STANDARD.encode(path_bytes.as_bytes());
+        let control = format!("a=q,t=t,f=24,s=1,v=1,S={},i=2", path_bytes.len());
+        let mut graphics = KittyGraphicsState::default();
+
+        let result = graphics.handle(command(&control, encoded_path.as_bytes()), (0, 0));
+
+        assert_eq!(result.response, Some(b"\x1b_Gi=2;OK\x1b\\".to_vec()));
+        assert!(graphics.snapshots(&[]).is_empty());
         assert!(!path.exists());
     }
 

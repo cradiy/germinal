@@ -9,6 +9,7 @@ const MAX_DCS_BYTES: usize = 4 * 1024;
 const GERMINAL_NAME: &[u8] = b"Germinal";
 const XTVERSION_NAME: &[u8] = b"Germinal-kitty";
 const GERMINAL_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?62;c";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompatibilityProtocolEvent {
@@ -252,6 +253,7 @@ impl TerminalCompatibilityProtocolDecoder {
         }
 
         let response = match sequence {
+            b"c" | b"0c" => Some(PRIMARY_DEVICE_ATTRIBUTES_RESPONSE.to_vec()),
             b">q" | b">0q" => Some(terminal_version_response()),
             b"?996n" => Some(color_scheme_response(self.dark_color_scheme)),
             b"14t" => Some(text_area_size_response(self.size)),
@@ -678,6 +680,25 @@ mod tests {
                 CompatibilityProtocolEvent::PtyWrite(version_response.clone()),
                 CompatibilityProtocolEvent::Bytes(b"after".to_vec()),
                 CompatibilityProtocolEvent::PtyWrite(version_response),
+            ]
+        );
+    }
+
+    #[test]
+    fn answers_primary_device_attributes_like_a_kitty_compatible_terminal() {
+        let mut decoder = TerminalCompatibilityProtocolDecoder::new(
+            TerminalPtySize::new(24, 80, 960, 576),
+            TerminalColorTheme::default(),
+            "alacritty",
+        );
+
+        assert_eq!(
+            decoder.feed(b"before\x1b[cafter\x9b0c"),
+            vec![
+                CompatibilityProtocolEvent::Bytes(b"before".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(PRIMARY_DEVICE_ATTRIBUTES_RESPONSE.to_vec()),
+                CompatibilityProtocolEvent::Bytes(b"after".to_vec()),
+                CompatibilityProtocolEvent::PtyWrite(PRIMARY_DEVICE_ATTRIBUTES_RESPONSE.to_vec()),
             ]
         );
     }
