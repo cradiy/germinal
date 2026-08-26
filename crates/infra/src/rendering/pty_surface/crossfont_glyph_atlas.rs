@@ -650,7 +650,13 @@ impl WgpuCrossfontGlyphBackend {
 
         let font_key = self.font_key_for_glyph(glyph_key);
 
-        let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
+        let glyph = rasterize_terminal_glyph_to_cell(
+            &mut self.rasterizer,
+            font_key,
+            self.size,
+            glyph_key,
+            self.average_advance_px,
+        );
         self.glyph_cache.insert(glyph_key, glyph.clone());
         glyph
     }
@@ -846,6 +852,34 @@ fn rasterize_terminal_glyph(
         is_color,
         direct_draw_offset: None,
     }
+}
+
+fn rasterize_terminal_glyph_to_cell(
+    rasterizer: &mut Rasterizer,
+    font_key: FontKey,
+    size: Size,
+    key: WgpuTerminalGlyphKey,
+    base_cell_width_px: u32,
+) -> RasterizedTerminalGlyph {
+    let glyph = rasterize_terminal_glyph(rasterizer, font_key, size, key);
+    let maximum_width_px = base_cell_width_px.saturating_mul(glyph.cell_width.max(1));
+    let overflow_px = glyph.width_px.saturating_sub(maximum_width_px);
+
+    // Match Kitty's scalable-font behavior: if a glyph bitmap is substantially
+    // wider than its assigned terminal cells, rasterize it again at a
+    // proportionally smaller size. Preserve small italic bearings and the
+    // common two-pixel antialiasing overhang.
+    if maximum_width_px == 0
+        || overflow_px <= 1
+        || (glyph.cell_width == 1 && overflow_px == 2)
+        || (key.italic() && overflow_px < base_cell_width_px / 2)
+    {
+        return glyph;
+    }
+
+    let scale = maximum_width_px as f32 / glyph.width_px as f32;
+    let scaled_size_px = (size.as_px() * scale).max(1.0);
+    rasterize_terminal_glyph(rasterizer, font_key, Size::from_px(scaled_size_px), key)
 }
 
 struct CosmicTextClusterRasterizer {
@@ -1816,6 +1850,28 @@ mod tests {
         WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_strikeout_metrics,
         crossfont_underline_metrics, terminal_glyph_draw_offset,
     };
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    #[test]
+    fn oversized_single_cell_glyph_is_rescaled_to_cell_width() {
+        let mut backend = WgpuCrossfontGlyphBackend::new(
+            WgpuCrossfontFontFaces::new("JetBrainsMono Nerd Font".to_owned()),
+            30.0,
+        )
+        .expect("the platform must provide a terminal font");
+        let cell_width = backend.base_cell_width_px() as i32;
+        for glyph_key in [
+            WgpuTerminalGlyphKey::styled('♥', false, false),
+            WgpuTerminalGlyphKey::styled('♥', true, false),
+            WgpuTerminalGlyphKey::styled('♥', false, true),
+            WgpuTerminalGlyphKey::styled('♥', true, true),
+        ] {
+            let glyph = backend.rasterize_terminal_glyph(glyph_key);
+            let maximum_advance = cell_width.saturating_mul(5).saturating_add(3) / 4;
+            assert!(glyph.advance_px <= maximum_advance);
+            assert!(glyph.width_px <= backend.base_cell_width_px().saturating_add(2));
+        }
+    }
 
     #[test]
     fn crossfont_backend_interprets_font_size_as_physical_pixels() {
