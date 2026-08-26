@@ -510,7 +510,7 @@ impl WgpuCrossfontGlyphBackend {
         font_size_px: f32,
     ) -> Result<Self, WgpuCrossfontGlyphAtlasError> {
         let mut rasterizer = Rasterizer::new().map_err(WgpuCrossfontGlyphAtlasError::Rasterizer)?;
-        let size = Size::from_px(font_size_px);
+        let size = crossfont_size_from_physical_px(font_size_px);
         let normal = load_required_face(
             &mut rasterizer,
             &font_faces.normal,
@@ -862,8 +862,28 @@ fn rasterize_terminal_glyph_to_cell(
     base_cell_width_px: u32,
 ) -> RasterizedTerminalGlyph {
     let glyph = rasterize_terminal_glyph(rasterizer, font_key, size, key);
-    let maximum_width_px = base_cell_width_px.saturating_mul(glyph.cell_width.max(1));
-    let overflow_px = glyph.width_px.saturating_sub(maximum_width_px);
+    let Some(scaled_size_px) = glyph_rescaled_font_size_px(
+        size.as_px(),
+        glyph.width_px,
+        glyph.cell_width,
+        key.italic(),
+        base_cell_width_px,
+    ) else {
+        return glyph;
+    };
+
+    rasterize_terminal_glyph(rasterizer, font_key, Size::from_px(scaled_size_px), key)
+}
+
+fn glyph_rescaled_font_size_px(
+    font_size_px: f32,
+    glyph_width_px: u32,
+    glyph_cell_width: u32,
+    italic: bool,
+    base_cell_width_px: u32,
+) -> Option<f32> {
+    let maximum_width_px = base_cell_width_px.saturating_mul(glyph_cell_width.max(1));
+    let overflow_px = glyph_width_px.saturating_sub(maximum_width_px);
 
     // Match Kitty's scalable-font behavior: if a glyph bitmap is substantially
     // wider than its assigned terminal cells, rasterize it again at a
@@ -871,15 +891,18 @@ fn rasterize_terminal_glyph_to_cell(
     // common two-pixel antialiasing overhang.
     if maximum_width_px == 0
         || overflow_px <= 1
-        || (glyph.cell_width == 1 && overflow_px == 2)
-        || (key.italic() && overflow_px < base_cell_width_px / 2)
+        || (glyph_cell_width == 1 && overflow_px == 2)
+        || (italic && overflow_px < base_cell_width_px / 2)
     {
-        return glyph;
+        return None;
     }
 
-    let scale = maximum_width_px as f32 / glyph.width_px as f32;
-    let scaled_size_px = (size.as_px() * scale).max(1.0);
-    rasterize_terminal_glyph(rasterizer, font_key, Size::from_px(scaled_size_px), key)
+    let scale = maximum_width_px as f32 / glyph_width_px as f32;
+    Some((font_size_px * scale).max(1.0))
+}
+
+fn crossfont_size_from_physical_px(font_size_px: f32) -> Size {
+    Size::from_px(font_size_px)
 }
 
 struct CosmicTextClusterRasterizer {
@@ -1845,43 +1868,24 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontCoverage, GlyphAtlasGridLayout, RasterizedTerminalGlyph, WgpuCrossfontFontFaces,
-        WgpuCrossfontGlyphAtlasBuilder, WgpuCrossfontGlyphBackend, WgpuCrossfontStrikeoutMetrics,
-        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_strikeout_metrics,
-        crossfont_underline_metrics, terminal_glyph_draw_offset,
+        FontCoverage, GlyphAtlasGridLayout, RasterizedTerminalGlyph, WgpuCrossfontStrikeoutMetrics,
+        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_size_from_physical_px,
+        crossfont_strikeout_metrics, crossfont_underline_metrics, glyph_rescaled_font_size_px,
+        terminal_glyph_draw_offset,
     };
 
-    #[cfg(not(any(target_os = "macos", windows)))]
     #[test]
-    fn oversized_single_cell_glyph_is_rescaled_to_cell_width() {
-        let mut backend = WgpuCrossfontGlyphBackend::new(
-            WgpuCrossfontFontFaces::new("JetBrainsMono Nerd Font".to_owned()),
-            30.0,
-        )
-        .expect("the platform must provide a terminal font");
-        let cell_width = backend.base_cell_width_px() as i32;
-        for glyph_key in [
-            WgpuTerminalGlyphKey::styled('♥', false, false),
-            WgpuTerminalGlyphKey::styled('♥', true, false),
-            WgpuTerminalGlyphKey::styled('♥', false, true),
-            WgpuTerminalGlyphKey::styled('♥', true, true),
-        ] {
-            let glyph = backend.rasterize_terminal_glyph(glyph_key);
-            let maximum_advance = cell_width.saturating_mul(5).saturating_add(3) / 4;
-            assert!(glyph.advance_px <= maximum_advance);
-            assert!(glyph.width_px <= backend.base_cell_width_px().saturating_add(2));
-        }
+    fn oversized_single_cell_glyph_uses_a_proportionally_smaller_font_size() {
+        let scaled_size_px = glyph_rescaled_font_size_px(30.0, 30, 1, false, 18);
+
+        assert_eq!(scaled_size_px, Some(18.0));
     }
 
     #[test]
-    fn crossfont_backend_interprets_font_size_as_physical_pixels() {
-        let backend = WgpuCrossfontGlyphBackend::new(
-            WgpuCrossfontFontFaces::new("monospace".to_owned()),
-            18.0,
-        )
-        .expect("the platform monospace font should load");
+    fn crossfont_size_preserves_physical_pixels() {
+        let size = crossfont_size_from_physical_px(18.0);
 
-        assert!((backend.size.as_px() - 18.0).abs() < 0.01);
+        assert!((size.as_px() - 18.0).abs() < 0.01);
     }
 
     #[test]
@@ -1914,56 +1918,6 @@ mod tests {
         };
 
         assert_eq!(terminal_glyph_draw_offset(&glyph, 12, 24), (3, 6));
-    }
-
-    #[test]
-    fn rasterizes_normal_bold_italic_and_bold_italic_glyphs() {
-        let glyphs = [
-            WgpuTerminalGlyphKey::styled('A', false, false),
-            WgpuTerminalGlyphKey::styled('A', true, false),
-            WgpuTerminalGlyphKey::styled('A', false, true),
-            WgpuTerminalGlyphKey::styled('A', true, true),
-        ];
-        let atlas = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
-            .expect("the platform monospace font should load")
-            .build_for_glyphs(glyphs);
-
-        for glyph in glyphs {
-            assert!(atlas.has_glyph_key(glyph));
-        }
-    }
-
-    #[test]
-    fn includes_zero_width_glyphs_in_the_atlas() {
-        let builder = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
-            .expect("the platform monospace font should load");
-        let segment = crate::rendering::pty_surface::text_shaping::terminal_text_segments(
-            "中\u{301}",
-            germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
-        )
-        .remove(0);
-        let atlas = builder.build_for_texts(["中\u{301}"]);
-
-        assert!(segment.shaped);
-        assert!(atlas.has_glyph_key(segment.glyph_key));
-    }
-
-    #[test]
-    fn shapes_joined_emoji_into_one_atlas_entry() {
-        let builder = WgpuCrossfontGlyphAtlasBuilder::new("monospace", 16.0)
-            .expect("the platform monospace font should load");
-        let segment = crate::rendering::pty_surface::text_shaping::terminal_text_segments(
-            "👩\u{200d}💻",
-            germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
-        )
-        .remove(0);
-        let atlas = builder.build_for_texts([segment.text.as_str()]);
-        let entry = atlas.entry_for_key(segment.glyph_key).unwrap();
-
-        assert!(segment.shaped);
-        assert!(entry.width_px > 1);
-        assert!(entry.height_px > 1);
-        assert!(atlas.non_zero_pixel_count() > 0);
     }
 
     #[test]

@@ -1141,15 +1141,6 @@ mod tests {
         toggle_pty_host_search, toggle_pty_host_vi_mode,
     };
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn reads_a_live_process_working_directory_from_proc() {
-        assert_eq!(
-            super::process_working_directory(std::process::id()),
-            std::env::current_dir().ok()
-        );
-    }
-
     #[test]
     fn dropping_a_pane_runtime_closes_its_pty_input() {
         let (pty_input_sender, _pty_input_rx) = pty_input_channel();

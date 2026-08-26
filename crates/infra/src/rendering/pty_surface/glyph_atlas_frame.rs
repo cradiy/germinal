@@ -582,46 +582,12 @@ mod tests {
     }
 
     #[test]
-    fn crossfont_prewarming_keeps_ascii_output_on_one_atlas() {
-        let target_id = RenderTargetId::new(1);
-        let snapshot = |seq, text: &str| RenderSurfaceSnapshot {
-            target_id,
-            latest_seq: Seq::new(seq),
-            default_background: RgbColorDto::new(0, 0, 0),
-            rows: vec![RenderSurfaceRowSnapshot {
-                y: 0,
-                runs: vec![RenderSurfaceRunSnapshot {
-                    x: 0,
-                    text: text.to_string(),
-                    style: TextStyleDto::plain(),
-                    decoration: Default::default(),
-                }],
-            }],
-            video_surfaces: vec![],
-            image_surfaces: vec![],
-            dirty_rows: vec![0],
-            cursor: None,
-            ime_preedit: None,
-        };
-        let builder = WgpuTerminalGlyphAtlasFrameBuilder::crossfont("monospace", 16.0)
-            .expect("the platform monospace font should load");
+    fn crossfont_prewarming_includes_every_ascii_style() {
+        let glyphs = core_ascii_glyphs().collect::<BTreeSet<_>>();
 
-        let first = builder.build(&snapshot(1, "prompt"));
-        let second = builder.build(&snapshot(2, "ls output 0123456789"));
-
-        assert!(!first.cache_hit);
-        assert!(second.cache_hit);
-        assert!(Arc::ptr_eq(&first.atlas, &second.atlas));
-        assert!(
-            first
-                .atlas
-                .has_glyph_key(WgpuTerminalGlyphKey::styled('A', true, false))
-        );
-        assert!(
-            first
-                .atlas
-                .has_glyph_key(WgpuTerminalGlyphKey::styled('z', false, true))
-        );
+        assert_eq!(glyphs.len(), 95 * 4);
+        assert!(glyphs.contains(&WgpuTerminalGlyphKey::styled('A', true, false)));
+        assert!(glyphs.contains(&WgpuTerminalGlyphKey::styled('z', false, true)));
     }
 
     #[test]

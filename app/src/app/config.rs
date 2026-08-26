@@ -1160,11 +1160,11 @@ mod tests {
     fn terminal_profile_uses_configured_font() {
         let config: GerminalConfig = toml::from_str(
             r#"
-            font.normal = { family = "JetBrains Mono", style = "Regular" }
-            font.bold = { family = "JetBrains Mono", style = "Bold" }
-            font.italic = { family = "JetBrains Mono", style = "Italic" }
-            font.bold_italic = { family = "JetBrains Mono", style = "Bold Italic" }
-            font.fallback = ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono"]
+            font.normal = { family = "Example Mono", style = "Regular" }
+            font.bold = { family = "Example Mono", style = "Bold" }
+            font.italic = { family = "Example Mono", style = "Italic" }
+            font.bold_italic = { family = "Example Mono", style = "Bold Italic" }
+            font.fallback = ["Example CJK", "Example Symbols"]
             font.size = 18
             font.ligatures = false
             "#,
@@ -1172,7 +1172,7 @@ mod tests {
         .unwrap();
         let profile = config.terminal_profile();
 
-        assert_eq!(profile.font_family().name(), "JetBrains Mono");
+        assert_eq!(profile.font_family().name(), "Example Mono");
         assert_eq!(profile.font_size().logical_px(), 18.0);
         let font = profile.font_config();
         assert!(!font.ligatures());
@@ -1188,7 +1188,7 @@ mod tests {
                 .iter()
                 .map(|family| family.name())
                 .collect::<Vec<_>>(),
-            ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono"]
+            ["Example CJK", "Example Symbols"]
         );
     }
 
@@ -1196,7 +1196,7 @@ mod tests {
     fn rejects_empty_font_family_style_and_fallback() {
         for contents in [
             r#"font.normal = { family = "" }"#,
-            r#"font.normal = { family = "monospace", style = "" }"#,
+            r#"font.normal = { family = "Example Mono", style = "" }"#,
             r#"font.fallback = [""]"#,
         ] {
             let config: GerminalConfig = toml::from_str(contents).unwrap();

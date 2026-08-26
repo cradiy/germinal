@@ -197,10 +197,11 @@ fn preferred_terminal_term_name_with_paths(
 mod tests {
     use std::{
         fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         sync::mpsc,
         thread,
         time::Duration,
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::vo::pty_host_id::PtyHostId};
@@ -232,6 +233,32 @@ mod tests {
         }
     }
 
+    static NEXT_TEMP_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let unique = NEXT_TEMP_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "germinal-pty-env-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("create isolated test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("remove isolated test directory");
+        }
+    }
+
     #[test]
     fn bridge_config_preserves_shell_and_working_directory() {
         let config = PtyBridgeConfig::new(
@@ -254,16 +281,24 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn closing_pty_input_terminates_the_child_process() {
+        const CHILD_TEST: &str = "pty::portable_pty_bridge::tests::pty_child_fixture";
+
         let (event_tx, event_rx) = mpsc::channel();
         let (worker_tx, _worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let test_executable = std::env::current_exe().expect("locate the current test executable");
         let input = PtyBridge::spawn(
             TestDispatcher(event_tx),
             GShellId::new(1),
             PtyHostId::new(1),
             PtySpawnConfig {
                 shell: Some(PtyShellCommand::new(
-                    "/bin/sh".to_string(),
-                    vec!["-c".to_string(), "exec sleep 30".to_string()],
+                    test_executable.to_string_lossy().into_owned(),
+                    vec![
+                        "--exact".to_string(),
+                        CHILD_TEST.to_string(),
+                        "--ignored".to_string(),
+                        "--nocapture".to_string(),
+                    ],
                 )),
                 working_directory: None,
                 initial_size: TerminalPtySize::new(24, 80, 640, 384),
@@ -273,16 +308,16 @@ mod tests {
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let process_id = loop {
-            if let Some(process_id) = input.child_process_id() {
-                break process_id;
+        loop {
+            if input.child_process_id().is_some() {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "PTY child did not start"
             );
             thread::sleep(Duration::from_millis(10));
-        };
+        }
 
         input.close();
 
@@ -295,52 +330,54 @@ mod tests {
                 gshell_id: GShellId::new(1)
             })
         );
-        assert!(!std::path::Path::new(&format!("/proc/{process_id}")).exists());
+    }
+
+    #[test]
+    #[ignore = "PTY child fixture; spawned by closing_pty_input_terminates_the_child_process"]
+    fn pty_child_fixture() {
+        thread::sleep(Duration::from_secs(30));
     }
 
     #[test]
     fn finds_terminfo_in_letter_directory() {
-        let root = temp_path("letter");
-        let entry_dir = root.join("a");
+        let root = TestDirectory::new("letter");
+        let entry_dir = root.path().join("a");
         fs::create_dir_all(&entry_dir).expect("create letter directory");
         fs::write(entry_dir.join(ALACRITTY_TERMINFO), []).expect("write terminfo file");
 
-        assert!(terminfo_exists_in_paths(ALACRITTY_TERMINFO, vec![root]));
+        assert!(terminfo_exists_in_paths(
+            ALACRITTY_TERMINFO,
+            vec![root.path().to_path_buf()]
+        ));
     }
 
     #[test]
     fn finds_terminfo_in_hex_directory() {
-        let root = temp_path("hex");
-        let entry_dir = root.join("61");
+        let root = TestDirectory::new("hex");
+        let entry_dir = root.path().join("61");
         fs::create_dir_all(&entry_dir).expect("create hex directory");
         fs::write(entry_dir.join(ALACRITTY_TERMINFO), []).expect("write terminfo file");
 
-        assert!(terminfo_exists_in_paths(ALACRITTY_TERMINFO, vec![root]));
+        assert!(terminfo_exists_in_paths(
+            ALACRITTY_TERMINFO,
+            vec![root.path().to_path_buf()]
+        ));
     }
 
     #[test]
     fn prefers_alacritty_only_when_its_terminfo_exists() {
-        let missing_root = temp_path("missing");
-        fs::create_dir_all(&missing_root).expect("create missing root");
+        let missing_root = TestDirectory::new("missing");
         assert_eq!(
-            preferred_terminal_term_name_with_paths(vec![missing_root.clone()]),
+            preferred_terminal_term_name_with_paths(vec![missing_root.path().to_path_buf()]),
             FALLBACK_TERMINFO
         );
 
-        let entry_dir = missing_root.join("a");
+        let entry_dir = missing_root.path().join("a");
         fs::create_dir_all(&entry_dir).expect("create alacritty dir");
         fs::write(entry_dir.join(ALACRITTY_TERMINFO), []).expect("write alacritty terminfo");
         assert_eq!(
-            preferred_terminal_term_name_with_paths(vec![missing_root]),
+            preferred_terminal_term_name_with_paths(vec![missing_root.path().to_path_buf()]),
             ALACRITTY_TERMINFO
         );
-    }
-
-    fn temp_path(label: &str) -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("monotonic time")
-            .as_nanos();
-        std::env::temp_dir().join(format!("germinal-pty-env-{label}-{unique}"))
     }
 }

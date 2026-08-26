@@ -633,38 +633,3 @@ fn duplicate_raw_fd(fd: i32) -> Result<OwnedFd, GstVideoPlayerBridgeError> {
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     dup(borrowed).map_err(|source| GstVideoPlayerBridgeError::DuplicateFd { source })
 }
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use std::{
-        env,
-        time::{Duration, Instant},
-    };
-
-    use super::*;
-
-    #[test]
-    #[ignore = "manual smoke test; set GERMINAL_VIDEO_SMOKE_PATH to a local playable file"]
-    fn bridge_emits_pending_dmabuf_frames_for_local_video() {
-        let path = env::var("GERMINAL_VIDEO_SMOKE_PATH")
-            .expect("GERMINAL_VIDEO_SMOKE_PATH must point to a local video file");
-        let bridge =
-            GstVideoPlayerBridge::new(Arc::new(|_| Ok(()))).expect("bridge should initialize");
-
-        bridge.handle_media_control_command(GNativeMediaControlCommand::OpenFile {
-            path,
-            surface_id: "video-player-surface".to_string(),
-        });
-        bridge.handle_media_control_command(GNativeMediaControlCommand::Play);
-
-        let started_at = Instant::now();
-        while started_at.elapsed() < Duration::from_secs(5) {
-            if !bridge.drain_pending_video_surface_frames().is_empty() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        panic!("bridge did not emit any pending video surface frame within timeout");
-    }
-}

@@ -38,6 +38,7 @@ pub struct WorkspaceServiceState {
     gshell_commands: RefCell<HashMap<GShellId, String>>,
     gshell_progresses: RefCell<HashMap<GShellId, TerminalProgress>>,
     default_tab_title: String,
+    home_dir: Option<PathBuf>,
     next_gshell_id: Cell<u64>,
 }
 
@@ -47,6 +48,18 @@ impl WorkspaceServiceState {
     }
 
     pub fn with_workspace(workspace: Workspace) -> Self {
+        Self::with_workspace_environment(
+            workspace,
+            default_tab_title(),
+            env::var_os("HOME").map(PathBuf::from),
+        )
+    }
+
+    fn with_workspace_environment(
+        workspace: Workspace,
+        default_tab_title: String,
+        home_dir: Option<PathBuf>,
+    ) -> Self {
         let state = Self {
             persistence_workspace_id: Cell::new(None),
             workspace: RefCell::new(workspace),
@@ -55,7 +68,8 @@ impl WorkspaceServiceState {
             gshell_working_directories: RefCell::new(HashMap::new()),
             gshell_commands: RefCell::new(HashMap::new()),
             gshell_progresses: RefCell::new(HashMap::new()),
-            default_tab_title: default_tab_title(),
+            default_tab_title,
+            home_dir,
             next_gshell_id: Cell::new(0),
         };
         state.rebind_all_panes();
@@ -153,7 +167,6 @@ impl WorkspaceServiceState {
         let titles = self.gshell_titles.borrow();
         let commands = self.gshell_commands.borrow();
         let working_directories = self.gshell_working_directories.borrow();
-        let home_dir = env::var_os("HOME").map(PathBuf::from);
         self.tab_gshells()
             .into_iter()
             .map(|gshell_id| {
@@ -164,7 +177,7 @@ impl WorkspaceServiceState {
                     .or_else(|| {
                         working_directories
                             .get(&gshell_id)
-                            .map(|path| pretty_path(path, home_dir.as_deref()))
+                            .map(|path| pretty_path(path, self.home_dir.as_deref()))
                     })
                     .unwrap_or_else(|| self.default_tab_title.clone())
             })
@@ -701,16 +714,24 @@ mod tests {
 
     use super::WorkspaceServiceState;
 
+    fn state() -> WorkspaceServiceState {
+        state_with_workspace(Workspace::main())
+    }
+
+    fn state_with_workspace(workspace: Workspace) -> WorkspaceServiceState {
+        WorkspaceServiceState::with_workspace_environment(workspace, ".".to_string(), None)
+    }
+
     #[test]
     fn state_defaults_to_single_pane() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
 
         assert_eq!(state.visible_gshells().len(), 1);
     }
 
     #[test]
     fn state_binds_two_visible_panes_to_distinct_gshells() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
 
         let gshells = state.visible_gshells();
         assert_eq!(gshells.len(), 2);
@@ -724,7 +745,7 @@ mod tests {
 
     #[test]
     fn state_focuses_a_visible_gshell_and_rejects_an_unknown_one() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
         assert!(state.focus_gshell(gshells[0]));
@@ -735,7 +756,7 @@ mod tests {
 
     #[test]
     fn state_focuses_a_gshell_in_an_inactive_tab() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         let second = state.create_tab_gshell();
 
@@ -747,7 +768,7 @@ mod tests {
 
     #[test]
     fn state_splits_the_focused_pane_and_binds_a_new_focused_gshell() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let original = state.focused_gshell();
 
         let created = state.split_focused_gshell(PaneSplitDirection::Vertical);
@@ -765,7 +786,7 @@ mod tests {
 
     #[test]
     fn state_swaps_focused_gshell_position_and_keeps_its_focus() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
         assert!(state.swap_focused_gshell_with(gshells[0]));
@@ -776,7 +797,7 @@ mod tests {
 
     #[test]
     fn state_closes_a_visible_gshell_and_focuses_the_remaining_one() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
         assert_eq!(
@@ -792,7 +813,7 @@ mod tests {
 
     #[test]
     fn state_preserves_focus_when_closing_an_unfocused_gshell() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
         let gshells = state.visible_gshells();
 
         assert_eq!(
@@ -807,7 +828,7 @@ mod tests {
 
     #[test]
     fn state_requests_workspace_close_for_the_last_gshell() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let only = state.focused_gshell();
 
         assert_eq!(
@@ -820,7 +841,7 @@ mod tests {
 
     #[test]
     fn tabs_keep_distinct_gshell_bindings_for_equal_local_pane_ids() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         let second = state.create_tab_gshell();
 
@@ -834,7 +855,7 @@ mod tests {
 
     #[test]
     fn moving_active_tab_reorders_titles_and_gshells_without_changing_focus() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         state.update_gshell_title(first, Some("first".to_string()));
         let second = state.create_tab_gshell();
@@ -857,7 +878,7 @@ mod tests {
 
     #[test]
     fn tab_titles_follow_the_focused_gshell_and_fall_back_to_the_working_directory() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         let second = state.create_tab_gshell();
 
@@ -887,7 +908,7 @@ mod tests {
 
     #[test]
     fn tab_progresses_aggregate_all_panes_by_severity_and_percentage() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         let second = state.split_focused_gshell(PaneSplitDirection::Horizontal);
 
@@ -923,7 +944,7 @@ mod tests {
 
     #[test]
     fn closing_a_tabs_only_gshell_closes_the_tab_and_focuses_its_neighbor() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let first = state.focused_gshell();
         let second = state.create_tab_gshell();
 
@@ -940,7 +961,7 @@ mod tests {
 
     #[test]
     fn closing_a_hidden_tab_does_not_change_the_active_tab() {
-        let state = WorkspaceServiceState::new();
+        let state = state();
         let hidden = state.focused_gshell();
         let active = state.create_tab_gshell();
 
@@ -957,7 +978,7 @@ mod tests {
 
     #[test]
     fn horizontal_split_covers_odd_window_width_without_overlap() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
 
         let placements = state.render_layout(TerminalWindowSize::new(101, 40));
 
@@ -972,7 +993,7 @@ mod tests {
 
     #[test]
     fn resizing_focused_pane_changes_layout_and_rejects_the_wrong_axis() {
-        let state = WorkspaceServiceState::with_workspace(Workspace::two_pane());
+        let state = state_with_workspace(Workspace::two_pane());
 
         assert!(!state.resize_focused_gshell(PaneResizeDirection::Up));
         assert!(state.resize_focused_gshell(PaneResizeDirection::Left));
