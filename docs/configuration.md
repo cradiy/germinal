@@ -193,9 +193,19 @@ mods = "Control|Shift"
 action = "NextTab"
 ```
 
-Defining `keyboard.bindings` replaces the complete default binding list. Include every default
-binding that should remain enabled. An empty list disables all host shortcuts; removing the entire
-`[keyboard]` section restores the defaults.
+To disable the default bindings and use only explicitly configured bindings:
+
+```toml
+[keyboard]
+use_default_bindings = false
+
+[[keyboard.bindings]]
+key = "V"
+mods = "Control|Shift"
+action = "ToggleViMode"
+```
+
+Setting `use_default_bindings = false` without any `keyboard.bindings` disables all host shortcuts.
 
 `mods` accepts `Control`, `Alt`, `Shift`, and `Super`, joined with `|`. Omit it for an unmodified
 key. Letter and digit keys use their printed names. Named keys are `Space`, `Enter`, `Tab`,

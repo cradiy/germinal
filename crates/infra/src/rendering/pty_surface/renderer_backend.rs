@@ -763,9 +763,17 @@ fn append_cursor_quads(
     cursor: RenderSurfaceCursorSnapshot,
     config: WgpuRendererConfig,
 ) {
-    if !cursor.focused || (cursor.blinking && !config.blinking_cursor_visible) {
+    if cursor.shape == RenderSurfaceCursorShape::Hidden
+        || (cursor.focused && cursor.blinking && !config.blinking_cursor_visible)
+    {
         return;
     }
+
+    let shape = if cursor.focused {
+        cursor.shape
+    } else {
+        RenderSurfaceCursorShape::HollowBlock
+    };
 
     let (cursor_x, cursor_cell_width) = cursor_cell_span(row, cursor.x);
     let (x, y) = config.cursor_position_px.unwrap_or_else(|| {
@@ -785,7 +793,7 @@ fn append_cursor_quads(
     };
     let vertical_stroke = config.cell_width_px.div_ceil(8).max(1);
     let horizontal_stroke = h.div_ceil(8).max(1);
-    match cursor.shape {
+    match shape {
         RenderSurfaceCursorShape::Block => {
             quads.push(WgpuQuadDrawItem::solid_rect(x, y, w, h, style));
         }
@@ -2018,8 +2026,10 @@ mod tests {
     }
 
     #[test]
-    fn unfocused_cursor_is_hidden() {
-        let backend = WgpuRendererBackend::new(WgpuRendererConfig::default());
+    fn unfocused_cursor_renders_as_a_non_blinking_hollow_block() {
+        let backend = WgpuRendererBackend::new(
+            WgpuRendererConfig::default().with_blinking_cursor_visible(false),
+        );
 
         backend.render_surface(&RenderSurfaceSnapshot {
             target_id: RenderTargetId::new(1),
@@ -2034,12 +2044,15 @@ mod tests {
                 y: 3,
                 focused: false,
                 shape: RenderSurfaceCursorShape::Block,
-                blinking: false,
+                blinking: true,
             }),
             ime_preedit: None,
         });
 
-        assert!(backend.state().geometric_quads().is_empty());
+        let cursors = backend.state().geometric_quads();
+        assert_eq!(cursors.len(), 4);
+        assert_eq!((cursors[0].x_px, cursors[0].y_px), (16, 48));
+        assert_eq!((cursors[0].width_px, cursors[0].height_px), (8, 2));
     }
 
     #[test]

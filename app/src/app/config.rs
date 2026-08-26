@@ -18,7 +18,7 @@ use germinal_ports::pty_host::{
     terminal_clipboard::TerminalOsc52Mode,
 };
 use germinal_ports::rendering::tab_bar::TabBarPosition;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::app::error::{AppError, AppResult};
 
@@ -522,15 +522,16 @@ impl Default for ScrollingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize)]
 pub struct KeyboardConfig {
+    pub use_default_bindings: bool,
     pub bindings: Vec<KeyboardBinding>,
 }
 
 impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
+            use_default_bindings: true,
             bindings: vec![
                 KeyboardBinding {
                     key: "N".to_string(),
@@ -670,6 +671,70 @@ impl Default for KeyboardConfig {
             ],
         }
     }
+}
+
+#[derive(Deserialize)]
+struct KeyboardConfigFile {
+    #[serde(default = "default_true")]
+    use_default_bindings: bool,
+    #[serde(default)]
+    bindings: Vec<KeyboardBinding>,
+}
+
+impl<'de> Deserialize<'de> for KeyboardConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let file = KeyboardConfigFile::deserialize(deserializer)?;
+        let bindings = if file.use_default_bindings {
+            merge_keyboard_bindings(Self::default().bindings, file.bindings)
+        } else {
+            merge_keyboard_bindings(Vec::new(), file.bindings)
+        };
+        Ok(Self {
+            use_default_bindings: file.use_default_bindings,
+            bindings,
+        })
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn merge_keyboard_bindings(
+    mut bindings: Vec<KeyboardBinding>,
+    overrides: Vec<KeyboardBinding>,
+) -> Vec<KeyboardBinding> {
+    for binding in overrides {
+        if let Some(index) = bindings
+            .iter()
+            .position(|candidate| same_keyboard_trigger(candidate, &binding))
+        {
+            bindings[index] = binding;
+        } else {
+            bindings.push(binding);
+        }
+    }
+    bindings
+}
+
+fn same_keyboard_trigger(left: &KeyboardBinding, right: &KeyboardBinding) -> bool {
+    left.key.eq_ignore_ascii_case(&right.key)
+        && normalized_modifiers(&left.mods) == normalized_modifiers(&right.mods)
+}
+
+fn normalized_modifiers(modifiers: &str) -> Vec<String> {
+    let mut modifiers = modifiers
+        .split('|')
+        .map(str::trim)
+        .filter(|modifier| !modifier.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    modifiers.sort_unstable();
+    modifiers.dedup();
+    modifiers
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,6 +940,10 @@ mod tests {
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
+        assert_eq!(
+            value["keyboard"]["use_default_bindings"].as_bool(),
+            Some(true)
+        );
         assert!(
             value["keyboard"]["bindings"]
                 .as_array()
@@ -882,6 +951,10 @@ mod tests {
                     .iter()
                     .any(|binding| { binding["action"].as_str() == Some("ToggleViMode") }))
         );
+
+        let round_trip: GerminalConfig = toml::from_str(&contents).unwrap();
+        assert!(round_trip.keyboard.use_default_bindings);
+        assert_eq!(round_trip.keyboard.bindings.len(), 27);
     }
 
     #[test]
@@ -1192,7 +1265,14 @@ mod tests {
         )
         .unwrap();
 
-        let binding = &config.keyboard.bindings[0];
+        assert!(config.keyboard.use_default_bindings);
+        assert_eq!(config.keyboard.bindings.len(), 27);
+        let binding = config
+            .keyboard
+            .bindings
+            .iter()
+            .find(|binding| binding.key.eq_ignore_ascii_case("V"))
+            .unwrap();
         assert_eq!(binding.key, "V");
         assert_eq!(binding.mods, "Control|Shift");
         assert_eq!(binding.action, KeyboardAction::ToggleViMode);
@@ -1207,7 +1287,7 @@ mod tests {
                 key = ""
                 action = "NewTab"
                 "#,
-                "keyboard.bindings[0].key must not be empty",
+                ".key must not be empty",
             ),
             (
                 r#"
@@ -1242,14 +1322,111 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.keyboard.bindings.len(), 2);
+        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "D"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::SplitHorizontal
+        }));
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "W"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::ClosePane
+        }));
+    }
+
+    #[test]
+    fn custom_keyboard_binding_overrides_one_trigger_and_keeps_other_defaults() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [[keyboard.bindings]]
+            key = "v"
+            mods = "Shift|Control"
+            action = "ToggleViMode"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key.eq_ignore_ascii_case("V") && binding.action == KeyboardAction::ToggleViMode
+        }));
+        assert!(config.keyboard.bindings.iter().any(|binding| {
+            binding.key == "C"
+                && binding.mods == "Control|Shift"
+                && binding.action == KeyboardAction::Copy
+        }));
+    }
+
+    #[test]
+    fn one_action_can_have_multiple_keyboard_triggers() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [[keyboard.bindings]]
+            key = "F12"
+            action = "ToggleViMode"
+
+            [[keyboard.bindings]]
+            key = "V"
+            mods = "Control|Alt"
+            action = "ToggleViMode"
+            "#,
+        )
+        .unwrap();
+
+        let vi_mode_bindings = config
+            .keyboard
+            .bindings
+            .iter()
+            .filter(|binding| binding.action == KeyboardAction::ToggleViMode)
+            .collect::<Vec<_>>();
+        assert_eq!(vi_mode_bindings.len(), 3);
+        assert!(
+            vi_mode_bindings
+                .iter()
+                .any(|binding| binding.key == "Space")
+        );
+        assert!(vi_mode_bindings.iter().any(|binding| binding.key == "F12"));
+        assert!(
+            vi_mode_bindings
+                .iter()
+                .any(|binding| binding.key == "V" && binding.mods == "Control|Alt")
+        );
+    }
+
+    #[test]
+    fn default_keyboard_bindings_can_be_disabled_explicitly() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [keyboard]
+            use_default_bindings = false
+
+            [[keyboard.bindings]]
+            key = "V"
+            mods = "Control|Shift"
+            action = "ToggleViMode"
+            "#,
+        )
+        .unwrap();
+
+        assert!(!config.keyboard.use_default_bindings);
+        assert_eq!(config.keyboard.bindings.len(), 1);
         assert_eq!(
             config.keyboard.bindings[0].action,
-            KeyboardAction::SplitHorizontal
+            KeyboardAction::ToggleViMode
         );
-        assert_eq!(
-            config.keyboard.bindings[1].action,
-            KeyboardAction::ClosePane
-        );
+    }
+
+    #[test]
+    fn disabling_defaults_with_no_bindings_disables_all_host_shortcuts() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [keyboard]
+            use_default_bindings = false
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.keyboard.bindings.is_empty());
     }
 }
