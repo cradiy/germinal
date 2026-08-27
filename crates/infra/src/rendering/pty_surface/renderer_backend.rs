@@ -1254,6 +1254,7 @@ pub struct WgpuQuadDrawItem {
     pub x_px: u32,
     pub y_px: u32,
     pub width_px: u32,
+    pub available_width_px: u32,
     pub height_px: u32,
     pub style: TextStyleDto,
     pub alpha: u8,
@@ -1265,6 +1266,9 @@ impl WgpuQuadDrawItem {
             x_px: 0,
             y_px: 0,
             width_px: config
+                .content_width_px
+                .saturating_add(config.content_origin_x.saturating_mul(2)),
+            available_width_px: config
                 .content_width_px
                 .saturating_add(config.content_origin_x.saturating_mul(2)),
             height_px: config
@@ -1314,7 +1318,8 @@ impl WgpuQuadDrawItem {
             kind: WgpuQuadKind::Glyph { glyph_key },
             x_px: glyph.pixel_x(config),
             y_px: glyph.pixel_y(config),
-            width_px: available_cell_width.max(1) * config.cell_width_px,
+            width_px: glyph.pixel_width(config),
+            available_width_px: available_cell_width.max(1) * config.cell_width_px,
             height_px: config.row_height_px(glyph.y),
             style: glyph.style,
             alpha: u8::MAX,
@@ -1333,6 +1338,7 @@ impl WgpuQuadDrawItem {
             x_px: config.content_origin_x + x * config.cell_width_px,
             y_px: config.row_top_px(y),
             width_px: cell_width.max(1) * config.cell_width_px,
+            available_width_px: cell_width.max(1) * config.cell_width_px,
             height_px: config.row_height_px(y),
             style,
             alpha: u8::MAX,
@@ -1358,6 +1364,7 @@ impl WgpuQuadDrawItem {
             x_px: config.content_origin_x + x * config.cell_width_px,
             y_px: config.row_top_px(y).saturating_add(offset_y_px),
             width_px: cell_width.max(1) * config.cell_width_px,
+            available_width_px: cell_width.max(1) * config.cell_width_px,
             height_px: thickness_px,
             style,
             alpha: u8::MAX,
@@ -1393,6 +1400,7 @@ impl WgpuQuadDrawItem {
             x_px,
             y_px,
             width_px: width_px.max(1),
+            available_width_px: width_px.max(1),
             height_px: height_px.max(1),
             style,
             alpha: u8::MAX,
@@ -1411,6 +1419,7 @@ impl WgpuQuadDrawItem {
             x_px,
             y_px,
             width_px: width_px.max(1),
+            available_width_px: width_px.max(1),
             height_px: height_px.max(1),
             style,
             alpha: u8::MAX,
@@ -1429,6 +1438,7 @@ impl WgpuQuadDrawItem {
             x_px,
             y_px,
             width_px: width_px.max(1),
+            available_width_px: width_px.max(1),
             height_px: height_px.max(1),
             style: TextStyleDto::plain(),
             alpha: u8::MAX,

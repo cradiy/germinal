@@ -1209,7 +1209,7 @@ fn is_emoji_text_cluster(text: &str) -> bool {
 fn build_atlas_from_rasterized_glyphs(
     mut glyphs: Vec<RasterizedTerminalGlyph>,
     base_cell_width: u32,
-    base_cell_height: u32,
+    _base_cell_height: u32,
     baseline_y_px: i32,
     padding_px: u32,
     columns: u32,
@@ -1251,30 +1251,17 @@ fn build_atlas_from_rasterized_glyphs(
         glyph.direct_draw_offset = None;
     }
 
-    // Alacritty never scales a rasterized glyph bitmap into the terminal cell.
-    // The terminal cell decides layout; the glyph bitmap is placed at its native
-    // rasterized size using font bearings/baseline.  The previous implementation
-    // stored a whole terminal-cell-sized rectangle in the atlas and mapped that
-    // rectangle onto a terminal-cell quad, which stretched/squashed every glyph
-    // and made the text look short, fat, and blurry.
-    let max_bitmap_width = glyphs
+    // Keep every glyph at its native rasterized size and pack variable-sized rectangles tightly.
+    // A uniform grid multiplies the largest fallback/emoji dimensions across every slot, which can
+    // exhaust a 4096x4096 atlas and randomly drop otherwise tiny ASCII glyphs.
+    let dimensions: Vec<_> = glyphs
         .iter()
-        .map(|glyph| glyph.width_px.max(1))
-        .max()
-        .unwrap_or(base_cell_width.max(1));
-    let max_bitmap_height = glyphs
-        .iter()
-        .map(|glyph| glyph.height_px.max(1))
-        .max()
-        .unwrap_or(base_cell_height.max(1));
-
-    let cell_stride_width = max_bitmap_width + padding_px;
-    let cell_stride_height = max_bitmap_height + padding_px;
-    let layout = GlyphAtlasGridLayout::new(
-        glyphs.len() as u32,
+        .map(|glyph| (glyph.width_px.max(1), glyph.height_px.max(1)))
+        .collect();
+    let layout = GlyphAtlasShelfLayout::new(
+        &dimensions,
         columns,
-        cell_stride_width,
-        cell_stride_height,
+        base_cell_width,
         padding_px,
         max_texture_dimension_2d,
     );
@@ -1295,31 +1282,24 @@ fn build_atlas_from_rasterized_glyphs(
     let mut pixels = vec![0u8; pixel_len];
     let mut entries = HashMap::new();
 
-    if layout.glyph_capacity < glyphs.len() as u32 {
+    if layout.placements.len() < glyphs.len() {
         warn!(
             glyph_count = glyphs.len(),
-            glyph_capacity = layout.glyph_capacity,
+            glyph_capacity = layout.placements.len(),
             atlas_width,
             atlas_height,
             "glyph atlas reached the device-safe capacity; excess glyphs were skipped"
         );
     }
 
-    for (index, glyph) in glyphs
-        .into_iter()
-        .take(layout.glyph_capacity as usize)
-        .enumerate()
-    {
-        let index = index as u32;
-        let col = index % layout.columns;
-        let row = index / layout.columns;
-
-        let cell_x = padding_px + col * cell_stride_width;
-        let cell_y = padding_px + row * cell_stride_height;
+    for placement in layout.placements {
+        let glyph = &glyphs[placement.glyph_index];
+        let cell_x = placement.x_px;
+        let cell_y = placement.y_px;
         let bitmap_width = glyph.width_px.max(1);
         let bitmap_height = glyph.height_px.max(1);
 
-        write_crossfont_glyph_pixels_tight(&glyph, cell_x, cell_y, atlas_width, &mut pixels);
+        write_crossfont_glyph_pixels_tight(glyph, cell_x, cell_y, atlas_width, &mut pixels);
 
         let uv = WgpuTerminalGlyphUvRect {
             min_u: cell_x as f32 / atlas_width as f32,
@@ -1329,7 +1309,7 @@ fn build_atlas_from_rasterized_glyphs(
         };
 
         let (draw_offset_x_px, draw_offset_y_px) =
-            terminal_glyph_draw_offset(&glyph, base_cell_width, baseline_y_px);
+            terminal_glyph_draw_offset(glyph, base_cell_width, baseline_y_px);
 
         entries.insert(
             glyph.key,
@@ -1359,46 +1339,105 @@ fn build_atlas_from_rasterized_glyphs(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GlyphAtlasGridLayout {
-    columns: u32,
-    row_count: u32,
-    atlas_width: u32,
-    atlas_height: u32,
-    glyph_capacity: u32,
+struct GlyphAtlasShelfPlacement {
+    glyph_index: usize,
+    x_px: u32,
+    y_px: u32,
 }
 
-impl GlyphAtlasGridLayout {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlyphAtlasShelfLayout {
+    placements: Vec<GlyphAtlasShelfPlacement>,
+    atlas_width: u32,
+    atlas_height: u32,
+}
+
+impl GlyphAtlasShelfLayout {
     fn new(
-        glyph_count: u32,
+        dimensions: &[(u32, u32)],
         preferred_columns: u32,
-        cell_stride_width: u32,
-        cell_stride_height: u32,
+        base_cell_width_px: u32,
         padding_px: u32,
         max_texture_dimension_2d: u32,
     ) -> Self {
-        let glyph_count = glyph_count.max(1);
-        let usable_dimension = max_texture_dimension_2d.max(padding_px.saturating_add(1));
-        let usable_width = usable_dimension.saturating_sub(padding_px).max(1);
-        let usable_height = usable_dimension.saturating_sub(padding_px).max(1);
-        let max_columns = (usable_width / cell_stride_width).max(1).min(glyph_count);
-        let max_rows = (usable_height / cell_stride_height).max(1);
-        let glyph_capacity = glyph_count.min(max_columns.saturating_mul(max_rows));
-        let preferred_columns = preferred_columns.max(1).min(glyph_capacity);
-        let min_columns_needed = glyph_capacity.div_ceil(max_rows).max(1);
-        let columns = preferred_columns
-            .max(min_columns_needed)
-            .min(max_columns)
-            .max(1);
-        let row_count = glyph_capacity.div_ceil(columns);
-        let atlas_width = padding_px.saturating_add(columns.saturating_mul(cell_stride_width));
-        let atlas_height = padding_px.saturating_add(row_count.saturating_mul(cell_stride_height));
+        let max_dimension = max_texture_dimension_2d.max(1);
+        let widest = dimensions
+            .iter()
+            .map(|(width, _)| (*width).max(1).saturating_add(padding_px.saturating_mul(2)))
+            .max()
+            .unwrap_or(1)
+            .min(max_dimension);
+        let preferred_width = padding_px.saturating_add(
+            preferred_columns
+                .max(1)
+                .saturating_mul(base_cell_width_px.max(1).saturating_add(padding_px)),
+        );
+        let mut width_limit = preferred_width.max(widest).min(max_dimension).max(1);
+
+        loop {
+            let layout = Self::with_width(dimensions, padding_px, width_limit, max_dimension);
+            if layout.placements.len() == dimensions.len() || width_limit == max_dimension {
+                return layout;
+            }
+            width_limit = width_limit.saturating_mul(2).min(max_dimension);
+        }
+    }
+
+    fn with_width(
+        dimensions: &[(u32, u32)],
+        padding_px: u32,
+        width_limit: u32,
+        height_limit: u32,
+    ) -> Self {
+        let mut glyph_indices: Vec<_> = (0..dimensions.len()).collect();
+        glyph_indices.sort_unstable_by(|left, right| {
+            let left_size = dimensions[*left];
+            let right_size = dimensions[*right];
+            right_size
+                .1
+                .cmp(&left_size.1)
+                .then_with(|| right_size.0.cmp(&left_size.0))
+                .then_with(|| left.cmp(right))
+        });
+
+        let mut placements = Vec::with_capacity(dimensions.len());
+        let mut x_px = padding_px;
+        let mut y_px = padding_px;
+        let mut shelf_height = 0_u32;
+        let mut used_right = padding_px.max(1);
+        let mut used_bottom = padding_px.max(1);
+
+        for glyph_index in glyph_indices {
+            let (width_px, height_px) = dimensions[glyph_index];
+            let width_px = width_px.max(1);
+            let height_px = height_px.max(1);
+            if x_px > padding_px
+                && x_px.saturating_add(width_px).saturating_add(padding_px) > width_limit
+            {
+                x_px = padding_px;
+                y_px = y_px.saturating_add(shelf_height).saturating_add(padding_px);
+                shelf_height = 0;
+            }
+            if y_px.saturating_add(height_px).saturating_add(padding_px) > height_limit {
+                continue;
+            }
+
+            placements.push(GlyphAtlasShelfPlacement {
+                glyph_index,
+                x_px,
+                y_px,
+            });
+            used_right = used_right.max(x_px.saturating_add(width_px).saturating_add(padding_px));
+            used_bottom =
+                used_bottom.max(y_px.saturating_add(height_px).saturating_add(padding_px));
+            x_px = x_px.saturating_add(width_px).saturating_add(padding_px);
+            shelf_height = shelf_height.max(height_px);
+        }
 
         Self {
-            columns,
-            row_count,
-            atlas_width,
-            atlas_height,
-            glyph_capacity,
+            placements,
+            atlas_width: used_right.min(width_limit).max(1),
+            atlas_height: used_bottom.min(height_limit).max(1),
         }
     }
 }
@@ -1815,10 +1854,10 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontCoverage, GlyphAtlasGridLayout, RasterizedTerminalGlyph, WgpuCrossfontStrikeoutMetrics,
-        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, build_atlas_from_rasterized_glyphs,
-        crossfont_size_from_physical_px, crossfont_strikeout_metrics, crossfont_underline_metrics,
-        terminal_glyph_draw_offset,
+        FontCoverage, GlyphAtlasShelfLayout, RasterizedTerminalGlyph,
+        WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey,
+        build_atlas_from_rasterized_glyphs, crossfont_size_from_physical_px,
+        crossfont_strikeout_metrics, crossfont_underline_metrics, terminal_glyph_draw_offset,
     };
 
     #[test]
@@ -1891,27 +1930,23 @@ mod tests {
     }
 
     #[test]
-    fn grows_columns_to_stay_within_texture_height_limit() {
-        let layout = GlyphAtlasGridLayout::new(4600, 16, 20, 30, 2, 8192);
+    fn shelf_packing_keeps_one_large_glyph_from_reducing_ascii_capacity() {
+        let mut dimensions = vec![(20, 30); 394];
+        dimensions.push((250, 214));
 
-        assert!(layout.columns > 16);
-        assert!(layout.atlas_width <= 8192);
-        assert!(layout.atlas_height <= 8192);
+        let layout = GlyphAtlasShelfLayout::new(&dimensions, 16, 20, 1, 4096);
+
+        assert_eq!(layout.placements.len(), dimensions.len());
+        assert!(layout.atlas_width <= 4096);
+        assert!(layout.atlas_height <= 4096);
     }
 
     #[test]
-    fn caps_columns_when_width_limit_is_tighter_than_preference() {
-        let layout = GlyphAtlasGridLayout::new(1000, 16, 700, 10, 2, 8192);
+    fn shelf_packing_caps_entries_at_the_texture_limit() {
+        let dimensions = vec![(20, 30); 100];
+        let layout = GlyphAtlasShelfLayout::new(&dimensions, 16, 20, 1, 64);
 
-        assert_eq!(layout.columns, 11);
-        assert!(layout.atlas_width <= 8192);
-    }
-
-    #[test]
-    fn caps_glyph_count_when_the_texture_cannot_hold_every_entry() {
-        let layout = GlyphAtlasGridLayout::new(100, 16, 20, 30, 2, 64);
-
-        assert_eq!(layout.glyph_capacity, 6);
+        assert!(layout.placements.len() < dimensions.len());
         assert!(layout.atlas_width <= 64);
         assert!(layout.atlas_height <= 64);
     }

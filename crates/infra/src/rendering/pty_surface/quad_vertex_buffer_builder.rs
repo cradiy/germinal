@@ -271,7 +271,8 @@ fn mapped_glyph_quad_geometry_and_uv(
     quad: WgpuQuadDrawItem,
     entry: &WgpuTerminalGlyphAtlasEntry,
 ) -> (f32, f32, f32, f32, [f32; 4]) {
-    let (offset_x, offset_y, draw_width, draw_height) = glyph_draw_geometry(quad.width_px, entry);
+    let (offset_x, offset_y, draw_width, draw_height) =
+        glyph_draw_geometry(quad.available_width_px, entry);
     let x0 = quad.x_px as f32 + offset_x;
     let y0 = quad.y_px as f32 + offset_y;
     let x1 = x0 + draw_width;
@@ -402,7 +403,8 @@ mod tests {
 
     use super::{WgpuQuadVertexBufferBuilder, glyph_draw_geometry};
     use crate::rendering::pty_surface::glyph_atlas::{
-        WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphUvRect,
+        WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphKey,
+        WgpuTerminalGlyphUvRect,
     };
     use crate::rendering::pty_surface::renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind};
 
@@ -413,6 +415,7 @@ mod tests {
             x_px: 0,
             y_px: 0,
             width_px: 80,
+            available_width_px: 80,
             height_px: 24,
             style: TextStyleDto {
                 background: Some(RgbColorDto::new(20, 40, 60)),
@@ -456,5 +459,30 @@ mod tests {
 
         assert_eq!(glyph_draw_geometry(36, &entry), (0.0, 4.0, 30.0, 20.0));
         assert_eq!(glyph_draw_geometry(18, &entry), (0.0, 12.0, 18.0, 12.0));
+    }
+
+    #[test]
+    fn missing_glyph_fallback_uses_logical_width_not_blank_span() {
+        let quad = WgpuQuadDrawItem {
+            kind: WgpuQuadKind::Glyph {
+                glyph_key: WgpuTerminalGlyphKey::plain('x'),
+            },
+            x_px: 10,
+            y_px: 20,
+            width_px: 18,
+            available_width_px: 180,
+            height_px: 30,
+            style: TextStyleDto::plain(),
+            alpha: u8::MAX,
+        };
+
+        let (buffer, result) = WgpuQuadVertexBufferBuilder::new()
+            .build_with_glyph_atlas(&[quad], &WgpuTerminalGlyphAtlas::empty());
+
+        assert!(result.has_missing());
+        assert_eq!(
+            buffer.vertices[1].position_px[0] - buffer.vertices[0].position_px[0],
+            18.0
+        );
     }
 }
