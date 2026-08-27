@@ -271,10 +271,11 @@ fn mapped_glyph_quad_geometry_and_uv(
     quad: WgpuQuadDrawItem,
     entry: &WgpuTerminalGlyphAtlasEntry,
 ) -> (f32, f32, f32, f32, [f32; 4]) {
-    let x0 = quad.x_px as f32 + entry.draw_offset_x_px as f32;
-    let y0 = quad.y_px as f32 + entry.draw_offset_y_px as f32;
-    let x1 = x0 + entry.draw_width_px.max(1) as f32;
-    let y1 = y0 + entry.draw_height_px.max(1) as f32;
+    let (offset_x, offset_y, draw_width, draw_height) = glyph_draw_geometry(quad.width_px, entry);
+    let x0 = quad.x_px as f32 + offset_x;
+    let y0 = quad.y_px as f32 + offset_y;
+    let x1 = x0 + draw_width;
+    let y1 = y0 + draw_height;
     (
         x0,
         y0,
@@ -286,6 +287,41 @@ fn mapped_glyph_quad_geometry_and_uv(
             entry.uv.max_u,
             entry.uv.max_v,
         ],
+    )
+}
+
+pub(crate) fn glyph_draw_geometry(
+    available_width_px: u32,
+    entry: &WgpuTerminalGlyphAtlasEntry,
+) -> (f32, f32, f32, f32) {
+    let native_width_px = entry.draw_width_px.max(1) as f32;
+    let native_height_px = entry.draw_height_px.max(1) as f32;
+    let native_offset_x_px = entry.draw_offset_x_px as f32;
+    let native_offset_y_px = entry.draw_offset_y_px as f32;
+    let maximum_width_px = available_width_px
+        .saturating_sub(entry.draw_offset_x_px.max(0) as u32)
+        .max(1) as f32;
+
+    // The row layout supplies every blank cell available before the next occupied cell. Preserve
+    // native font geometry whenever it fits; otherwise scale the entire glyph proportionally so it
+    // cannot overwrite following text. The decision depends only on geometry and row occupancy.
+    if native_width_px - maximum_width_px <= 2.0 {
+        return (
+            native_offset_x_px,
+            native_offset_y_px,
+            native_width_px,
+            native_height_px,
+        );
+    }
+
+    let scale = maximum_width_px / native_width_px;
+    let draw_height_px = native_height_px * scale;
+    let native_bottom_px = native_offset_y_px + native_height_px;
+    (
+        native_offset_x_px * scale,
+        native_bottom_px - draw_height_px,
+        maximum_width_px,
+        draw_height_px,
     )
 }
 fn default_uv() -> [f32; 4] {
@@ -364,7 +400,10 @@ fn bytes_of_slice<T>(items: &[T]) -> &[u8] {
 mod tests {
     use germinal_ports::rendering::frame_plan_builder::{RgbColorDto, TextStyleDto};
 
-    use super::WgpuQuadVertexBufferBuilder;
+    use super::{WgpuQuadVertexBufferBuilder, glyph_draw_geometry};
+    use crate::rendering::pty_surface::glyph_atlas::{
+        WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphUvRect,
+    };
     use crate::rendering::pty_surface::renderer_backend::{WgpuQuadDrawItem, WgpuQuadKind};
 
     #[test]
@@ -391,5 +430,31 @@ mod tests {
                 .iter()
                 .all(|vertex| (vertex.color[3] - 128.0 / 255.0).abs() < f32::EPSILON)
         );
+    }
+
+    #[test]
+    fn glyph_scaling_depends_on_available_geometry_not_codepoint() {
+        let entry = WgpuTerminalGlyphAtlasEntry {
+            codepoint: 0,
+            x_px: 0,
+            y_px: 0,
+            width_px: 30,
+            height_px: 20,
+            advance_px: 18.0,
+            uv: WgpuTerminalGlyphUvRect {
+                min_u: 0.0,
+                min_v: 0.0,
+                max_u: 1.0,
+                max_v: 1.0,
+            },
+            draw_offset_x_px: 0,
+            draw_offset_y_px: 4,
+            draw_width_px: 30,
+            draw_height_px: 20,
+            is_color: false,
+        };
+
+        assert_eq!(glyph_draw_geometry(36, &entry), (0.0, 4.0, 30.0, 20.0));
+        assert_eq!(glyph_draw_geometry(18, &entry), (0.0, 12.0, 18.0, 12.0));
     }
 }

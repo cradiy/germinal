@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use crate::rendering::pty_surface::{
     glyph_atlas::{WgpuTerminalGlyphAtlas, WgpuTerminalGlyphAtlasEntry, WgpuTerminalGlyphUvRect},
-    quad_vertex_buffer_builder::{WGPU_VERTEX_KIND_GLYPH, WgpuGpuVertex, WgpuVertexBuffer},
+    quad_vertex_buffer_builder::{
+        WGPU_VERTEX_KIND_GLYPH, WgpuGpuVertex, WgpuVertexBuffer, glyph_draw_geometry,
+    },
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -77,10 +79,13 @@ impl WgpuTerminalGlyphUvMapResult {
 fn write_quad_geometry(vertices: &mut [WgpuGpuVertex], entry: &WgpuTerminalGlyphAtlasEntry) {
     let base_x = vertices[0].position_px[0];
     let base_y = vertices[0].position_px[1];
-    let x0 = base_x + entry.draw_offset_x_px as f32;
-    let y0 = base_y + entry.draw_offset_y_px as f32;
-    let x1 = x0 + entry.draw_width_px.max(1) as f32;
-    let y1 = y0 + entry.draw_height_px.max(1) as f32;
+    let available_width_px = (vertices[1].position_px[0] - base_x).max(1.0) as u32;
+    let (offset_x, offset_y, draw_width, draw_height) =
+        glyph_draw_geometry(available_width_px, entry);
+    let x0 = base_x + offset_x;
+    let y0 = base_y + offset_y;
+    let x1 = x0 + draw_width;
+    let y1 = y0 + draw_height;
 
     vertices[0].position_px = [x0, y0];
     vertices[1].position_px = [x1, y0];

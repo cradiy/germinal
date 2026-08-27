@@ -425,6 +425,7 @@ fn render_row(
     let mut background_quads = Vec::new();
     let mut glyph_quads = Vec::new();
     let mut underline_quads = Vec::new();
+    let occupied_cells = occupied_text_cells(row, config.grid_columns);
 
     for run in &row.runs {
         let glyph_style = dimmed_style(run.style, run.decoration.dim);
@@ -472,7 +473,11 @@ fn render_row(
                         geometric_glyph,
                     );
                 } else if c != ' ' {
-                    glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+                    glyph_quads.push(WgpuQuadDrawItem::glyph_with_cell_span(
+                        glyph,
+                        available_glyph_cell_span(&occupied_cells, x, cell_width),
+                        config,
+                    ));
                 }
                 append_text_decoration_quads(
                     &mut underline_quads,
@@ -512,6 +517,7 @@ fn render_shaped_row(
     let mut background_quads = Vec::new();
     let mut glyph_quads = Vec::new();
     let mut underline_quads = Vec::new();
+    let occupied_cells = occupied_text_cells(row, config.grid_columns);
 
     for run in &row.runs {
         let glyph_style = dimmed_style(run.style, run.decoration.dim);
@@ -587,9 +593,10 @@ fn render_shaped_row(
             if run.decoration.hidden {
                 // Hidden text still consumes its normal terminal cell span.
             } else if segment.shaped {
-                glyph_quads.push(WgpuQuadDrawItem::glyph_with_key(
+                glyph_quads.push(WgpuQuadDrawItem::glyph_with_key_and_cell_span(
                     glyph,
                     segment.glyph_key,
+                    available_glyph_cell_span(&occupied_cells, segment_x, segment.cell_width),
                     config,
                 ));
             } else if let Some(geometric_glyph) = TerminalGeometricGlyph::from_char(character) {
@@ -600,7 +607,11 @@ fn render_shaped_row(
                     geometric_glyph,
                 );
             } else if character != ' ' {
-                glyph_quads.push(WgpuQuadDrawItem::glyph(glyph, config));
+                glyph_quads.push(WgpuQuadDrawItem::glyph_with_cell_span(
+                    glyph,
+                    available_glyph_cell_span(&occupied_cells, segment_x, segment.cell_width),
+                    config,
+                ));
             }
 
             x = x.saturating_add(segment.cell_width);
@@ -613,6 +624,36 @@ fn render_shaped_row(
         glyph_quads,
         underline_quads,
     }
+}
+
+fn occupied_text_cells(row: &RenderSurfaceRowSnapshot, columns: u32) -> Vec<bool> {
+    let mut occupied = vec![false; columns as usize];
+    for run in &row.runs {
+        let mut x = run.x;
+        for grapheme in run.text.graphemes(true) {
+            let cell_width = terminal_grapheme_cell_width(grapheme);
+            if cell_width == 0 {
+                continue;
+            }
+            let blank = matches!(grapheme, " " | "\u{2002}");
+            if !blank {
+                for cell_x in x..x.saturating_add(cell_width).min(columns) {
+                    occupied[cell_x as usize] = true;
+                }
+            }
+            x = x.saturating_add(cell_width);
+        }
+    }
+    occupied
+}
+
+fn available_glyph_cell_span(occupied_cells: &[bool], x: u32, cell_width: u32) -> u32 {
+    let cell_width = cell_width.max(1);
+    let mut end = x.saturating_add(cell_width) as usize;
+    while end < occupied_cells.len() && !occupied_cells[end] {
+        end += 1;
+    }
+    (end.saturating_sub(x as usize) as u32).max(cell_width)
 }
 
 fn dimmed_style(mut style: TextStyleDto, dim: bool) -> TextStyleDto {
@@ -1238,9 +1279,18 @@ impl WgpuQuadDrawItem {
     }
 
     pub fn glyph(glyph: WgpuGlyphDrawItem, config: WgpuRendererConfig) -> Self {
+        Self::glyph_with_cell_span(glyph, glyph.cell_width, config)
+    }
+
+    fn glyph_with_cell_span(
+        glyph: WgpuGlyphDrawItem,
+        available_cell_width: u32,
+        config: WgpuRendererConfig,
+    ) -> Self {
         Self::glyph_with_key(
             glyph,
             WgpuTerminalGlyphKey::styled(glyph.c, glyph.style.bold, glyph.style.italic),
+            available_cell_width,
             config,
         )
     }
@@ -1248,13 +1298,23 @@ impl WgpuQuadDrawItem {
     fn glyph_with_key(
         glyph: WgpuGlyphDrawItem,
         glyph_key: WgpuTerminalGlyphKey,
+        available_cell_width: u32,
+        config: WgpuRendererConfig,
+    ) -> Self {
+        Self::glyph_with_key_and_cell_span(glyph, glyph_key, available_cell_width, config)
+    }
+
+    fn glyph_with_key_and_cell_span(
+        glyph: WgpuGlyphDrawItem,
+        glyph_key: WgpuTerminalGlyphKey,
+        available_cell_width: u32,
         config: WgpuRendererConfig,
     ) -> Self {
         Self {
             kind: WgpuQuadKind::Glyph { glyph_key },
             x_px: glyph.pixel_x(config),
             y_px: glyph.pixel_y(config),
-            width_px: glyph.pixel_width(config),
+            width_px: available_cell_width.max(1) * config.cell_width_px,
             height_px: config.row_height_px(glyph.y),
             style: glyph.style,
             alpha: u8::MAX,
@@ -1413,7 +1473,7 @@ mod tests {
 
     use super::{
         CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
-        append_pixel_rect_quads_from_row,
+        append_pixel_rect_quads_from_row, available_glyph_cell_span, occupied_text_cells,
     };
     use crate::rendering::pty_surface::{
         crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
@@ -1457,6 +1517,47 @@ mod tests {
             cursor: None,
             ime_preedit: None,
         });
+    }
+
+    #[test]
+    fn glyph_span_uses_snapshot_gaps_across_style_runs() {
+        let row = RenderSurfaceRowSnapshot {
+            y: 0,
+            runs: vec![
+                RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "\u{e5ff}".to_owned(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                },
+                RenderSurfaceRunSnapshot {
+                    x: 2,
+                    text: "name".to_owned(),
+                    style: TextStyleDto {
+                        bold: true,
+                        ..TextStyleDto::plain()
+                    },
+                    decoration: Default::default(),
+                },
+            ],
+        };
+        let occupied = occupied_text_cells(&row, 8);
+
+        assert_eq!(available_glyph_cell_span(&occupied, 0, 1), 2);
+
+        let occupied_next = occupied_text_cells(
+            &RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "♥),".to_owned(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            },
+            8,
+        );
+        assert_eq!(available_glyph_cell_span(&occupied_next, 0, 1), 1);
     }
 
     #[test]

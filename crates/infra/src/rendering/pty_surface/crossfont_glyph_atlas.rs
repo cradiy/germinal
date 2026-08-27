@@ -650,13 +650,7 @@ impl WgpuCrossfontGlyphBackend {
 
         let font_key = self.font_key_for_glyph(glyph_key);
 
-        let glyph = rasterize_terminal_glyph_to_cell(
-            &mut self.rasterizer,
-            font_key,
-            self.size,
-            glyph_key,
-            self.average_advance_px,
-        );
+        let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
         self.glyph_cache.insert(glyph_key, glyph.clone());
         glyph
     }
@@ -852,53 +846,6 @@ fn rasterize_terminal_glyph(
         is_color,
         direct_draw_offset: None,
     }
-}
-
-fn rasterize_terminal_glyph_to_cell(
-    rasterizer: &mut Rasterizer,
-    font_key: FontKey,
-    size: Size,
-    key: WgpuTerminalGlyphKey,
-    base_cell_width_px: u32,
-) -> RasterizedTerminalGlyph {
-    let glyph = rasterize_terminal_glyph(rasterizer, font_key, size, key);
-    let Some(scaled_size_px) = glyph_rescaled_font_size_px(
-        size.as_px(),
-        glyph.width_px,
-        glyph.cell_width,
-        key.italic(),
-        base_cell_width_px,
-    ) else {
-        return glyph;
-    };
-
-    rasterize_terminal_glyph(rasterizer, font_key, Size::from_px(scaled_size_px), key)
-}
-
-fn glyph_rescaled_font_size_px(
-    font_size_px: f32,
-    glyph_width_px: u32,
-    glyph_cell_width: u32,
-    italic: bool,
-    base_cell_width_px: u32,
-) -> Option<f32> {
-    let maximum_width_px = base_cell_width_px.saturating_mul(glyph_cell_width.max(1));
-    let overflow_px = glyph_width_px.saturating_sub(maximum_width_px);
-
-    // Match Kitty's scalable-font behavior: if a glyph bitmap is substantially
-    // wider than its assigned terminal cells, rasterize it again at a
-    // proportionally smaller size. Preserve small italic bearings and the
-    // common two-pixel antialiasing overhang.
-    if maximum_width_px == 0
-        || overflow_px <= 1
-        || (glyph_cell_width == 1 && overflow_px == 2)
-        || (italic && overflow_px < base_cell_width_px / 2)
-    {
-        return None;
-    }
-
-    let scale = maximum_width_px as f32 / glyph_width_px as f32;
-    Some((font_size_px * scale).max(1.0))
 }
 
 fn crossfont_size_from_physical_px(font_size_px: f32) -> Size {
@@ -1869,16 +1816,33 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 mod tests {
     use super::{
         FontCoverage, GlyphAtlasGridLayout, RasterizedTerminalGlyph, WgpuCrossfontStrikeoutMetrics,
-        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, crossfont_size_from_physical_px,
-        crossfont_strikeout_metrics, crossfont_underline_metrics, glyph_rescaled_font_size_px,
+        WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey, build_atlas_from_rasterized_glyphs,
+        crossfont_size_from_physical_px, crossfont_strikeout_metrics, crossfont_underline_metrics,
         terminal_glyph_draw_offset,
     };
 
     #[test]
-    fn oversized_single_cell_glyph_uses_a_proportionally_smaller_font_size() {
-        let scaled_size_px = glyph_rescaled_font_size_px(30.0, 30, 1, false, 18);
+    fn oversized_nerd_font_icon_preserves_native_bitmap_geometry() {
+        let key = WgpuTerminalGlyphKey::styled('\u{e5ff}', false, false);
+        let glyph = RasterizedTerminalGlyph {
+            key,
+            cell_width: 1,
+            width_px: 30,
+            height_px: 26,
+            left_px: 0,
+            top_px: 22,
+            advance_px: 30,
+            pixels: vec![255; 30 * 26 * 4],
+            is_color: false,
+            direct_draw_offset: None,
+        };
+        let atlas = build_atlas_from_rasterized_glyphs(vec![glyph], 18, 30, 24, 1, 1, 4096);
+        let entry = atlas.entry_for_key(key).expect("folder glyph should exist");
 
-        assert_eq!(scaled_size_px, Some(18.0));
+        assert_eq!(entry.width_px, 30);
+        assert_eq!(entry.height_px, 26);
+        assert_eq!(entry.draw_width_px, 30);
+        assert_eq!(entry.draw_height_px, 26);
     }
 
     #[test]
