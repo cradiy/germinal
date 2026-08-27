@@ -236,14 +236,14 @@ impl RendererBackend for WgpuRendererBackend {
         for row in inner.rendered_rows.values() {
             quads.extend(row.background_quads.iter().copied());
         }
-        for row in &ime_rows {
-            quads.extend(row.background_quads.iter().copied());
-        }
         for row in inner.rendered_rows.values() {
             quads.extend(row.glyph_quads.iter().copied());
         }
         for row in inner.rendered_rows.values() {
             quads.extend(row.underline_quads.iter().copied());
+        }
+        for row in &ime_rows {
+            quads.extend(row.background_quads.iter().copied());
         }
         for row in &ime_rows {
             quads.extend(row.glyph_quads.iter().copied());
@@ -2259,6 +2259,87 @@ mod tests {
         assert_eq!(caret.len(), 1);
         assert_eq!((caret[0].x_px, caret[0].y_px), (16, 16));
         assert_eq!((caret[0].width_px, caret[0].height_px), (1, 16));
+    }
+
+    #[test]
+    fn ime_preedit_opaque_background_covers_terminal_glyphs() {
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+            cell_width_px: 8,
+            cell_height_px: 16,
+            content_origin_x: 0,
+            content_origin_y: 0,
+            content_width_px: 32,
+            content_height_px: 16,
+            grid_columns: 4,
+            grid_rows: 1,
+            blinking_cursor_visible: true,
+            ..WgpuRendererConfig::default()
+        });
+
+        backend.render_surface(&RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "x".to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: Some(RenderSurfaceCursorSnapshot {
+                x: 0,
+                y: 0,
+                focused: true,
+                shape: RenderSurfaceCursorShape::Block,
+                blinking: false,
+            }),
+            ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
+                text: "a".to_string(),
+                cursor_range: Some((0, 1)),
+            }),
+        });
+
+        let state = backend.state();
+        let terminal_glyph_index = state
+            .quads()
+            .iter()
+            .position(|quad| {
+                quad.kind
+                    == WgpuQuadKind::Glyph {
+                        glyph_key: WgpuTerminalGlyphKey::styled('x', false, false),
+                    }
+            })
+            .expect("terminal glyph must be rendered");
+        let ime_background_index = state
+            .quads()
+            .iter()
+            .position(|quad| {
+                quad.kind == WgpuQuadKind::Background
+                    && quad.x_px == 0
+                    && quad.y_px == 0
+                    && quad.width_px == 8
+            })
+            .expect("IME background must be rendered");
+        let ime_glyph_index = state
+            .quads()
+            .iter()
+            .position(|quad| {
+                quad.kind
+                    == WgpuQuadKind::Glyph {
+                        glyph_key: WgpuTerminalGlyphKey::styled('a', false, false),
+                    }
+            })
+            .expect("IME glyph must be rendered");
+
+        assert!(terminal_glyph_index < ime_background_index);
+        assert!(ime_background_index < ime_glyph_index);
+        assert_eq!(state.quads()[ime_background_index].alpha, u8::MAX);
     }
 
     #[test]
