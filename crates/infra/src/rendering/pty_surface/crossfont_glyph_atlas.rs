@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Color, Family, FeatureTag, FontFeatures, FontSystem,
     Metrics, Shaping, Style as CosmicStyle, SwashCache, Weight as CosmicWeight, Wrap, fontdb,
-    rustybuzz,
+    harfrust,
 };
 use crossfont::{
     BitmapBuffer, FontDesc, FontKey, GlyphKey, Rasterize, Rasterizer, Size, Slant, Style, Weight,
@@ -981,20 +981,20 @@ impl CosmicTextClusterRasterizer {
         let Some(font_id) = self.font_system.db().query(&query) else {
             return Vec::new();
         };
-        let Some(font) = self.font_system.get_font(font_id) else {
+        let Some(font) = self.font_system.get_font(font_id, weight) else {
             return Vec::new();
         };
 
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
         let features = [
-            rustybuzz_feature(b"liga"),
-            rustybuzz_feature(b"clig"),
-            rustybuzz_feature(b"calt"),
+            harfrust_feature(b"liga"),
+            harfrust_feature(b"clig"),
+            harfrust_feature(b"calt"),
         ];
-        let glyph_buffer = rustybuzz::shape(font.rustybuzz(), &features, buffer);
-        let scale = self.font_size_px / font.rustybuzz().units_per_em() as f32;
+        let glyph_buffer = font.shaper().shape(buffer, &features);
+        let scale = self.font_size_px / font.shaper().units_per_em() as f32;
         let mut pen_x = 0_i32;
         let mut pen_y = 0_i32;
         let mut drawn_pixels = Vec::new();
@@ -1011,6 +1011,7 @@ impl CosmicTextClusterRasterizer {
                 info.glyph_id as u16,
                 self.font_size_px,
                 (glyph_x, glyph_y),
+                weight,
                 CacheKeyFlags::empty(),
             );
             self.swash_cache.with_pixels(
@@ -1055,7 +1056,7 @@ impl CosmicTextClusterRasterizer {
         let mut buffer = buffer.borrow_with(&mut self.font_system);
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, Some(cell_height_px as f32));
-        buffer.set_text(text, &attrs, Shaping::Advanced);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(false);
 
         let mut drawn_pixels = Vec::new();
@@ -1074,12 +1075,8 @@ impl CosmicTextClusterRasterizer {
     }
 }
 
-fn rustybuzz_feature(tag: &[u8; 4]) -> rustybuzz::Feature {
-    rustybuzz::Feature::new(
-        rustybuzz::ttf_parser::Tag::from_bytes(tag),
-        1,
-        0..usize::MAX,
-    )
+fn harfrust_feature(tag: &[u8; 4]) -> harfrust::Feature {
+    harfrust::Feature::new(harfrust::Tag::new(tag), 1, 0..usize::MAX)
 }
 
 fn rasterized_cluster_from_pixels(
