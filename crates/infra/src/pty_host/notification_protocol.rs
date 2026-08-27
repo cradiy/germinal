@@ -87,10 +87,12 @@ impl Default for TerminalNotificationProtocolDecoder {
 }
 
 impl TerminalNotificationProtocolDecoder {
+    pub(crate) fn is_idle(&self) -> bool {
+        matches!(self.state, DecoderState::Ground) && self.utf8_continuations == 0
+    }
+
     pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
-        matches!(self.state, DecoderState::Ground)
-            && self.utf8_continuations == 0
-            && is_plain_ascii(input)
+        self.is_idle() && contains_no_osc_sequence(input)
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<NotificationProtocolEvent> {
@@ -315,8 +317,23 @@ impl TerminalNotificationProtocolDecoder {
     }
 }
 
-fn is_plain_ascii(input: &[u8]) -> bool {
-    !input.is_empty() && input.is_ascii() && !input.contains(&0x1b)
+fn contains_no_osc_sequence(input: &[u8]) -> bool {
+    if input.is_empty() || std::str::from_utf8(input).is_err() {
+        return false;
+    }
+
+    let mut cursor = 0;
+    while let Some(relative_escape) = input[cursor..].iter().position(|byte| *byte == 0x1b) {
+        let escape = cursor + relative_escape;
+        let Some(next) = input.get(escape + 1) else {
+            return false;
+        };
+        if *next == b']' {
+            return false;
+        }
+        cursor = escape + 1;
+    }
+    true
 }
 
 fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
@@ -516,6 +533,16 @@ fn query_response(identifier: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_path_accepts_plain_unicode_and_non_osc_control_sequences() {
+        let decoder = TerminalNotificationProtocolDecoder::default();
+
+        assert!(decoder.can_passthrough("终端性能".as_bytes()));
+        assert!(decoder.can_passthrough(b"\x1b[38;2;80;255;120mtext\x1b[0m"));
+        assert!(!decoder.can_passthrough(b"text\x1b"));
+        assert!(!decoder.can_passthrough(b"\x1b]9;done\x07"));
+    }
 
     #[test]
     fn consumes_legacy_osc_9_and_preserves_surrounding_text() {

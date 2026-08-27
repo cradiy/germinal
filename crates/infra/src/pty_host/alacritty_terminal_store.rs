@@ -375,6 +375,7 @@ impl AlacrittyTerminalStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_apply_passthrough_bytes(
         &self,
         render_target_id: RenderTargetId,
@@ -390,29 +391,33 @@ impl AlacrittyTerminalStore {
                 self.osc52_mode,
             )
         });
-        if !bytes.is_ascii()
-            || !state.graphics_decoder.can_passthrough(bytes)
-            || state.graphics.has_any_placements()
-        {
+        if !state.graphics_decoder.can_passthrough(bytes) || state.graphics.has_any_placements() {
             return None;
         }
 
-        let previous_selection = state.term.selection.clone();
-        // With no graphics placements and no escape byte, the graphics lifecycle parser cannot
-        // produce an event. Avoid feeding the same high-throughput text through a second VTE
-        // state machine; the regular path resumes as soon as graphics or an escape appears.
-        state.processor.advance(&mut state.term, bytes);
-        state.apply_pending_title_changes();
-        state.mark_selection_damage_if_changed(previous_selection);
-        state.latest_seq = seq;
-        state.total_bytes += bytes.len() as u64;
-        state.chunk_count += 1;
+        Some(apply_passthrough_bytes(state, seq, bytes))
+    }
 
-        Some(AlacrittyTermApplyStats {
-            latest_seq: state.latest_seq,
-            total_bytes: state.total_bytes,
-            chunk_count: state.chunk_count,
-        })
+    pub(crate) fn try_apply_verified_text_bytes(
+        &self,
+        render_target_id: RenderTargetId,
+        seq: Seq,
+        bytes: &[u8],
+    ) -> Option<AlacrittyTermApplyStats> {
+        let mut inner = self.inner.borrow_mut();
+        let state = inner.entry(render_target_id).or_insert_with(|| {
+            AlacrittyTermState::new(
+                self.size,
+                self.scrollback_history,
+                self.cursor_style,
+                self.osc52_mode,
+            )
+        });
+        if !state.graphics_decoder.is_idle() || state.graphics.has_any_placements() {
+            return None;
+        }
+
+        Some(apply_passthrough_bytes(state, seq, bytes))
     }
 
     pub fn resize(
@@ -1060,6 +1065,26 @@ impl AlacrittyTerminalStore {
             shape,
             blinking: state.term.cursor_style().blinking,
         })
+    }
+}
+
+fn apply_passthrough_bytes(
+    state: &mut AlacrittyTermState,
+    seq: Seq,
+    bytes: &[u8],
+) -> AlacrittyTermApplyStats {
+    let previous_selection = state.term.selection.clone();
+    state.processor.advance(&mut state.term, bytes);
+    state.apply_pending_title_changes();
+    state.mark_selection_damage_if_changed(previous_selection);
+    state.latest_seq = seq;
+    state.total_bytes += bytes.len() as u64;
+    state.chunk_count += 1;
+
+    AlacrittyTermApplyStats {
+        latest_seq: state.latest_seq,
+        total_bytes: state.total_bytes,
+        chunk_count: state.chunk_count,
     }
 }
 
@@ -2772,6 +2797,20 @@ mod tests {
         assert_eq!(snapshot.rows[0].runs[0].text, "plain");
         assert_eq!(snapshot.rows[0].runs[1].x, 6);
         assert_eq!(snapshot.rows[0].runs[1].text, "text");
+    }
+
+    #[test]
+    fn unicode_sgr_passthrough_updates_terminal_without_graphics() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(107);
+        let bytes = "\x1b[32m终端性能\x1b[0m\r\n".as_bytes();
+
+        store
+            .try_apply_passthrough_bytes(target_id, Seq::new(1), bytes)
+            .expect("Unicode text with SGR should use the passthrough path");
+
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        assert_eq!(snapshot.rows[0].runs[0].text, "终端性能");
     }
 
     #[test]

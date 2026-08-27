@@ -10,6 +10,7 @@ default = []
 media-gstreamer = ["germinal-infra/media-gstreamer"]
 
 [dependencies]
+clap.workspace = true
 germinal-application.workspace = true
 germinal-domain.workspace = true
 germinal-infra.workspace = true

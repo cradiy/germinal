@@ -46,7 +46,7 @@ use crate::{
     pty_host::{
         alacritty_terminal_store::{AlacrittyTermSize, AlacrittyTerminalStore},
         compatibility_protocol::{
-            CompatibilityProtocolEvent, TerminalCompatibilityProtocolDecoder,
+            CompatibilityProtocolEvent, TerminalCompatibilityProtocolDecoder, is_plain_text_or_sgr,
         },
         notification_protocol::{
             NotificationProtocolEvent, ShellIntegrationEvent, TerminalNotificationProtocolDecoder,
@@ -553,12 +553,13 @@ where
         let mut applied_visible_bytes = false;
         let mut enter_gnative = false;
 
-        let passthrough = self.gnative_enter_decoder.can_passthrough(bytes)
-            && self.compatibility_decoder.can_passthrough(bytes)
-            && self.notification_decoder.can_passthrough(bytes)
+        let passthrough = is_plain_text_or_sgr(bytes)
+            && self.gnative_enter_decoder.is_idle()
+            && self.compatibility_decoder.is_idle()
+            && self.notification_decoder.is_idle()
             && self
                 .terminal_store
-                .try_apply_passthrough_bytes(self.target_id, seq, bytes)
+                .try_apply_verified_text_bytes(self.target_id, seq, bytes)
                 .is_some();
         if passthrough {
             applied_visible_bytes = true;

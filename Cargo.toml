@@ -32,6 +32,7 @@ germinal-gnative-widgets = { path = "crates/gnative_widgets" }
 germinal-gnative-sdk = { path = "crates/gnative_sdk" }
 
 # util
+clap = { version = "4", features = ["derive"] }
 unicode-width = "0.2"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"

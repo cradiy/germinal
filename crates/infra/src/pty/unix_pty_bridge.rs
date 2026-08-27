@@ -32,6 +32,8 @@ use crate::pty::portable_pty_bridge::{
     PtyBridgeConfig, apply_default_terminal_env, apply_shell_env, to_portable_pty_size,
 };
 
+const PTY_READ_BUFFER_CAPACITY: usize = 64 * 1024;
+
 pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
     proxy: Dispatch,
     gshell_id: GShellId,
@@ -206,7 +208,9 @@ async fn read_pty_to_terminal_worker_async(
     use compio::{BufResult, io::AsyncRead};
 
     loop {
-        let BufResult(result, mut buffer) = reader.read(Vec::with_capacity(4096)).await;
+        let BufResult(result, mut buffer) = reader
+            .read(Vec::with_capacity(PTY_READ_BUFFER_CAPACITY))
+            .await;
         match result {
             Ok(0) => break,
             Ok(n) => {

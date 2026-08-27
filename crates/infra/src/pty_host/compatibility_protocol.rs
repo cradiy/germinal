@@ -42,10 +42,12 @@ pub(crate) struct TerminalCompatibilityProtocolDecoder {
 }
 
 impl TerminalCompatibilityProtocolDecoder {
+    pub(crate) fn is_idle(&self) -> bool {
+        matches!(self.state, DecoderState::Ground) && self.utf8_continuations == 0
+    }
+
     pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
-        matches!(self.state, DecoderState::Ground)
-            && self.utf8_continuations == 0
-            && is_plain_ascii(input)
+        self.is_idle() && is_plain_text_or_sgr(input)
     }
 
     #[cfg(test)]
@@ -411,8 +413,27 @@ impl TerminalCompatibilityProtocolDecoder {
     }
 }
 
-fn is_plain_ascii(input: &[u8]) -> bool {
-    !input.is_empty() && input.is_ascii() && !input.contains(&0x1b)
+pub(crate) fn is_plain_text_or_sgr(input: &[u8]) -> bool {
+    if input.is_empty() || std::str::from_utf8(input).is_err() {
+        return false;
+    }
+
+    let mut cursor = 0;
+    while let Some(relative_escape) = input[cursor..].iter().position(|byte| *byte == 0x1b) {
+        let escape = cursor + relative_escape;
+        if input.get(escape + 1) != Some(&b'[') {
+            return false;
+        }
+        let sequence = &input[escape + 2..];
+        let Some(final_index) = sequence.iter().position(|byte| is_csi_final(*byte)) else {
+            return false;
+        };
+        if sequence[final_index] != b'm' {
+            return false;
+        }
+        cursor = escape + 2 + final_index + 1;
+    }
+    true
 }
 
 fn parse_cursor_style(
@@ -639,6 +660,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn fast_path_accepts_plain_unicode_and_complete_sgr_only() {
+        let decoder = TerminalCompatibilityProtocolDecoder::new(
+            TerminalPtySize::new(24, 80, 960, 576),
+            TerminalColorTheme::default(),
+            "alacritty",
+        );
+
+        assert!(decoder.can_passthrough("终端性能".as_bytes()));
+        assert!(decoder.can_passthrough(b"\x1b[38;2;80;255;120mtext\x1b[0m\r\n"));
+        assert!(!decoder.can_passthrough(b"\x1b[38;2;80"));
+        assert!(!decoder.can_passthrough(b"\x1b[14t"));
+        assert!(!decoder.can_passthrough(b"\x1bP$q q\x1b\\"));
+    }
 
     #[test]
     fn answers_color_scheme_queries_and_consumes_update_mode() {

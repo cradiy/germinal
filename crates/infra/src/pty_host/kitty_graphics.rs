@@ -117,8 +117,12 @@ impl Default for KittyGraphicsStreamDecoder {
 }
 
 impl KittyGraphicsStreamDecoder {
+    pub(crate) fn is_idle(&self) -> bool {
+        matches!(self.state, DecoderState::Ground)
+    }
+
     pub(crate) fn can_passthrough(&self, input: &[u8]) -> bool {
-        matches!(self.state, DecoderState::Ground) && !input.is_empty() && !input.contains(&0x1b)
+        self.is_idle() && contains_no_kitty_apc(input)
     }
 
     pub(crate) fn feed(&mut self, input: &[u8]) -> Vec<KittyStreamEvent> {
@@ -186,6 +190,30 @@ impl KittyGraphicsStreamDecoder {
         flush_visible(&mut events, &mut visible);
         events
     }
+}
+
+fn contains_no_kitty_apc(input: &[u8]) -> bool {
+    if input.is_empty() || std::str::from_utf8(input).is_err() {
+        return false;
+    }
+
+    let mut cursor = 0;
+    while let Some(relative_escape) = input[cursor..].iter().position(|byte| *byte == 0x1b) {
+        let escape = cursor + relative_escape;
+        let Some(next) = input.get(escape + 1) else {
+            return false;
+        };
+        if *next == b'_' {
+            let Some(prefix) = input.get(escape + 2) else {
+                return false;
+            };
+            if *prefix == b'G' {
+                return false;
+            }
+        }
+        cursor = escape + 1;
+    }
+    true
 }
 
 fn push_apc_byte(bytes: &mut Vec<u8>, oversized: &mut bool, byte: u8) {
@@ -2559,6 +2587,8 @@ mod tests {
             decoder.feed(b"plain text\r\n"),
             vec![KittyStreamEvent::Bytes(b"plain text\r\n".to_vec())]
         );
+        assert!(decoder.can_passthrough("终端性能".as_bytes()));
+        assert!(decoder.can_passthrough(b"\x1b[31mred\x1b[0m"));
         assert!(decoder.feed(b"\x1b_").is_empty());
         assert_eq!(
             decoder.feed(b"Xnot-kitty"),
