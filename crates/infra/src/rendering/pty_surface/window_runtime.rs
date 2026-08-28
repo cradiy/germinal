@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     sync::Arc,
     time::{Duration, Instant},
@@ -759,10 +759,20 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_surface_snapshot(&mut self, mut snapshot: RenderSurfaceSnapshot) {
-        self.update_cursor_motion(&snapshot);
+        let visible = render_target_is_visible(&self.workspace_layout, snapshot.target_id);
+        if visible {
+            self.update_cursor_motion(&snapshot);
+        } else {
+            self.cursor_motions.remove(&snapshot.target_id);
+            if self.cursor_motions.is_empty() {
+                self.next_cursor_motion_frame_at = None;
+            }
+        }
         accumulate_pending_surface_damage(&mut self.pending_surface_dirty_rows, &mut snapshot);
         self.surface_snapshots.insert(snapshot.target_id, snapshot);
-        self.schedule_redraw();
+        if visible {
+            self.schedule_redraw();
+        }
     }
 
     pub fn update_ime_cursor_area(&self, target_id: RenderTargetId) -> bool {
@@ -804,6 +814,26 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_workspace_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        let visible_targets = placements
+            .iter()
+            .map(|placement| placement.target_id)
+            .collect::<HashSet<_>>();
+        let hidden_targets = self
+            .surface_snapshots
+            .keys()
+            .filter(|target_id| !visible_targets.contains(target_id))
+            .copied()
+            .collect::<Vec<_>>();
+        for target_id in hidden_targets {
+            self.presenter
+                .frame_renderer()
+                .release_render_target_cache(target_id);
+            self.cursor_motions.remove(&target_id);
+        }
+        if self.cursor_motions.is_empty() {
+            self.next_cursor_motion_frame_at = None;
+        }
+
         let scale_factor = self.scale_factor.value();
         for plugin in &mut self.render_plugins {
             let Some(placement) = placements
@@ -1311,6 +1341,15 @@ impl WgpuTerminalWindowRuntime {
             | WgpuTerminalSurfaceFramePresentError::Validation => {}
         }
     }
+}
+
+fn render_target_is_visible(
+    placements: &[RenderSurfacePlacement],
+    target_id: RenderTargetId,
+) -> bool {
+    placements
+        .iter()
+        .any(|placement| placement.target_id == target_id)
 }
 
 fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool, Instant) {
@@ -1984,9 +2023,20 @@ mod tests {
         CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, WgpuTerminalPowerPreference,
         accumulate_pending_surface_damage, build_cursor_motion, build_tab_bar_surface,
         cursor_blink_phase, frame_interval_for_refresh_rate, ime_cursor_area,
-        is_enter_cursor_motion, normalized_opacity, terminal_power_preference_for_device_types,
-        terminal_wgpu_backends, transparent_surface_alpha_mode,
+        is_enter_cursor_motion, normalized_opacity, render_target_is_visible,
+        terminal_power_preference_for_device_types, terminal_wgpu_backends,
+        transparent_surface_alpha_mode,
     };
+
+    #[test]
+    fn render_target_visibility_follows_workspace_layout() {
+        let visible_target = RenderTargetId::new(1);
+        let hidden_target = RenderTargetId::new(2);
+        let placements = [RenderSurfacePlacement::new(visible_target, 0, 0, 640, 480)];
+
+        assert!(render_target_is_visible(&placements, visible_target));
+        assert!(!render_target_is_visible(&placements, hidden_target));
+    }
 
     #[test]
     fn cursor_motion_uses_time_based_easing_and_finishes_exactly_at_target() {

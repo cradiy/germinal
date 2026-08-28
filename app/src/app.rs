@@ -68,6 +68,7 @@ use germinal_ports::{
     service::{
         gnative_service::IGNativeService,
         gshell_service::IGShellService,
+        pty_service::IPtyService,
         render_service::IRenderService,
         workspace_service::{IWorkspaceService, WorkspaceGShellCloseOutcome},
     },
@@ -374,6 +375,11 @@ impl App {
     }
 
     fn set_current_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        let visible_gshells = placements
+            .iter()
+            .map(|placement| GShellId::new(placement.target_id.value()))
+            .collect::<Vec<_>>();
+        self.set_visible_pty_gshells(&visible_gshells);
         self.sync_current_terminal_window_title();
         self.set_tab_bar(self.current_tab_bar_snapshot());
         self.set_workspace_render_layout(placements);

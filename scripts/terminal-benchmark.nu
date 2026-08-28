@@ -83,6 +83,20 @@ def wait-path [path: path, timeout: duration = 30sec] {
     fail $"Timed out waiting for ($path)."
 }
 
+def status-kib [status: list<string>, key: string, missing: int = 0] {
+    let matching = ($status | where {|line| $line starts-with $key })
+    if ($matching | is-empty) {
+        return $missing
+    }
+
+    $matching
+    | first
+    | str trim
+    | split row --regex '\s+'
+    | get 1
+    | into int
+}
+
 def process-snapshot [pid: int] {
     let stat_path = $"/proc/($pid)/stat"
     if not ($stat_path | path exists) {
@@ -106,31 +120,21 @@ def process-snapshot [pid: int] {
     } else {
         []
     }
-    let rss_lines = ($status | where {|line| $line starts-with "VmRSS:" })
-    let virtual_lines = ($status | where {|line| $line starts-with "VmSize:" })
-    if ($rss_lines | is-empty) or ($virtual_lines | is-empty) {
+    let rss = (status-kib $status "VmRSS:" -1)
+    let virtual = (status-kib $status "VmSize:" -1)
+    if $rss < 0 or $virtual < 0 {
         return null
     }
-    let rss = (
-        $rss_lines
-        | first
-        | parse --regex 'VmRSS:\s+(?<value>\d+)'
-        | get 0.value
-        | into int
-    )
-    let virtual = (
-        $virtual_lines
-        | first
-        | parse --regex 'VmSize:\s+(?<value>\d+)'
-        | get 0.value
-        | into int
-    )
 
     {
         pid: $pid
         timestamp_ns: (date now | into int)
         cpu_ticks: (($fields | get 11 | into int) + ($fields | get 12 | into int))
         rss_kib: $rss
+        rss_anon_kib: (status-kib $status "RssAnon:")
+        rss_file_kib: (status-kib $status "RssFile:")
+        rss_shmem_kib: (status-kib $status "RssShmem:")
+        swap_kib: (status-kib $status "VmSwap:")
         virtual_kib: $virtual
     }
 }
@@ -185,6 +189,10 @@ def sample-process [
             cpu_ticks_delta: $cpu_ticks
             cpu_percent: $cpu_percent
             rss_kib: $current.rss_kib
+            rss_anon_kib: $current.rss_anon_kib
+            rss_file_kib: $current.rss_file_kib
+            rss_shmem_kib: $current.rss_shmem_kib
+            swap_kib: $current.swap_kib
         })
         $previous = $current
     }
@@ -221,6 +229,10 @@ def summarize-case [
         cpu_avg_percent: ($cpu_avg | math round --precision 2)
         cpu_peak_percent: ($workload.cpu_percent | math max | math round --precision 2)
         rss_peak_mib: ((($workload.rss_kib | math max) / 1024.0) | math round --precision 2)
+        rss_anon_peak_mib: ((($workload.rss_anon_kib | math max) / 1024.0) | math round --precision 2)
+        rss_file_peak_mib: ((($workload.rss_file_kib | math max) / 1024.0) | math round --precision 2)
+        rss_shmem_peak_mib: ((($workload.rss_shmem_kib | math max) / 1024.0) | math round --precision 2)
+        swap_peak_mib: ((($workload.swap_kib | math max) / 1024.0) | math round --precision 2)
         timed_out: $sampled.timed_out
         result: $result
     }
@@ -518,6 +530,10 @@ def "main sample" [
             cpu_ticks_delta: $cpu_ticks
             cpu_percent_sum: $cpu_percent
             rss_bytes_sum: (($current.rss_kib | math sum) * 1024)
+            rss_anon_bytes_sum: (($current.rss_anon_kib | math sum) * 1024)
+            rss_file_bytes_sum: (($current.rss_file_kib | math sum) * 1024)
+            rss_shmem_bytes_sum: (($current.rss_shmem_kib | math sum) * 1024)
+            swap_bytes_sum: (($current.swap_kib | math sum) * 1024)
             virtual_bytes_sum: (($current.virtual_kib | math sum) * 1024)
         })
         $previous = $current
@@ -723,7 +739,10 @@ def "main germinal" [
     let summary_path = ($run_dir | path join "summary.csv")
     $summaries | to csv | save --force $summary_path
     print ""
-    print ($summaries | select case samples cpu_avg_percent cpu_peak_percent rss_peak_mib timed_out)
+    print (
+        $summaries
+        | select case samples cpu_avg_percent cpu_peak_percent rss_peak_mib rss_anon_peak_mib rss_file_peak_mib rss_shmem_peak_mib swap_peak_mib timed_out
+    )
     print $"Raw samples and summary: ($run_dir)"
 }
 

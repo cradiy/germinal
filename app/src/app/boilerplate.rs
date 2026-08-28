@@ -288,6 +288,10 @@ impl IPtyService for App {
         PtyService::inj_ref(self).send_pty_host_input(pty_host_id, event)
     }
 
+    fn set_visible_pty_gshells(&self, visible_gshells: &[GShellId]) {
+        PtyService::inj_ref(self).set_visible_pty_gshells(visible_gshells)
+    }
+
     fn remove_pty_host(&self, pty_host_id: PtyHostId) {
         PtyService::inj_ref(self).remove_pty_host(pty_host_id)
     }

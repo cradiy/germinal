@@ -65,11 +65,18 @@ impl WgpuTerminalFrameRenderer {
         self.glyph_atlas_gpu_cache = WgpuTerminalGlyphAtlasGpuCache::new();
     }
 
-    pub fn remove_render_target(&self, target_id: RenderTargetId) {
-        self.frame_builder.remove_render_target(target_id);
+    pub fn release_render_target_cache(&self, target_id: RenderTargetId) {
+        self.frame_builder.release_render_target_cache(target_id);
         self.buffer_uploader.remove_render_target(target_id);
         self.glyph_atlas_gpu_cache.remove_render_target(target_id);
         self.image_surface_renderer.remove_render_target(target_id);
+    }
+
+    pub fn remove_render_target(&self, target_id: RenderTargetId) {
+        self.release_render_target_cache(target_id);
+        self.frame_builder
+            .video_surface_registry()
+            .remove_render_target(target_id);
     }
 
     pub fn prepare(

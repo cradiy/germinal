@@ -129,6 +129,7 @@ struct ViSearch {
 #[target(PtyService)]
 pub struct PtyServiceState {
     pty_host_runtimes: RefCell<HashMap<PtyHostId, PtyPaneRuntime>>,
+    gshell_pty_hosts: RefCell<HashMap<GShellId, PtyHostId>>,
     reported_working_directories: RefCell<HashMap<PtyHostId, PathBuf>>,
     modifiers: RefCell<WindowInputModifiers>,
 }
@@ -137,6 +138,7 @@ impl PtyServiceState {
     pub fn new() -> Self {
         Self {
             pty_host_runtimes: RefCell::new(HashMap::new()),
+            gshell_pty_hosts: RefCell::new(HashMap::new()),
             reported_working_directories: RefCell::new(HashMap::new()),
             modifiers: RefCell::new(WindowInputModifiers::new(false, false, false, false)),
         }
@@ -226,6 +228,31 @@ where
                 vi_last_search: None,
             },
         );
+        state
+            .gshell_pty_hosts
+            .borrow_mut()
+            .insert(gshell_id, pty_host_id);
+    }
+
+    fn set_visible_pty_gshells(&self, visible_gshells: &[GShellId]) {
+        let state: &PtyServiceState = self.prj_ref().as_ref();
+        let visible_gshells = visible_gshells
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let gshell_pty_hosts = state.gshell_pty_hosts.borrow();
+        let runtimes = state.pty_host_runtimes.borrow();
+
+        for (gshell_id, pty_host_id) in gshell_pty_hosts.iter() {
+            let Some(runtime) = runtimes.get(pty_host_id) else {
+                continue;
+            };
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::SetVisible(
+                    visible_gshells.contains(gshell_id),
+                ));
+        }
     }
 
     fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent) {
@@ -330,6 +357,10 @@ where
     fn remove_pty_host(&self, pty_host_id: PtyHostId) {
         let state: &PtyServiceState = self.prj_ref().as_ref();
         state.pty_host_runtimes.borrow_mut().remove(&pty_host_id);
+        state
+            .gshell_pty_hosts
+            .borrow_mut()
+            .retain(|_, mapped_pty_host_id| *mapped_pty_host_id != pty_host_id);
         state
             .reported_working_directories
             .borrow_mut()

@@ -286,6 +286,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     pending_bytes_len: usize,
 
     unpublished_seq: Option<Seq>,
+    visible: bool,
     last_hyperlinks: Vec<TerminalHyperlink>,
     next_clipboard_request_id: u64,
     pending_clipboard_loads: HashMap<u64, (TerminalClipboard, TerminalClipboardFormatter)>,
@@ -331,6 +332,7 @@ where
             pending_bytes_len: 0,
 
             unpublished_seq: None,
+            visible: true,
             last_hyperlinks: Vec::new(),
             next_clipboard_request_id: 1,
             pending_clipboard_loads: HashMap::new(),
@@ -389,6 +391,10 @@ where
 
                 self.pending_bytes_len += bytes.len();
                 self.pending_chunks.push(bytes);
+            }
+            TerminalWorkerInput::SetVisible(visible) => {
+                self.flush_pending_input();
+                self.visible = visible;
             }
             TerminalWorkerInput::Resize(size) => {
                 self.flush_pending_input();
@@ -879,7 +885,7 @@ where
     }
 
     fn publish_unpublished_snapshot(&mut self) -> bool {
-        if self.unpublished_seq.is_none() {
+        if self.unpublished_seq.is_none() || !self.visible {
             return false;
         }
 
@@ -1773,6 +1779,41 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert!(text.contains("replacement"));
+    }
+
+    #[test]
+    fn hidden_terminal_defers_snapshot_until_it_becomes_visible() {
+        let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(6),
+            initial_size: TerminalPtySize::new(4, 20, 240, 96),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+
+        runtime.collect_input(TerminalWorkerInput::SetVisible(false));
+        let seq = runtime
+            .apply_byte_chunks(&[b"background output".to_vec()])
+            .unwrap();
+        runtime.unpublished_seq = Some(seq);
+
+        assert!(!runtime.publish_unpublished_snapshot());
+        assert!(snapshot_rx.try_recv().is_err());
+        assert_eq!(runtime.unpublished_seq, Some(seq));
+
+        runtime.collect_input(TerminalWorkerInput::SetVisible(true));
+
+        assert!(runtime.publish_unpublished_snapshot());
+        let snapshot = snapshot_rx
+            .try_recv()
+            .expect("latest hidden output should publish when visible");
+        assert_eq!(snapshot.latest_seq, seq);
     }
 
     #[test]

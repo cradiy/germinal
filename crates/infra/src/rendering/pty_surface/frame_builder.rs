@@ -103,11 +103,15 @@ impl WgpuTerminalFrameBuilder {
         self
     }
 
-    pub fn remove_render_target(&self, target_id: RenderTargetId) {
+    pub fn release_render_target_cache(&self, target_id: RenderTargetId) {
         self.glyph_atlas_frame_builder
             .remove_render_target(target_id);
-        self.video_surface_registry.remove_render_target(target_id);
         self.prepared_frame_cache.borrow_mut().remove(&target_id);
+    }
+
+    pub fn remove_render_target(&self, target_id: RenderTargetId) {
+        self.release_render_target_cache(target_id);
+        self.video_surface_registry.remove_render_target(target_id);
     }
 
     pub fn glyph_atlas_source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind {
@@ -466,5 +470,27 @@ mod tests {
             &first.vertex_buffer.vertices,
             &second.vertex_buffer.vertices,
         ));
+    }
+
+    #[test]
+    fn releasing_render_target_cache_forces_a_rebuild() {
+        let builder = WgpuTerminalFrameBuilder::default();
+        let snapshot = debug_snapshot(1);
+        let viewport = WgpuViewportUniform::new(640.0, 480.0);
+
+        let first = builder.build(&snapshot, viewport);
+        let cached = builder.build(&snapshot, viewport);
+        builder.release_render_target_cache(snapshot.target_id);
+        let rebuilt = builder.build(&snapshot, viewport);
+
+        assert!(Arc::ptr_eq(
+            &first.vertex_buffer.vertices,
+            &cached.vertex_buffer.vertices,
+        ));
+        assert!(!Arc::ptr_eq(
+            &cached.vertex_buffer.vertices,
+            &rebuilt.vertex_buffer.vertices,
+        ));
+        assert!(!rebuilt.glyph_atlas_frame.cache_hit);
     }
 }

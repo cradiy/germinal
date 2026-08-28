@@ -97,6 +97,7 @@ impl TerminalSelectionPoint {
 
 pub enum TerminalWorkerInput {
     Bytes(Vec<u8>),
+    SetVisible(bool),
     Resize(TerminalPtySize),
     ScrollDisplay(TerminalDisplayScroll),
     StartSelection {

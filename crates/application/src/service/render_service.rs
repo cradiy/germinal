@@ -197,9 +197,6 @@ where
                 .expect("window runtime must be initialized before use")
                 .set_surface_snapshot(snapshot);
         }
-
-        let state: &mut RenderServiceState = self.prj_ref_mut().as_mut();
-        state.redraw_pending = true;
     }
 
     fn current_terminal_size_info(&self) -> TerminalSizeInfo {
