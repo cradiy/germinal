@@ -72,6 +72,17 @@ def wait-main-pid [unit: string, timeout: duration = 10sec] {
     fail $"Timed out waiting for ($unit) to expose its MainPID."
 }
 
+def wait-path [path: path, timeout: duration = 30sec] {
+    let deadline = (date now) + $timeout
+    while (date now) < $deadline {
+        if ($path | path exists) {
+            return
+        }
+        sleep 10ms
+    }
+    fail $"Timed out waiting for ($path)."
+}
+
 def process-snapshot [pid: int] {
     let stat_path = $"/proc/($pid)/stat"
     if not ($stat_path | path exists) {
@@ -306,6 +317,8 @@ def run-suite-case [
     interval: duration
     font_family: string
     font_size: float
+    perf_seconds: int
+    perf_frequency: int
 ] {
     let case_dir = ($run_dir | path join $case.name)
     let config_home = ($case_dir | path join "config")
@@ -313,7 +326,9 @@ def run-suite-case [
     let signal_dir = ($case_dir | path join "signals")
     let config_path = ($config_home | path join "germinal" "config.toml")
     let raw_path = ($case_dir | path join "samples.csv")
+    let perf_path = ($case_dir | path join "perf.data")
     let result_path = ($signal_dir | path join "result.txt")
+    let started_path = ($signal_dir | path join "started")
     mkdir $signal_dir
     write-suite-config $config_path $script $benchmark $signal_dir $case.workload $text_profile $case.shader $refresh_hz $idle_ms $paced_duration_ms $flood_lines $columns $warmup_ms $post_hold_ms $font_family $font_size
 
@@ -351,9 +366,41 @@ def run-suite-case [
         fail $"Failed to start ($case.name): ($launch.stderr | str trim)"
     }
     let pid = (wait-main-pid $unit)
+    let perf_unit = $"germinal-bench-perf-($nu.pid)-($index).service"
+    let should_profile = $perf_seconds > 0 and $case.workload == "flood-ascii"
+    if $should_profile {
+        wait-path $started_path
+        let perf_launch = (
+            ^systemd-run
+                --user
+                --quiet
+                --no-block
+                --collect
+                --service-type=exec
+                $"--unit=($perf_unit)"
+                perf record
+                --output $perf_path
+                --freq $perf_frequency
+                --call-graph fp
+                --pid $pid
+                -- sleep $perf_seconds
+            | complete
+        )
+        if $perf_launch.exit_code != 0 {
+            let _ = (^systemctl --user stop $unit | complete)
+            fail $"Failed to start perf for ($case.name): ($perf_launch.stderr | str trim)"
+        }
+    }
     let sampled = (sample-process $pid $signal_dir --interval $interval)
     $sampled.samples | to csv | save --force $raw_path
     let _ = (^systemctl --user stop $unit | complete)
+    if $should_profile {
+        let _ = (^systemctl --user stop $perf_unit | complete)
+        if not ($perf_path | path exists) {
+            fail $"perf did not produce ($perf_path)."
+        }
+        print $"perf data: ($perf_path)"
+    }
 
     let summary = (summarize-case $case.name $sampled $result_path)
     print $summary
@@ -561,11 +608,19 @@ def "main germinal" [
     --interval: duration = 100ms
     --font-family: string = ""
     --font-size: float = 20.0
+    --perf-seconds: int = 0
+    --perf-frequency: int = 749
     --skip-shader
     --skip-build
 ] {
     if not ($text_profile in ["ascii" "unicode"]) {
         fail $"--text-profile must be ascii or unicode, got: ($text_profile)"
+    }
+    if $perf_seconds < 0 {
+        fail $"--perf-seconds must not be negative, got: ($perf_seconds)"
+    }
+    if $perf_frequency < 1 {
+        fail $"--perf-frequency must be positive, got: ($perf_frequency)"
     }
 
     let repo_root = ($env.FILE_PWD | path dirname | path expand)
@@ -598,6 +653,9 @@ def "main germinal" [
         if (which $program | is-empty) {
             fail $"Required benchmark command is not installed: ($program)"
         }
+    }
+    if $perf_seconds > 0 and (which perf | is-empty) {
+        fail "--perf-seconds requires perf to be installed."
     }
 
     let stamp = (date now | format date "%Y%m%d-%H%M%S")
@@ -643,6 +701,8 @@ def "main germinal" [
                 $interval
                 $font_family
                 $font_size
+                $perf_seconds
+                $perf_frequency
         )
         $summaries = ($summaries | append $summary)
     }

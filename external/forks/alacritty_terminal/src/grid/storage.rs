@@ -152,11 +152,10 @@ impl<T> Storage<T> {
     /// Exploits the known size of Row<T> to produce a slightly more efficient
     /// swap than going through slice::swap.
     ///
-    /// The default implementation from swap generates 8 movups and 4 movaps
-    /// instructions. This implementation achieves the swap in only 8 movups
-    /// instructions.
+    /// The default implementation adds extra overlap checks. This fixed-size copy keeps the
+    /// row metadata swap straightforward for the current five-word representation.
     pub fn swap(&mut self, a: Line, b: Line) {
-        debug_assert_eq!(mem::size_of::<Row<T>>(), mem::size_of::<usize>() * 4);
+        debug_assert_eq!(mem::size_of::<Row<T>>(), mem::size_of::<usize>() * 5);
 
         let a = self.compute_index(a);
         let b = self.compute_index(b);
@@ -172,7 +171,7 @@ impl<T> Storage<T> {
             //
             // The optimizer unrolls this loop and vectorizes it.
             let mut tmp: MaybeUninit<usize>;
-            for i in 0..4 {
+            for i in 0..5 {
                 tmp = *a_ptr.offset(i);
                 *a_ptr.offset(i) = *b_ptr.offset(i);
                 *b_ptr.offset(i) = tmp;

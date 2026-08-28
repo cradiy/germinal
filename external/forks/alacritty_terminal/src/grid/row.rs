@@ -22,6 +22,18 @@ pub struct Row<T> {
     /// This is the upper bound on the number of elements in the row, which have been modified
     /// since the last reset. All cells after this point are guaranteed to be equal.
     pub(crate) occ: usize,
+
+    /// Whether ordinary mutation might have introduced dynamic or width-sensitive cell state.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip, default = "may_have_complex_after_deserialize")
+    )]
+    may_have_complex: bool,
+}
+
+#[cfg(feature = "serde")]
+fn may_have_complex_after_deserialize() -> bool {
+    true
 }
 
 impl<T: PartialEq> PartialEq for Row<T> {
@@ -52,7 +64,11 @@ impl<T: Default> Row<T> {
             inner.set_len(columns);
         }
 
-        Row { inner, occ: 0 }
+        Row {
+            inner,
+            occ: 0,
+            may_have_complex: false,
+        }
     }
 
     /// Increase the number of columns in the row.
@@ -109,9 +125,14 @@ impl<T: Default> Row<T> {
         }
 
         // Reset every dirty cell in the row.
-        T::reset_slice(&mut self.inner[0..self.occ], template);
+        T::reset_slice(
+            &mut self.inner[0..self.occ],
+            template,
+            self.may_have_complex,
+        );
 
         self.occ = 0;
+        self.may_have_complex = false;
     }
 }
 
@@ -119,7 +140,11 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ }
+        Row {
+            inner: vec,
+            occ,
+            may_have_complex: true,
+        }
     }
 
     #[inline]
@@ -135,6 +160,7 @@ impl<T> Row<T> {
     #[inline]
     pub fn last_mut(&mut self) -> Option<&mut T> {
         self.occ = self.inner.len();
+        self.may_have_complex = true;
         self.inner.last_mut()
     }
 
@@ -144,12 +170,14 @@ impl<T> Row<T> {
         T: GridCell,
     {
         self.occ += vec.len();
+        self.may_have_complex = true;
         self.inner.append(vec);
     }
 
     #[inline]
     pub fn append_front(&mut self, mut vec: Vec<T>) {
         self.occ += vec.len();
+        self.may_have_complex = true;
 
         vec.append(&mut self.inner);
         self.inner = vec;
@@ -172,6 +200,25 @@ impl<T> Row<T> {
         std::mem::swap(&mut split, &mut self.inner);
         split
     }
+
+    /// Whether the row might contain dynamic content or wide-cell markers.
+    #[inline]
+    pub(crate) fn may_have_complex(&self) -> bool {
+        self.may_have_complex
+    }
+
+    /// Mutably access cells while guaranteeing that the caller only writes plain cells.
+    #[inline]
+    pub(crate) fn plain_range_mut(&mut self, range: Range<Column>) -> &mut [T] {
+        self.occ = max(self.occ, *range.end);
+        &mut self.inner[range.start.0..range.end.0]
+    }
+
+    /// Mark the entire row as containing only plain cells after a full-row overwrite.
+    #[inline]
+    pub(crate) fn mark_plain(&mut self) {
+        self.may_have_complex = false;
+    }
 }
 
 impl<'a, T> IntoIterator for &'a Row<T> {
@@ -191,6 +238,7 @@ impl<'a, T> IntoIterator for &'a mut Row<T> {
     #[inline]
     fn into_iter(self) -> slice::IterMut<'a, T> {
         self.occ = self.len();
+        self.may_have_complex = true;
         self.inner.iter_mut()
     }
 }
@@ -208,6 +256,7 @@ impl<T> IndexMut<Column> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Column) -> &mut T {
         self.occ = max(self.occ, *index + 1);
+        self.may_have_complex = true;
         &mut self.inner[index.0]
     }
 }
@@ -225,6 +274,7 @@ impl<T> IndexMut<Range<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Range<Column>) -> &mut [T] {
         self.occ = max(self.occ, *index.end);
+        self.may_have_complex = true;
         &mut self.inner[(index.start.0)..(index.end.0)]
     }
 }
@@ -242,6 +292,7 @@ impl<T> IndexMut<RangeTo<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeTo<Column>) -> &mut [T] {
         self.occ = max(self.occ, *index.end);
+        self.may_have_complex = true;
         &mut self.inner[..(index.end.0)]
     }
 }
@@ -259,6 +310,7 @@ impl<T> IndexMut<RangeFrom<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeFrom<Column>) -> &mut [T] {
         self.occ = self.len();
+        self.may_have_complex = true;
         &mut self.inner[(index.start.0)..]
     }
 }
@@ -276,6 +328,7 @@ impl<T> IndexMut<RangeFull> for Row<T> {
     #[inline]
     fn index_mut(&mut self, _: RangeFull) -> &mut [T] {
         self.occ = self.len();
+        self.may_have_complex = true;
         &mut self.inner[..]
     }
 }
@@ -293,6 +346,7 @@ impl<T> IndexMut<RangeToInclusive<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeToInclusive<Column>) -> &mut [T] {
         self.occ = max(self.occ, *index.end + 1);
+        self.may_have_complex = true;
         &mut self.inner[..=(index.end.0)]
     }
 }

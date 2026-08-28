@@ -266,14 +266,14 @@ impl GridCell for Cell {
     }
 
     #[inline]
-    fn reset_slice(cells: &mut [Self], template: &Self) {
+    fn reset_slice(cells: &mut [Self], template: &Self, may_have_complex: bool) {
         if cells.is_empty() {
             return;
         }
 
         // Dynamic cell content must be released normally. Plain terminal text does not allocate
         // `CellExtra`, so its rows can use a much cheaper block reset after this linear check.
-        if template.extra.is_some() || cells.iter().any(|cell| cell.extra.is_some()) {
+        if may_have_complex && cells.iter().any(|cell| cell.extra.is_some()) {
             for cell in cells {
                 cell.reset(template);
             }
@@ -393,7 +393,7 @@ mod tests {
             cell.fg = Color::Indexed(7);
             cell.flags = Flags::ITALIC;
         }
-        <Cell as GridCell>::reset_slice(&mut plain_cells, &Cell::default());
+        <Cell as GridCell>::reset_slice(&mut plain_cells, &Cell::default(), false);
         assert!(plain_cells.iter().all(|cell| cell == &Cell::default()));
 
         let mut cells = vec![Cell::default(); 8];
@@ -409,7 +409,7 @@ mod tests {
             bg: Color::Indexed(42),
             ..Cell::default()
         };
-        <Cell as GridCell>::reset_slice(&mut cells, &template);
+        <Cell as GridCell>::reset_slice(&mut cells, &template, true);
 
         assert!(dynamic.upgrade().is_none());
         assert!(cells.iter().all(|cell| {

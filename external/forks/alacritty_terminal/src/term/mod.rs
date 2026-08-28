@@ -1301,19 +1301,21 @@ impl<T: EventListener> Handler for Term<T> {
             let end = start + count;
             let range = Column(start)..Column(end);
             let fast_write = self.grid.cursor.template.extra.is_none()
-                && self.grid[line][range.clone()].iter().all(|cell| {
-                    cell.extra.is_none()
-                        && !cell
-                            .flags
-                            .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
-                });
+                && (!self.grid[line].may_have_complex()
+                    || self.grid[line][range.clone()].iter().all(|cell| {
+                        cell.extra.is_none()
+                            && !cell
+                                .flags
+                                .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                    }));
 
             if fast_write {
                 let charset = self.grid.cursor.charsets[self.active_charset];
                 let fg = self.grid.cursor.template.fg;
                 let bg = self.grid.cursor.template.bg;
                 let flags = self.grid.cursor.template.flags;
-                let cells = &mut self.grid[line][range];
+                let row = &mut self.grid[line];
+                let cells = row.plain_range_mut(range);
 
                 // The scan above guarantees that raw replacement cannot leak dynamic content or
                 // leave half of a wide glyph behind. This avoids one bounds update, wide-cell
@@ -1329,6 +1331,9 @@ impl<T: EventListener> Handler for Term<T> {
                             extra: None,
                         });
                     }
+                }
+                if start == 0 && end == columns {
+                    row.mark_plain();
                 }
 
                 if end < columns {

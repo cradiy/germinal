@@ -28,7 +28,7 @@ pub trait GridCell: Sized {
 
     /// Reset a contiguous range of cells based on a template cell.
     #[inline]
-    fn reset_slice(cells: &mut [Self], template: &Self) {
+    fn reset_slice(cells: &mut [Self], template: &Self, _may_have_complex: bool) {
         for cell in cells {
             cell.reset(template);
         }
