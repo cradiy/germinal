@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
@@ -8,7 +8,7 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::Pt
 use crate::{
     event::gshell_input::GShellInputEvent,
     pty_host::{spawn_config::PtySpawnConfig, terminal_size::TerminalPtySize},
-    rendering::surface_snapshot::RenderSurfaceSnapshot,
+    rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
 };
 
 pub trait IPtyService {
@@ -17,7 +17,7 @@ pub trait IPtyService {
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
         spawn_config: PtySpawnConfig,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     );
     fn send_pty_host_input(&self, pty_host_id: PtyHostId, event: GShellInputEvent);

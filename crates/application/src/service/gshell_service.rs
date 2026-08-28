@@ -2,7 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use germinal_domain::{
@@ -17,7 +17,7 @@ use germinal_domain::{
 use germinal_ports::{
     event::gshell_input::GShellInput,
     pty_host::{size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig},
-    rendering::surface_snapshot::RenderSurfaceSnapshot,
+    rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
     service::{
         gnative_service::IGNativeService, gshell_service::IGShellService, pty_service::IPtyService,
     },
@@ -135,7 +135,7 @@ where
         gshell_id: GShellId,
         spawn_config: PtySpawnConfig,
         term_size: TerminalGridSize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
         let state = <Deps as AsRef<GShellServiceState>>::as_ref(self.prj_ref());

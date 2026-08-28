@@ -35,7 +35,9 @@ use germinal_ports::{
             TerminalViTextObject, TerminalWorkerInput,
         },
     },
-    rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
+    rendering::{
+        render_target_id::RenderTargetId, surface_snapshot_mailbox::SurfaceSnapshotSender,
+    },
     seq::Seq,
 };
 use rayon::ThreadPool;
@@ -74,7 +76,7 @@ struct TerminalWorkerConfig<Dispatch> {
     cursor_style: TerminalCursorStyle,
     color_theme: TerminalColorTheme,
     osc52_mode: TerminalOsc52Mode,
-    surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: SurfaceSnapshotSender,
     snapshot_wake_pending: Arc<AtomicBool>,
 }
 
@@ -304,7 +306,7 @@ struct TerminalWorkerRuntime<Dispatch> {
 
     terminal_store: AlacrittyTerminalStore,
 
-    surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: SurfaceSnapshotSender,
     snapshot_wake_pending: Arc<AtomicBool>,
 
     pending_chunks: Vec<Vec<u8>>,
@@ -1274,7 +1276,7 @@ where
         &self,
         gshell_id: GShellId,
         initial_size: TerminalPtySize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput> {
         self.pool().spawn_terminal_worker(TerminalWorkerConfig {
@@ -1319,7 +1321,7 @@ mod tests {
                 TerminalSelectionSide, TerminalWorkerInput,
             },
         },
-        rendering::surface_snapshot::RenderSurfaceSnapshot,
+        rendering::surface_snapshot_mailbox::surface_snapshot_mailbox,
     };
 
     use super::{
@@ -1375,7 +1377,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
 
         let first_input = backend.spawn_terminal_worker(
             GShellId::new(1),
@@ -1439,7 +1441,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let input = backend.spawn_terminal_worker(
             GShellId::new(3),
             TerminalPtySize::new(24, 80, 960, 576),
@@ -1496,7 +1498,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let input = backend.spawn_terminal_worker(
             GShellId::new(4),
             TerminalPtySize::new(24, 80, 960, 576),
@@ -1540,7 +1542,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let input = backend.spawn_terminal_worker(
             GShellId::new(5),
             TerminalPtySize::new(24, 80, 960, 576),
@@ -1588,7 +1590,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let input = backend.spawn_terminal_worker(
             GShellId::new(8),
             TerminalPtySize::new(24, 80, 960, 576),
@@ -1628,7 +1630,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let input = backend.spawn_terminal_worker(
             GShellId::new(10),
             TerminalPtySize::new(24, 80, 960, 576),
@@ -1671,7 +1673,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let input = backend.spawn_terminal_worker(
             GShellId::new(6),
@@ -1718,7 +1720,7 @@ mod tests {
             1,
             TEST_SCROLLBACK_HISTORY,
         );
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let input = backend.spawn_terminal_worker(
             GShellId::new(7),
@@ -1780,7 +1782,7 @@ mod tests {
     #[test]
     fn terminal_worker_does_not_publish_mid_synchronized_update() {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
@@ -1829,7 +1831,7 @@ mod tests {
     #[test]
     fn hidden_terminal_defers_snapshot_until_it_becomes_visible() {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
             gshell_id: GShellId::new(6),
@@ -1864,7 +1866,7 @@ mod tests {
     #[test]
     fn terminal_worker_forwards_query_responses_after_pty_input_attaches() {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let (pty_tx, pty_rx) = pty_input_channel();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
@@ -1905,7 +1907,7 @@ mod tests {
     #[test]
     fn terminal_worker_forwards_fragmented_kitty_graphics_query_response() {
         let (event_tx, _event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let (pty_tx, pty_rx) = pty_input_channel();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
@@ -1940,7 +1942,7 @@ mod tests {
     #[test]
     fn terminal_worker_dispatches_osc_metadata_and_progress() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },
             gshell_id: GShellId::new(12),
@@ -1991,7 +1993,7 @@ mod tests {
     #[test]
     fn terminal_worker_round_trips_osc52_clipboard_requests() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let (pty_tx, pty_rx) = pty_input_channel();
         let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
             proxy: TestDispatcher { tx: event_tx },

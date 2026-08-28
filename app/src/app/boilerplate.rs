@@ -1,8 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::AtomicBool,
-    mpsc::{Sender, SyncSender},
-};
+use std::sync::{Arc, atomic::AtomicBool, mpsc::SyncSender};
 
 use germinal_application::service::{
     gnative_service::{GNativeService, GNativeServiceState},
@@ -32,7 +28,7 @@ use germinal_ports::{
         worker_input::TerminalWorkerInput,
     },
     rendering::{
-        render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot,
+        render_target_id::RenderTargetId, surface_snapshot_mailbox::SurfaceSnapshotSender,
         tab_bar::TabBarSnapshot, window_runtime::IRenderRuntimeStore,
         workspace_layout::RenderSurfacePlacement,
     },
@@ -217,7 +213,7 @@ impl IGShellService for App {
         gshell_id: GShellId,
         spawn_config: germinal_ports::pty_host::spawn_config::PtySpawnConfig,
         term_size: TerminalGridSize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
         GShellService::inj_ref(self).ensure_gshell(
@@ -272,7 +268,7 @@ impl IPtyService for App {
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
         spawn_config: germinal_ports::pty_host::spawn_config::PtySpawnConfig,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
         PtyService::inj_ref(self).ensure_gshell_pty(
@@ -354,7 +350,7 @@ impl IWorkerService for App {
         &self,
         gshell_id: GShellId,
         initial_size: TerminalPtySize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> Option<SyncSender<TerminalWorkerInput>> {
         WorkerService::inj_ref(self).spawn_terminal_worker(
@@ -371,7 +367,7 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).prepare_render_backend()
     }
 
-    fn surface_snapshot_sender(&self) -> Sender<RenderSurfaceSnapshot> {
+    fn surface_snapshot_sender(&self) -> SurfaceSnapshotSender {
         RenderService::inj_ref(self).surface_snapshot_sender()
     }
 

@@ -2,11 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::AtomicBool,
-        mpsc::{Sender, SyncSender},
-    },
+    sync::{Arc, atomic::AtomicBool, mpsc::SyncSender},
     time::{Duration, Instant},
 };
 
@@ -33,7 +29,7 @@ use germinal_ports::{
             TerminalViTextObject, TerminalWorkerInput,
         },
     },
-    rendering::surface_snapshot::RenderSurfaceSnapshot,
+    rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
     service::{
         gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
         pty_service::IPtyService,
@@ -164,7 +160,7 @@ where
         gshell_id: GShellId,
         pty_host_id: PtyHostId,
         spawn_config: PtySpawnConfig,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) {
         let state: &PtyServiceState = self.prj_ref().as_ref();

@@ -4,7 +4,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender},
     },
     time::Duration,
 };
@@ -15,6 +14,9 @@ use germinal_ports::{
         render_target_id::RenderTargetId,
         surface_snapshot::{
             RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot, merge_surface_dirty_rows,
+        },
+        surface_snapshot_mailbox::{
+            SurfaceSnapshotReceiver, SurfaceSnapshotSender, surface_snapshot_mailbox,
         },
         tab_bar::TabBarSnapshot,
         window_runtime::{IRenderRuntimeStore, ITerminalWindowRuntime},
@@ -33,14 +35,14 @@ pub struct RenderServiceState {
     retired_render_targets: HashSet<RenderTargetId>,
     latest_surface_seqs: RefCell<HashMap<RenderTargetId, Seq>>,
     ime_preedits: HashMap<RenderTargetId, RenderSurfaceImePreeditSnapshot>,
-    surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
-    surface_snapshot_rx: Receiver<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: SurfaceSnapshotSender,
+    surface_snapshot_rx: SurfaceSnapshotReceiver,
     snapshot_wake_pending: Arc<AtomicBool>,
 }
 
 impl RenderServiceState {
     pub fn new() -> Self {
-        let (surface_snapshot_tx, surface_snapshot_rx) = mpsc::channel::<RenderSurfaceSnapshot>();
+        let (surface_snapshot_tx, surface_snapshot_rx) = surface_snapshot_mailbox();
 
         Self {
             redraw_pending: false,
@@ -165,7 +167,7 @@ where
         state.request_redraw();
     }
 
-    fn surface_snapshot_sender(&self) -> Sender<RenderSurfaceSnapshot> {
+    fn surface_snapshot_sender(&self) -> SurfaceSnapshotSender {
         let state: &RenderServiceState = self.prj_ref().as_ref();
         state.surface_snapshot_tx.clone()
     }

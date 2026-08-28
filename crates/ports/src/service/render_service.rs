@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -7,14 +7,14 @@ use crate::{
     pty_host::{size_info::TerminalSizeInfo, window_size::TerminalWindowSize},
     rendering::{
         render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceImePreeditSnapshot,
-        surface_snapshot::RenderSurfaceSnapshot, tab_bar::TabBarSnapshot,
+        surface_snapshot_mailbox::SurfaceSnapshotSender, tab_bar::TabBarSnapshot,
         workspace_layout::RenderSurfacePlacement,
     },
 };
 
 pub trait IRenderService {
     fn prepare_render_backend(&mut self);
-    fn surface_snapshot_sender(&self) -> Sender<RenderSurfaceSnapshot>;
+    fn surface_snapshot_sender(&self) -> SurfaceSnapshotSender;
     fn snapshot_wake_pending(&self) -> Arc<AtomicBool>;
     fn consume_latest_terminal_snapshot(&mut self);
     fn current_terminal_size_info(&self) -> TerminalSizeInfo;

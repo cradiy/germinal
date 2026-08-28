@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::TerminalGridSize};
@@ -8,7 +8,7 @@ use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::terminal_size::
 use crate::{
     event::gshell_input::GShellInput,
     pty_host::{size_info::TerminalSizeInfo, spawn_config::PtySpawnConfig},
-    rendering::surface_snapshot::RenderSurfaceSnapshot,
+    rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
 };
 
 pub trait IGShellService {
@@ -17,7 +17,7 @@ pub trait IGShellService {
         gshell_id: GShellId,
         spawn_config: PtySpawnConfig,
         term_size: TerminalGridSize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     );
     fn begin_gnative_mode(&self, gshell_id: GShellId);

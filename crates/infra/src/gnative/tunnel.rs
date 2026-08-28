@@ -5,7 +5,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Sender},
+        mpsc,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -38,9 +38,8 @@ use germinal_ports::{
         frame_plan_builder::BuiltFramePlan,
         frame_plan_presenter::FramePlanPresenter,
         render_target_id::RenderTargetId,
-        surface_snapshot::{
-            RenderSurfaceCursorSnapshot, RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
-        },
+        surface_snapshot::{RenderSurfaceCursorSnapshot, RenderSurfaceSnapshotProvider},
+        surface_snapshot_mailbox::SurfaceSnapshotSender,
     },
     service::gnative_tunnel::{GNativeTunnelError, IGNativeTunnel},
 };
@@ -62,7 +61,7 @@ pub struct GNativeTunnel<Dispatch> {
     dispatcher: RefCell<Option<Dispatch>>,
     media_bridge: RefCell<GNativeMediaBridgeHandle>,
     snapshot_wake_pending: RefCell<Arc<AtomicBool>>,
-    surface_snapshot_tx: RefCell<Option<Sender<RenderSurfaceSnapshot>>>,
+    surface_snapshot_tx: RefCell<Option<SurfaceSnapshotSender>>,
     accept_session_timeout: Duration,
 }
 
@@ -71,7 +70,7 @@ impl<Dispatch> GNativeTunnel<Dispatch> {
         &self,
         dispatcher: Dispatch,
         snapshot_wake_pending: Arc<AtomicBool>,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
     ) {
         *self.dispatcher.borrow_mut() = Some(dispatcher);
         snapshot_wake_pending.store(false, Ordering::Release);
@@ -207,7 +206,7 @@ enum TunnelCommand<Dispatch> {
         dispatcher: Dispatch,
         media_bridge: GNativeMediaBridgeHandle,
         snapshot_wake_pending: Arc<AtomicBool>,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         accept_timeout: Duration,
     },
     SendInput {
@@ -398,7 +397,7 @@ async fn accept_session_async<Dispatch>(
     dispatcher: Dispatch,
     media_bridge: GNativeMediaBridgeHandle,
     snapshot_wake_pending: Arc<AtomicBool>,
-    surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: SurfaceSnapshotSender,
 ) -> Result<(GNativeSessionAccepted, TcpStream), GNativeTunnelError>
 where
     Dispatch: IRuntimeEventDispatcher,
@@ -628,7 +627,7 @@ async fn read_frames_loop<Dispatch>(
     dispatcher: Dispatch,
     media_bridge: GNativeMediaBridgeHandle,
     snapshot_wake_pending: Arc<AtomicBool>,
-    surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: SurfaceSnapshotSender,
 ) where
     Dispatch: IRuntimeEventDispatcher,
 {
@@ -678,7 +677,7 @@ fn handle_app_mux_payload<Dispatch>(
     dispatcher: &Dispatch,
     media_bridge: &dyn IGNativeMediaBridge,
     snapshot_wake_pending: &AtomicBool,
-    surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: &SurfaceSnapshotSender,
     presenter: &TextSurfaceFramePlanPresenter,
 ) where
     Dispatch: IRuntimeEventDispatcher,
@@ -709,7 +708,7 @@ fn present_frame<Dispatch>(
     frame: GNativeFrame,
     dispatcher: &Dispatch,
     snapshot_wake_pending: &AtomicBool,
-    surface_snapshot_tx: &Sender<RenderSurfaceSnapshot>,
+    surface_snapshot_tx: &SurfaceSnapshotSender,
     presenter: &TextSurfaceFramePlanPresenter,
 ) where
     Dispatch: IRuntimeEventDispatcher,
@@ -837,7 +836,6 @@ mod tests {
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, Ordering},
-            mpsc,
         },
         time::{Duration, Instant},
     };
@@ -855,7 +853,9 @@ mod tests {
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
             runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
         },
-        rendering::render_target_id::RenderTargetId,
+        rendering::{
+            render_target_id::RenderTargetId, surface_snapshot_mailbox::surface_snapshot_mailbox,
+        },
         seq::Seq,
         service::gnative_tunnel::{GNativeTunnelError, IGNativeTunnel},
     };
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn begin_accept_is_non_blocking_and_timeout_dispatches_failure() {
         let dispatcher = TestDispatcher::default();
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let tunnel = GNativeTunnel::new_with_accept_timeout(Duration::from_millis(250))
             .expect("tunnel should initialize");
         tunnel.configure(
@@ -937,7 +937,7 @@ mod tests {
     fn present_frame_coalesces_frame_ready_wakeups_while_snapshot_is_pending() {
         let dispatcher = TestDispatcher::default();
         let wake_pending = AtomicBool::new(false);
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let presenter = TextSurfaceFramePlanPresenter::new();
         let gshell_id = GShellId::new(7);
 
@@ -978,20 +978,17 @@ mod tests {
             })
         );
         assert_eq!(
-            snapshot_rx.recv().expect("first snapshot").latest_seq,
-            super::gnative_surface_seq(Seq::new(1))
-        );
-        assert_eq!(
-            snapshot_rx.recv().expect("second snapshot").latest_seq,
+            snapshot_rx.try_recv().expect("latest snapshot").latest_seq,
             super::gnative_surface_seq(Seq::new(2))
         );
+        assert!(snapshot_rx.try_recv().is_err());
     }
 
     #[test]
     fn present_frame_drops_stale_frame_before_snapshot_and_wakeup() {
         let dispatcher = TestDispatcher::default();
         let wake_pending = AtomicBool::new(false);
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let presenter = TextSurfaceFramePlanPresenter::new();
         let gshell_id = GShellId::new(7);
 
@@ -1009,7 +1006,7 @@ mod tests {
             &presenter,
         );
         wake_pending.store(false, Ordering::Release);
-        let _ = snapshot_rx.recv().expect("new snapshot");
+        let _ = snapshot_rx.try_recv().expect("new snapshot");
         present_frame(
             gshell_id,
             GNativeFrame {
@@ -1040,7 +1037,7 @@ mod tests {
     fn present_frame_rejects_a_frame_for_another_gshell() {
         let dispatcher = TestDispatcher::default();
         let wake_pending = AtomicBool::new(false);
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let presenter = TextSurfaceFramePlanPresenter::new();
         let session_gshell_id = GShellId::new(7);
         let forged_gshell_id = GShellId::new(8);

@@ -314,6 +314,7 @@ mod tests {
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
             runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
         },
+        rendering::surface_snapshot_mailbox::surface_snapshot_mailbox,
         service::gnative_tunnel::IGNativeTunnel,
     };
 
@@ -356,7 +357,7 @@ mod tests {
 
     #[test]
     fn bootstrap_reads_viewport_pointer_and_focus_input() {
-        let (snapshot_tx, _snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
         let (event_tx, event_rx) = mpsc::channel();
         let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
         tunnel.configure(
@@ -426,7 +427,7 @@ mod tests {
 
     #[test]
     fn frame_writer_sends_frame_back_to_host() {
-        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
         let (event_tx, event_rx) = mpsc::channel();
         let tunnel = GNativeTunnel::new().expect("tunnel should initialize");
         tunnel.configure(

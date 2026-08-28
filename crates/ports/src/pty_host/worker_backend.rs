@@ -1,14 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::AtomicBool,
-    mpsc::{Sender, SyncSender},
-};
+use std::sync::{Arc, atomic::AtomicBool, mpsc::SyncSender};
 
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 
 use crate::{
     pty_host::{terminal_size::TerminalPtySize, worker_input::TerminalWorkerInput},
-    rendering::surface_snapshot::RenderSurfaceSnapshot,
+    rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
 };
 
 pub trait ITerminalWorkerBackend {
@@ -17,7 +13,7 @@ pub trait ITerminalWorkerBackend {
         &self,
         gshell_id: GShellId,
         initial_size: TerminalPtySize,
-        surface_snapshot_tx: Sender<RenderSurfaceSnapshot>,
+        surface_snapshot_tx: SurfaceSnapshotSender,
         snapshot_wake_pending: Arc<AtomicBool>,
     ) -> SyncSender<TerminalWorkerInput>;
 }
