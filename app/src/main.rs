@@ -3,6 +3,7 @@ mod app;
 use clap::Parser;
 use eros::Context;
 use germinal_ports::event::runtime_event::RuntimeEvent;
+use std::process::ExitCode;
 use tracing::info;
 use winit::event_loop::EventLoop;
 
@@ -10,8 +11,20 @@ use winit::event_loop::EventLoop;
 #[command(version, about = "A GPU-accelerated terminal emulator")]
 struct Cli;
 
-fn main() -> eros::Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            app::report_fatal_error(&error);
+            eprintln!("Germinal failed: {error:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> eros::Result<()> {
     Cli::parse();
+    app::prepare_crash_reporting();
 
     let (config, paths) = app::load_or_create_config().context("failed to load Germinal config")?;
     app::init_logging(&config.logging, &paths).context("failed to initialize Germinal logging")?;

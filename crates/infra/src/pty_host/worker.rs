@@ -1,7 +1,9 @@
 use std::{
+    any::Any,
     collections::HashMap,
     env,
     num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -247,13 +249,28 @@ fn run_terminal_worker_lane<Dispatch>(
 
         let mut index = 0;
         while index < workers.len() {
-            match workers[index].tick() {
-                TerminalWorkerTick::Idle => index += 1,
-                TerminalWorkerTick::Progressed => {
+            let tick = catch_unwind(AssertUnwindSafe(|| workers[index].tick()));
+            match tick {
+                Err(payload) => {
+                    let worker = workers.swap_remove(index);
+                    error!(
+                        gshell_id = worker.runtime.gshell_id.value(),
+                        panic = panic_payload_message(payload.as_ref()),
+                        "terminal worker panicked; closing only the affected terminal"
+                    );
+                    let _ = worker.runtime.proxy.dispatch(RuntimeEvent::GShell(
+                        GShellRuntimeEvent::Closed {
+                            gshell_id: worker.runtime.gshell_id,
+                        },
+                    ));
+                    progressed = true;
+                }
+                Ok(TerminalWorkerTick::Idle) => index += 1,
+                Ok(TerminalWorkerTick::Progressed) => {
                     progressed = true;
                     index += 1;
                 }
-                TerminalWorkerTick::Finished => {
+                Ok(TerminalWorkerTick::Finished) => {
                     progressed = true;
                     workers.swap_remove(index);
                 }
@@ -268,6 +285,14 @@ fn run_terminal_worker_lane<Dispatch>(
             thread::park_timeout(PUBLISH_RETRY_INTERVAL);
         }
     }
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 struct TerminalWorkerRuntime<Dispatch> {
@@ -1299,10 +1324,30 @@ mod tests {
 
     use super::{
         PlatformTerminalWorkerBackend, TerminalColorTheme, TerminalCursorStyle, TerminalOsc52Mode,
-        TerminalWorkerConfig, TerminalWorkerRuntime,
+        TerminalWorkerConfig, TerminalWorkerRuntime, panic_payload_message,
     };
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
+
+    #[test]
+    fn panic_payloads_keep_useful_messages() {
+        let static_message: Box<dyn std::any::Any + Send> = Box::new("static failure");
+        let owned_message: Box<dyn std::any::Any + Send> = Box::new("owned failure".to_owned());
+        let opaque_payload: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+
+        assert_eq!(
+            panic_payload_message(static_message.as_ref()),
+            "static failure"
+        );
+        assert_eq!(
+            panic_payload_message(owned_message.as_ref()),
+            "owned failure"
+        );
+        assert_eq!(
+            panic_payload_message(opaque_payload.as_ref()),
+            "non-string panic payload"
+        );
+    }
 
     #[derive(Clone)]
     struct TestDispatcher {

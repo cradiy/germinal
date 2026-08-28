@@ -143,6 +143,7 @@ fn terminal_power_preference_for_device_types(
 pub struct WgpuTerminalWindowRuntime {
     window: Arc<Window>,
     base_title: String,
+    instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -305,6 +306,24 @@ fn terminal_wgpu_backends() -> wgpu::Backends {
 
 const LOW_LATENCY_SURFACE_FRAME_QUEUE: u32 = 1;
 const DEFAULT_CURSOR_MOTION_DURATION: Duration = Duration::from_millis(80);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceFrameRecovery {
+    Wait,
+    Retry,
+    Reconfigure,
+    Recreate,
+}
+
+fn surface_frame_recovery(error: WgpuTerminalSurfaceFramePresentError) -> SurfaceFrameRecovery {
+    match error {
+        WgpuTerminalSurfaceFramePresentError::Occluded => SurfaceFrameRecovery::Wait,
+        WgpuTerminalSurfaceFramePresentError::Timeout
+        | WgpuTerminalSurfaceFramePresentError::Validation => SurfaceFrameRecovery::Retry,
+        WgpuTerminalSurfaceFramePresentError::Outdated => SurfaceFrameRecovery::Reconfigure,
+        WgpuTerminalSurfaceFramePresentError::Lost => SurfaceFrameRecovery::Recreate,
+    }
+}
 
 fn frame_interval_for_refresh_rate(refresh_rate_millihertz: Option<u32>) -> Duration {
     let refresh_rate_millihertz = refresh_rate_millihertz
@@ -668,6 +687,7 @@ impl WgpuTerminalWindowRuntime {
         Ok(Self {
             window,
             base_title,
+            instance,
             surface,
             device,
             queue,
@@ -1330,15 +1350,31 @@ impl WgpuTerminalWindowRuntime {
     }
 
     fn handle_present_error(&mut self, error: WgpuTerminalSurfaceFramePresentError) {
-        match error {
-            WgpuTerminalSurfaceFramePresentError::Outdated
-            | WgpuTerminalSurfaceFramePresentError::Lost => {
+        match surface_frame_recovery(error) {
+            SurfaceFrameRecovery::Reconfigure => {
                 self.surface.configure(&self.device, &self.surface_config);
                 self.schedule_redraw();
             }
-            WgpuTerminalSurfaceFramePresentError::Timeout
-            | WgpuTerminalSurfaceFramePresentError::Occluded
-            | WgpuTerminalSurfaceFramePresentError::Validation => {}
+            SurfaceFrameRecovery::Recreate => {
+                match self.instance.create_surface(Arc::clone(&self.window)) {
+                    Ok(surface) => {
+                        surface.configure(&self.device, &self.surface_config);
+                        self.surface = surface;
+                        self.schedule_redraw();
+                        warn!("recreated lost terminal GPU surface");
+                    }
+                    Err(source) => {
+                        error!(%source, "failed to recreate lost terminal GPU surface");
+                    }
+                }
+            }
+            SurfaceFrameRecovery::Retry => {
+                if error == WgpuTerminalSurfaceFramePresentError::Validation {
+                    warn!("terminal GPU surface validation failed; retrying frame");
+                }
+                self.schedule_redraw();
+            }
+            SurfaceFrameRecovery::Wait => {}
         }
     }
 }
@@ -2020,13 +2056,38 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, WgpuTerminalPowerPreference,
-        accumulate_pending_surface_damage, build_cursor_motion, build_tab_bar_surface,
-        cursor_blink_phase, frame_interval_for_refresh_rate, ime_cursor_area,
-        is_enter_cursor_motion, normalized_opacity, render_target_is_visible,
-        terminal_power_preference_for_device_types, terminal_wgpu_backends,
+        CursorMotion, SurfaceFrameRecovery, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE,
+        WgpuTerminalPowerPreference, accumulate_pending_surface_damage, build_cursor_motion,
+        build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
+        ime_cursor_area, is_enter_cursor_motion, normalized_opacity, render_target_is_visible,
+        surface_frame_recovery, terminal_power_preference_for_device_types, terminal_wgpu_backends,
         transparent_surface_alpha_mode,
     };
+    use crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentError;
+
+    #[test]
+    fn surface_errors_choose_recoverable_actions() {
+        assert_eq!(
+            surface_frame_recovery(WgpuTerminalSurfaceFramePresentError::Timeout),
+            SurfaceFrameRecovery::Retry
+        );
+        assert_eq!(
+            surface_frame_recovery(WgpuTerminalSurfaceFramePresentError::Validation),
+            SurfaceFrameRecovery::Retry
+        );
+        assert_eq!(
+            surface_frame_recovery(WgpuTerminalSurfaceFramePresentError::Outdated),
+            SurfaceFrameRecovery::Reconfigure
+        );
+        assert_eq!(
+            surface_frame_recovery(WgpuTerminalSurfaceFramePresentError::Lost),
+            SurfaceFrameRecovery::Recreate
+        );
+        assert_eq!(
+            surface_frame_recovery(WgpuTerminalSurfaceFramePresentError::Occluded),
+            SurfaceFrameRecovery::Wait
+        );
+    }
 
     #[test]
     fn render_target_visibility_follows_workspace_layout() {

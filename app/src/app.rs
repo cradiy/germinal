@@ -73,7 +73,7 @@ use germinal_ports::{
         workspace_service::{IWorkspaceService, WorkspaceGShellCloseOutcome},
     },
 };
-pub use logging::init_logging;
+pub use logging::{init_logging, prepare_crash_reporting, report_fatal_error};
 use paste::{HostPasteController, HostPasteModifiers};
 use tracing::{debug, error, warn};
 use winit::{

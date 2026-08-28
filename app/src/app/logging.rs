@@ -1,10 +1,11 @@
 use std::{
     backtrace::Backtrace,
+    fmt::{Debug, Display},
     fs::OpenOptions,
     io::{self, Write},
     panic,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,6 +19,29 @@ use crate::app::{
 };
 
 const CRASH_LOG_FILE_NAME: &str = "germinal-crash.log";
+static PANIC_HOOK: Once = Once::new();
+
+pub fn prepare_crash_reporting() {
+    let Ok(paths) = AppPaths::resolve() else {
+        return;
+    };
+    if create_dir_all(paths.log_dir()).is_err() {
+        return;
+    }
+    install_panic_hook(paths.log_dir().join(CRASH_LOG_FILE_NAME));
+}
+
+pub fn report_fatal_error(error: &(impl Debug + Display)) {
+    tracing::error!(error = ?error, "Germinal terminated with a fatal error");
+
+    let Ok(paths) = AppPaths::resolve() else {
+        return;
+    };
+    if create_dir_all(paths.log_dir()).is_err() {
+        return;
+    }
+    write_fatal_error_record(&paths.log_dir().join(CRASH_LOG_FILE_NAME), error);
+}
 
 pub fn init_logging(config: &LoggingConfig, paths: &AppPaths) -> AppResult<()> {
     create_dir_all(paths.log_dir())?;
@@ -53,11 +77,13 @@ pub fn init_logging(config: &LoggingConfig, paths: &AppPaths) -> AppResult<()> {
 }
 
 fn install_panic_hook(crash_log_path: PathBuf) {
-    let default_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        write_crash_record(&crash_log_path, panic_info);
-        default_hook(panic_info);
-    }));
+    PANIC_HOOK.call_once(move || {
+        let default_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            write_crash_record(&crash_log_path, panic_info);
+            default_hook(panic_info);
+        }));
+    });
 }
 
 fn write_crash_record(path: &Path, panic_info: &panic::PanicHookInfo<'_>) {
@@ -97,6 +123,22 @@ fn write_crash_record(path: &Path, panic_info: &panic::PanicHookInfo<'_>) {
     let _ = writeln!(
         file,
         "timestamp_ms={timestamp_ms} pid={} thread={thread_name:?} location={location}\npanic: {payload}\nbacktrace:\n{backtrace}\n",
+        std::process::id(),
+    );
+    let _ = file.flush();
+}
+
+fn write_fatal_error_record(path: &Path, error: &(impl Debug + Display)) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "timestamp_ms={timestamp_ms} pid={} fatal: {error}\ndetails: {error:?}\n",
         std::process::id(),
     );
     let _ = file.flush();
@@ -148,5 +190,33 @@ impl Write for SharedFileWriter {
             Err(poisoned) => poisoned.into_inner(),
         };
         file.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io};
+
+    use super::write_fatal_error_record;
+
+    #[test]
+    fn fatal_errors_are_written_to_an_explicit_crash_log() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "germinal-crash-log-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::create_dir_all(&test_dir).expect("test crash-log directory should be created");
+        let crash_log = test_dir.join("crash.log");
+        let error = io::Error::other("startup failed");
+
+        write_fatal_error_record(&crash_log, &error);
+
+        let contents = fs::read_to_string(&crash_log).expect("crash log should be readable");
+        assert!(contents.contains("fatal: startup failed"));
+        assert!(contents.contains("details:"));
+
+        fs::remove_file(crash_log).expect("test crash log should be removed");
+        fs::remove_dir(test_dir).expect("test crash-log directory should be removed");
     }
 }
