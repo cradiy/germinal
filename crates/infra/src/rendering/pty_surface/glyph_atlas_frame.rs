@@ -33,6 +33,7 @@ pub struct WgpuTerminalGlyphAtlasFrame {
     pub char_count: usize,
     pub source: WgpuTerminalGlyphAtlasSourceKind,
     pub cache_hit: bool,
+    pub content_cache_hit: bool,
 }
 
 impl WgpuTerminalGlyphAtlasFrame {
@@ -123,6 +124,28 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
     }
 
     pub fn build(&self, surface_snapshot: &RenderSurfaceSnapshot) -> WgpuTerminalGlyphAtlasFrame {
+        let ime_preedit_text = surface_snapshot
+            .ime_preedit
+            .as_ref()
+            .map(|preedit| preedit.text.as_str());
+        if surface_snapshot.latest_seq.value() != 0
+            && let Some(entry) = self.cache.borrow().get(&surface_snapshot.target_id)
+            && entry.content_key.seq == surface_snapshot.latest_seq
+            && entry.content_key.ime_preedit_text.as_deref() == ime_preedit_text
+        {
+            return WgpuTerminalGlyphAtlasFrame {
+                target_id: surface_snapshot.target_id,
+                seq: surface_snapshot.latest_seq,
+                atlas: Arc::clone(&entry.atlas),
+                upload_bytes: entry.upload_bytes.clone(),
+                run_count: entry.run_count,
+                char_count: entry.char_count,
+                source: entry.key.source,
+                cache_hit: true,
+                content_cache_hit: true,
+            };
+        }
+
         let texts: Vec<&str> = surface_snapshot
             .rows
             .iter()
@@ -148,9 +171,19 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             source: self.source.kind(),
             glyphs: glyphs.iter().copied().collect(),
         };
+        let content_key = WgpuTerminalGlyphAtlasContentKey {
+            seq: surface_snapshot.latest_seq,
+            ime_preedit_text: ime_preedit_text.map(str::to_owned),
+        };
 
-        let (atlas, upload_bytes, cache_hit) =
-            self.cached_or_build_atlas(surface_snapshot.target_id, &cache_key, segments);
+        let (atlas, upload_bytes, cache_hit) = self.cached_or_build_atlas(
+            surface_snapshot.target_id,
+            &cache_key,
+            content_key,
+            run_count,
+            char_count,
+            segments,
+        );
 
         WgpuTerminalGlyphAtlasFrame {
             target_id: surface_snapshot.target_id,
@@ -161,6 +194,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             char_count,
             source: self.source.kind(),
             cache_hit,
+            content_cache_hit: false,
         }
     }
 
@@ -168,6 +202,9 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         &self,
         target_id: RenderTargetId,
         cache_key: &WgpuTerminalGlyphAtlasCacheKey,
+        content_key: WgpuTerminalGlyphAtlasContentKey,
+        run_count: usize,
+        char_count: usize,
         mut segments: BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment>,
     ) -> (
         Arc<WgpuTerminalGlyphAtlas>,
@@ -175,12 +212,15 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         bool,
     ) {
         {
-            let cache = self.cache.borrow();
+            let mut cache = self.cache.borrow_mut();
 
-            if let Some(entry) = cache.get(&target_id)
+            if let Some(entry) = cache.get_mut(&target_id)
                 && entry.key.source == cache_key.source
                 && entry.key == *cache_key
             {
+                entry.content_key = content_key.clone();
+                entry.run_count = run_count;
+                entry.char_count = char_count;
                 return (Arc::clone(&entry.atlas), entry.upload_bytes.clone(), true);
             }
         }
@@ -203,8 +243,11 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                 target_id,
                 WgpuTerminalGlyphAtlasCacheEntry {
                     key: cache_key.clone(),
+                    content_key,
                     atlas: Arc::clone(&atlas),
                     upload_bytes: upload_bytes.clone(),
+                    run_count,
+                    char_count,
                 },
             );
         }
@@ -310,11 +353,20 @@ struct WgpuTerminalGlyphAtlasCacheKey {
     glyphs: Vec<WgpuTerminalGlyphKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WgpuTerminalGlyphAtlasContentKey {
+    seq: Seq,
+    ime_preedit_text: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct WgpuTerminalGlyphAtlasCacheEntry {
     key: WgpuTerminalGlyphAtlasCacheKey,
+    content_key: WgpuTerminalGlyphAtlasContentKey,
     atlas: Arc<WgpuTerminalGlyphAtlas>,
     upload_bytes: Option<WgpuTerminalGlyphAtlasUploadBytes>,
+    run_count: usize,
+    char_count: usize,
 }
 
 fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerminalGlyphKey> {
@@ -369,10 +421,12 @@ fn include_core_ascii_segments(segments: &mut BTreeMap<WgpuTerminalGlyphKey, Ter
         segments
             .entry(glyph_key)
             .or_insert_with(|| TerminalTextSegment {
-                text: glyph_key
-                    .character()
-                    .expect("core ASCII glyphs are characters")
-                    .to_string(),
+                text: std::iter::once(
+                    glyph_key
+                        .character()
+                        .expect("core ASCII glyphs are characters"),
+                )
+                .collect(),
                 cell_width: 1,
                 glyph_key,
                 shaped: false,
@@ -519,7 +573,9 @@ mod tests {
         let second = builder.build(&snapshot);
 
         assert!(!first.cache_hit);
+        assert!(!first.content_cache_hit);
         assert!(second.cache_hit);
+        assert!(second.content_cache_hit);
         assert_eq!(first.atlas, second.atlas);
         assert!(Arc::ptr_eq(&first.atlas, &second.atlas));
         assert!(Arc::ptr_eq(
@@ -578,7 +634,49 @@ mod tests {
         let second = builder.build(&blue_snapshot);
 
         assert!(!first.cache_hit);
+        assert!(!first.content_cache_hit);
         assert!(!second.cache_hit);
+        assert!(!second.content_cache_hit);
+    }
+
+    #[test]
+    fn changed_ime_text_invalidates_content_cache_without_terminal_output() {
+        let target_id = RenderTargetId::new(1);
+        let mut snapshot = RenderSurfaceSnapshot {
+            target_id,
+            latest_seq: Seq::new(9),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "red".to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            video_surfaces: vec![],
+            image_surfaces: vec![],
+            dirty_rows: vec![0],
+            cursor: None,
+            ime_preedit: None,
+        };
+        let builder = WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7();
+
+        let first = builder.build(&snapshot);
+        snapshot.ime_preedit = Some(RenderSurfaceImePreeditSnapshot {
+            text: "z".to_string(),
+            cursor_range: Some((0, 0)),
+        });
+        let changed_text = builder.build(&snapshot);
+        snapshot.ime_preedit.as_mut().unwrap().cursor_range = Some((1, 1));
+        let changed_cursor_only = builder.build(&snapshot);
+
+        assert!(!first.content_cache_hit);
+        assert!(!changed_text.content_cache_hit);
+        assert!(changed_text.atlas.has_glyph('z'));
+        assert!(changed_cursor_only.content_cache_hit);
+        assert!(Arc::ptr_eq(&changed_text.atlas, &changed_cursor_only.atlas));
     }
 
     #[test]

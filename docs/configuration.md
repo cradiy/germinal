@@ -227,7 +227,7 @@ Available actions:
 
 ```toml
 [logging]
-console_level = "debug"
+console_level = "info"
 file_level = "info"
 ```
 

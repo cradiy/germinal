@@ -95,7 +95,7 @@ impl WgpuVertexBuffer {
 pub struct WgpuGpuVertex {
     pub position_px: [f32; 2],
     pub uv: [f32; 2],
-    pub color: [f32; 4],
+    pub color: [u16; 4],
     pub kind: u32,
     pub glyph_codepoint: u32,
 }
@@ -107,7 +107,7 @@ impl WgpuGpuVertex {
         Self {
             position_px: [vertex.x_px, vertex.y_px],
             uv: [vertex.u, vertex.v],
-            color: normalize_color(vertex.color),
+            color: packed_color(vertex.color),
             kind,
             glyph_codepoint,
         }
@@ -128,15 +128,15 @@ impl WgpuGpuVertex {
             wgpu::VertexAttribute {
                 offset: 16,
                 shader_location: 2,
-                format: wgpu::VertexFormat::Float32x4,
+                format: wgpu::VertexFormat::Unorm16x4,
             },
             wgpu::VertexAttribute {
-                offset: 32,
+                offset: 24,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Uint32,
             },
             wgpu::VertexAttribute {
-                offset: 36,
+                offset: 28,
                 shader_location: 4,
                 format: wgpu::VertexFormat::Uint32,
             },
@@ -210,7 +210,7 @@ fn gpu_vertices_of_quad(
     glyph_uv_map_result: &mut WgpuTerminalGlyphUvMapResult,
 ) -> [WgpuGpuVertex; 4] {
     let (kind, glyph_codepoint) = gpu_kind_and_codepoint(kind_of_quad(quad.kind));
-    let color = normalize_color(color_of_quad(quad));
+    let color = packed_color(color_of_quad(quad));
     let (x0, y0, x1, y1, uv) = glyph_quad_geometry_and_uv(quad, atlas, glyph_uv_map_result)
         .unwrap_or((
             quad.x_px as f32,
@@ -363,23 +363,24 @@ fn color_or(color: Option<RgbColorDto>, fallback: WgpuVertexColor) -> WgpuVertex
         None => fallback,
     }
 }
-fn normalize_color(color: WgpuVertexColor) -> [f32; 4] {
+fn packed_color(color: WgpuVertexColor) -> [u16; 4] {
     [
-        srgb_u8_to_linear_f32(color.red),
-        srgb_u8_to_linear_f32(color.green),
-        srgb_u8_to_linear_f32(color.blue),
-        color.alpha as f32 / 255.0,
+        srgb_u8_to_linear_u16(color.red),
+        srgb_u8_to_linear_u16(color.green),
+        srgb_u8_to_linear_u16(color.blue),
+        u16::from(color.alpha) * 257,
     ]
 }
-fn srgb_u8_to_linear_f32(component: u8) -> f32 {
-    static SRGB_TO_LINEAR_LUT: LazyLock<[f32; 256]> = LazyLock::new(|| {
+fn srgb_u8_to_linear_u16(component: u8) -> u16 {
+    static SRGB_TO_LINEAR_LUT: LazyLock<[u16; 256]> = LazyLock::new(|| {
         std::array::from_fn(|component| {
             let srgb = component as f32 / 255.0;
-            if srgb <= 0.04045 {
+            let linear = if srgb <= 0.04045 {
                 srgb / 12.92
             } else {
                 ((srgb + 0.055) / 1.055).powf(2.4)
-            }
+            };
+            (linear * u16::MAX as f32).round() as u16
         })
     });
     SRGB_TO_LINEAR_LUT[component as usize]
@@ -431,7 +432,7 @@ mod tests {
             buffer
                 .vertices
                 .iter()
-                .all(|vertex| (vertex.color[3] - 128.0 / 255.0).abs() < f32::EPSILON)
+                .all(|vertex| vertex.color[3] == u16::from(128_u8) * 257)
         );
     }
 

@@ -164,4 +164,16 @@ mod tests {
         assert!(spec.source.contains("@group(1) @binding(1)"));
         assert!(spec.source.contains("textureSample"));
     }
+
+    #[test]
+    fn terminal_shader_validates() {
+        let module = wgpu::naga::front::wgsl::parse_str(WGPU_TERMINAL_SHADER_WGSL)
+            .expect("terminal shader should parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("terminal shader should validate");
+    }
 }

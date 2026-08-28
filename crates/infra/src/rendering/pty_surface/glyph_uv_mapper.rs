@@ -222,7 +222,7 @@ mod tests {
         WgpuGpuVertex {
             position_px: [0.0, 0.0],
             uv: [0.0, 0.0],
-            color: [1.0, 1.0, 1.0, 1.0],
+            color: [u16::MAX; 4],
             kind: WGPU_VERTEX_KIND_GLYPH,
             glyph_codepoint: c as u32,
         }
@@ -232,7 +232,7 @@ mod tests {
         WgpuGpuVertex {
             position_px: [0.0, 0.0],
             uv: [0.0, 0.0],
-            color: [0.0, 0.0, 0.0, 1.0],
+            color: [0, 0, 0, u16::MAX],
             kind: WGPU_VERTEX_KIND_BACKGROUND,
             glyph_codepoint: 0,
         }

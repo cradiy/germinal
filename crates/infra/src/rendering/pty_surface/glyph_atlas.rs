@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WgpuTerminalGlyphKey {
@@ -88,7 +91,7 @@ impl WgpuTerminalGlyphKey {
 pub struct WgpuTerminalGlyphAtlas {
     pub width_px: u32,
     pub height_px: u32,
-    pub pixels: Vec<u8>,
+    pub pixels: Arc<Vec<u8>>,
     pub entries: HashMap<WgpuTerminalGlyphKey, WgpuTerminalGlyphAtlasEntry>,
 }
 
@@ -97,7 +100,7 @@ impl WgpuTerminalGlyphAtlas {
         Self {
             width_px: 0,
             height_px: 0,
-            pixels: Vec::new(),
+            pixels: Arc::new(Vec::new()),
             entries: HashMap::new(),
         }
     }
@@ -227,7 +230,7 @@ impl WgpuDebugGlyphAtlasBuilder {
             return WgpuTerminalGlyphAtlas {
                 width_px: 0,
                 height_px: 0,
-                pixels: Vec::new(),
+                pixels: Arc::new(Vec::new()),
                 entries: HashMap::new(),
             };
         }
@@ -285,7 +288,7 @@ impl WgpuDebugGlyphAtlasBuilder {
         WgpuTerminalGlyphAtlas {
             width_px: atlas_width,
             height_px: atlas_height,
-            pixels,
+            pixels: Arc::new(pixels),
             entries,
         }
     }

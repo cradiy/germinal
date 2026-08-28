@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Color, Family, FeatureTag, FontFeatures, FontSystem,
@@ -499,7 +499,7 @@ struct WgpuCrossfontGlyphBackend {
     baseline_y_px: i32,
     underline_metrics: WgpuCrossfontUnderlineMetrics,
     strikeout_metrics: WgpuCrossfontStrikeoutMetrics,
-    glyph_cache: HashMap<WgpuTerminalGlyphKey, RasterizedTerminalGlyph>,
+    glyph_cache: RasterizedGlyphCache,
     cluster_rasterizer: Option<CosmicTextClusterRasterizer>,
     cluster_font_faces: WgpuCrossfontFontFaces,
 }
@@ -614,7 +614,7 @@ impl WgpuCrossfontGlyphBackend {
             baseline_y_px,
             underline_metrics,
             strikeout_metrics,
-            glyph_cache: HashMap::new(),
+            glyph_cache: RasterizedGlyphCache::default(),
             cluster_rasterizer: None,
             cluster_font_faces: font_faces,
         })
@@ -644,14 +644,14 @@ impl WgpuCrossfontGlyphBackend {
         &mut self,
         glyph_key: WgpuTerminalGlyphKey,
     ) -> RasterizedTerminalGlyph {
-        if let Some(glyph) = self.glyph_cache.get(&glyph_key) {
-            return glyph.clone();
+        if let Some(glyph) = self.glyph_cache.get(glyph_key) {
+            return glyph;
         }
 
         let font_key = self.font_key_for_glyph(glyph_key);
 
         let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
-        self.glyph_cache.insert(glyph_key, glyph.clone());
+        self.glyph_cache.insert(glyph.clone());
         glyph
     }
 
@@ -661,11 +661,15 @@ impl WgpuCrossfontGlyphBackend {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> RasterizedTerminalGlyph {
-        if let Some(glyph) = self.glyph_cache.get(&segment.glyph_key) {
-            return glyph.clone();
+        if let Some(glyph) = self.glyph_cache.get(segment.glyph_key) {
+            return glyph;
         }
 
-        let glyph = if segment.shaped {
+        if !segment.shaped {
+            return self.rasterize_terminal_glyph(segment.glyph_key);
+        }
+
+        let glyph = {
             self.cluster_rasterizer
                 .get_or_insert_with(|| {
                     CosmicTextClusterRasterizer::new(
@@ -675,10 +679,8 @@ impl WgpuCrossfontGlyphBackend {
                     )
                 })
                 .rasterize(segment, cell_width_px, cell_height_px)
-        } else {
-            self.rasterize_terminal_glyph(segment.glyph_key)
         };
-        self.glyph_cache.insert(segment.glyph_key, glyph.clone());
+        self.glyph_cache.insert(glyph.clone());
         glyph
     }
 
@@ -772,9 +774,94 @@ struct RasterizedTerminalGlyph {
     left_px: i32,
     top_px: i32,
     advance_px: i32,
-    pixels: Vec<u8>,
+    pixels: Arc<Vec<u8>>,
     is_color: bool,
     direct_draw_offset: Option<(i32, i32)>,
+}
+
+const RASTERIZED_GLYPH_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const RASTERIZED_GLYPH_CACHE_MAX_ENTRIES: usize = 4_096;
+
+struct RasterizedGlyphCache {
+    entries: HashMap<WgpuTerminalGlyphKey, CachedRasterizedGlyph>,
+    pixel_bytes: usize,
+    access_clock: u64,
+    max_pixel_bytes: usize,
+    max_entries: usize,
+}
+
+impl RasterizedGlyphCache {
+    fn new(max_pixel_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            pixel_bytes: 0,
+            access_clock: 0,
+            max_pixel_bytes,
+            max_entries,
+        }
+    }
+
+    fn get(&mut self, key: WgpuTerminalGlyphKey) -> Option<RasterizedTerminalGlyph> {
+        self.access_clock = self.access_clock.saturating_add(1);
+        let entry = self.entries.get_mut(&key)?;
+        entry.last_used = self.access_clock;
+        Some(entry.glyph.clone())
+    }
+
+    fn insert(&mut self, glyph: RasterizedTerminalGlyph) {
+        let pixel_bytes = glyph.pixels.len();
+        if self.max_entries == 0 || pixel_bytes > self.max_pixel_bytes {
+            return;
+        }
+
+        if let Some(previous) = self.entries.remove(&glyph.key) {
+            self.pixel_bytes = self.pixel_bytes.saturating_sub(previous.glyph.pixels.len());
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_entries
+                || self.pixel_bytes.saturating_add(pixel_bytes) > self.max_pixel_bytes)
+        {
+            self.evict_least_recently_used();
+        }
+
+        self.access_clock = self.access_clock.saturating_add(1);
+        self.pixel_bytes = self.pixel_bytes.saturating_add(pixel_bytes);
+        self.entries.insert(
+            glyph.key,
+            CachedRasterizedGlyph {
+                glyph,
+                last_used: self.access_clock,
+            },
+        );
+    }
+
+    fn evict_least_recently_used(&mut self) {
+        let Some(key) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| *key)
+        else {
+            return;
+        };
+        if let Some(removed) = self.entries.remove(&key) {
+            self.pixel_bytes = self.pixel_bytes.saturating_sub(removed.glyph.pixels.len());
+        }
+    }
+}
+
+impl Default for RasterizedGlyphCache {
+    fn default() -> Self {
+        Self::new(
+            RASTERIZED_GLYPH_CACHE_MAX_BYTES,
+            RASTERIZED_GLYPH_CACHE_MAX_ENTRIES,
+        )
+    }
+}
+
+struct CachedRasterizedGlyph {
+    glyph: RasterizedTerminalGlyph,
+    last_used: u64,
 }
 
 fn rasterize_terminal_glyph(
@@ -820,7 +907,7 @@ fn rasterize_terminal_glyph(
                     left_px: 0,
                     top_px: 0,
                     advance_px: 0,
-                    pixels: vec![0, 0, 0, 0],
+                    pixels: Arc::new(vec![0, 0, 0, 0]),
                     is_color: false,
                     direct_draw_offset: None,
                 };
@@ -842,7 +929,7 @@ fn rasterize_terminal_glyph(
         left_px: glyph.left,
         top_px: glyph.top,
         advance_px: glyph.advance.0,
-        pixels,
+        pixels: Arc::new(pixels),
         is_color,
         direct_draw_offset: None,
     }
@@ -1120,7 +1207,7 @@ fn rasterized_cluster_from_pixels(
         left_px: min_x,
         top_px: 0,
         advance_px: (segment.cell_width.max(1) * cell_width_px) as i32,
-        pixels,
+        pixels: Arc::new(pixels),
         is_color,
         direct_draw_offset: Some((min_x, min_y.clamp(0, cell_height_px as i32))),
     }
@@ -1138,7 +1225,7 @@ fn empty_cluster_glyph(
         left_px: 0,
         top_px: 0,
         advance_px: (segment.cell_width.max(1) * cell_width_px) as i32,
-        pixels: vec![0, 0, 0, 0],
+        pixels: Arc::new(vec![0, 0, 0, 0]),
         is_color: false,
         direct_draw_offset: Some((0, 0)),
     }
@@ -1243,7 +1330,7 @@ fn build_atlas_from_rasterized_glyphs(
         glyph.height_px = 1;
         glyph.left_px = 0;
         glyph.top_px = 0;
-        glyph.pixels = vec![0, 0, 0, 0];
+        glyph.pixels = Arc::new(vec![0, 0, 0, 0]);
         glyph.is_color = false;
         glyph.direct_draw_offset = None;
     }
@@ -1330,7 +1417,7 @@ fn build_atlas_from_rasterized_glyphs(
     WgpuTerminalGlyphAtlas {
         width_px: atlas_width,
         height_px: atlas_height,
-        pixels,
+        pixels: Arc::new(pixels),
         entries,
     }
 }
@@ -1850,12 +1937,61 @@ fn is_emoji_presentation_candidate(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        FontCoverage, GlyphAtlasShelfLayout, RasterizedTerminalGlyph,
+        FontCoverage, GlyphAtlasShelfLayout, RasterizedGlyphCache, RasterizedTerminalGlyph,
         WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey,
         build_atlas_from_rasterized_glyphs, crossfont_size_from_physical_px,
         crossfont_strikeout_metrics, crossfont_underline_metrics, terminal_glyph_draw_offset,
     };
+
+    fn cached_test_glyph(character: char, pixel_bytes: usize) -> RasterizedTerminalGlyph {
+        RasterizedTerminalGlyph {
+            key: WgpuTerminalGlyphKey::styled(character, false, false),
+            cell_width: 1,
+            width_px: 1,
+            height_px: 1,
+            left_px: 0,
+            top_px: 0,
+            advance_px: 1,
+            pixels: Arc::new(vec![255; pixel_bytes]),
+            is_color: false,
+            direct_draw_offset: None,
+        }
+    }
+
+    #[test]
+    fn rasterized_glyph_cache_enforces_byte_and_entry_limits() {
+        let mut cache = RasterizedGlyphCache::new(8, 2);
+        let first = WgpuTerminalGlyphKey::plain('a');
+        let second = WgpuTerminalGlyphKey::plain('b');
+        let third = WgpuTerminalGlyphKey::plain('c');
+
+        let first_glyph = cached_test_glyph('a', 4);
+        let first_pixels = Arc::clone(&first_glyph.pixels);
+        cache.insert(first_glyph);
+        cache.insert(cached_test_glyph('b', 4));
+        let cached_first = cache.get(first).expect("first glyph should be cached");
+        assert!(Arc::ptr_eq(&first_pixels, &cached_first.pixels));
+        cache.insert(cached_test_glyph('c', 4));
+
+        assert!(cache.entries.contains_key(&first));
+        assert!(!cache.entries.contains_key(&second));
+        assert!(cache.entries.contains_key(&third));
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.pixel_bytes, 8);
+    }
+
+    #[test]
+    fn rasterized_glyph_cache_skips_a_bitmap_larger_than_its_budget() {
+        let mut cache = RasterizedGlyphCache::new(4, 2);
+
+        cache.insert(cached_test_glyph('界', 8));
+
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.pixel_bytes, 0);
+    }
 
     #[test]
     fn oversized_nerd_font_icon_preserves_native_bitmap_geometry() {
@@ -1868,7 +2004,7 @@ mod tests {
             left_px: 0,
             top_px: 22,
             advance_px: 30,
-            pixels: vec![255; 30 * 26 * 4],
+            pixels: Arc::new(vec![255; 30 * 26 * 4]),
             is_color: false,
             direct_draw_offset: None,
         };
@@ -1912,7 +2048,7 @@ mod tests {
             left_px: 3,
             top_px: 18,
             advance_px: 12,
-            pixels: vec![],
+            pixels: Arc::new(vec![]),
             is_color: false,
             direct_draw_offset: None,
         };

@@ -1,4 +1,5 @@
 use germinal_ports::rendering::frame_plan_builder::TextStyleDto;
+use smol_str::SmolStr;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -7,7 +8,7 @@ use crate::rendering::pty_surface::glyph_atlas::WgpuTerminalGlyphKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTextSegment {
-    pub text: String,
+    pub text: SmolStr,
     pub cell_width: u32,
     pub glyph_key: WgpuTerminalGlyphKey,
     pub shaped: bool,
@@ -82,7 +83,7 @@ pub fn terminal_text_segments_with_ligatures(
             push_shaped_segment(&mut segments, &graphemes[index..=index], style, false);
         } else if let Some(character) = grapheme.chars().next() {
             segments.push(TerminalTextSegment {
-                text: grapheme.to_owned(),
+                text: SmolStr::new(grapheme),
                 cell_width: terminal_grapheme_cell_width(grapheme),
                 glyph_key: WgpuTerminalGlyphKey::styled(character, style.bold, style.italic),
                 shaped: false,
@@ -145,7 +146,7 @@ fn push_plain_ascii_segment(
 ) {
     let character = char::from(byte);
     segments.push(TerminalTextSegment {
-        text: character.to_string(),
+        text: std::iter::once(character).collect(),
         cell_width: 1,
         glyph_key: WgpuTerminalGlyphKey::styled(character, style.bold, style.italic),
         shaped: false,
@@ -160,7 +161,7 @@ fn push_ascii_shaped_segment(
     ligature: bool,
 ) {
     segments.push(TerminalTextSegment {
-        text: text.to_owned(),
+        text: SmolStr::new(text),
         cell_width: text.len() as u32,
         glyph_key: WgpuTerminalGlyphKey::cluster(stable_text_hash(text), style.bold, style.italic),
         shaped: true,
@@ -174,14 +175,18 @@ fn push_shaped_segment(
     style: TextStyleDto,
     ligature: bool,
 ) {
-    let text = graphemes.concat();
+    let text: SmolStr = graphemes.iter().copied().collect();
     let cell_width = graphemes
         .iter()
         .map(|grapheme| terminal_grapheme_cell_width(grapheme))
         .sum();
     segments.push(TerminalTextSegment {
         cell_width,
-        glyph_key: WgpuTerminalGlyphKey::cluster(stable_text_hash(&text), style.bold, style.italic),
+        glyph_key: WgpuTerminalGlyphKey::cluster(
+            stable_text_hash(text.as_str()),
+            style.bold,
+            style.italic,
+        ),
         text,
         shaped: true,
         ligature,
@@ -204,7 +209,7 @@ pub fn cursor_fallback_segments(segment: &TerminalTextSegment) -> Vec<TerminalTe
             let character = grapheme.chars().next()?;
             let cell_width = terminal_grapheme_cell_width(grapheme);
             (cell_width > 0).then(|| TerminalTextSegment {
-                text: character.to_string(),
+                text: std::iter::once(character).collect(),
                 cell_width,
                 glyph_key: WgpuTerminalGlyphKey::styled(
                     character,
@@ -328,6 +333,17 @@ mod tests {
         assert_eq!(segments.len(), 3);
         assert!(segments.iter().all(|segment| !segment.shaped));
         assert_eq!(segments[2].cell_width, 2);
+    }
+
+    #[test]
+    fn common_terminal_segments_do_not_allocate_text_on_the_heap() {
+        let segments = terminal_text_segments("ascii != 中文", TextStyleDto::plain());
+
+        assert!(
+            segments
+                .iter()
+                .all(|segment| !segment.text.is_heap_allocated())
+        );
     }
 
     #[test]

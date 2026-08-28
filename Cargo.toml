@@ -39,6 +39,7 @@ unicode-segmentation = "1"
 cosmic-text = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+smol_str = { version = "0.3", default-features = false }
 thiserror = "2"
 eros = "0.7"
 tracing = "0.1"

@@ -41,7 +41,7 @@ fn rgba_pixels_from_atlas(atlas: &WgpuTerminalGlyphAtlas) -> Arc<Vec<u8>> {
     let rgba_len = alpha_len * 4;
 
     if atlas.pixels.len() == rgba_len {
-        return Arc::new(atlas.pixels.clone());
+        return Arc::clone(&atlas.pixels);
     }
 
     if atlas.pixels.len() == alpha_len {
@@ -254,8 +254,29 @@ impl Default for WgpuTerminalGlyphAtlasTextureSpec {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::rendering::pty_surface::glyph_atlas::WgpuDebugGlyphAtlasBuilder;
+    use crate::rendering::pty_surface::glyph_atlas::{
+        WgpuDebugGlyphAtlasBuilder, WgpuTerminalGlyphAtlas,
+    };
+
+    #[test]
+    fn rgba_atlas_upload_reuses_pixel_storage() {
+        let pixels = Arc::new(vec![0, 0, 0, 255]);
+        let atlas = WgpuTerminalGlyphAtlas {
+            width_px: 1,
+            height_px: 1,
+            pixels: Arc::clone(&pixels),
+            entries: HashMap::new(),
+        };
+
+        let upload_bytes = WgpuTerminalGlyphAtlasTextureFactory::new()
+            .build_upload_bytes(&atlas)
+            .expect("RGBA atlas should produce upload bytes");
+
+        assert!(Arc::ptr_eq(&pixels, &upload_bytes.pixels));
+    }
 
     #[test]
     fn builds_upload_bytes_from_debug_glyph_atlas() {

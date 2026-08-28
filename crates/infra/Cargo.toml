@@ -31,6 +31,7 @@ pollster.workspace = true
 portable-pty.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smol_str.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 rayon.workspace = true

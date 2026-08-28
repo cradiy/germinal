@@ -283,8 +283,13 @@ mod tests {
         assert_eq!(layout.attributes[0].offset, 0);
         assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x2);
 
+        assert_eq!(layout.attributes[2].shader_location, 2);
+        assert_eq!(layout.attributes[2].offset, 16);
+        assert_eq!(layout.attributes[2].format, wgpu::VertexFormat::Unorm16x4);
+
         assert_eq!(layout.attributes[4].shader_location, 4);
-        assert_eq!(layout.attributes[4].offset, 36);
+        assert_eq!(layout.attributes[4].offset, 28);
         assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
+        assert_eq!(WgpuGpuVertex::BYTE_SIZE, 32);
     }
 }

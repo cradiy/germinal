@@ -786,7 +786,7 @@ pub struct LoggingConfig {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            console_level: LogLevel::Debug,
+            console_level: LogLevel::Info,
             file_level: LogLevel::Info,
         }
     }
@@ -940,6 +940,8 @@ mod tests {
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
+        assert_eq!(value["logging"]["console_level"].as_str(), Some("info"));
+        assert_eq!(value["logging"]["file_level"].as_str(), Some("info"));
         assert_eq!(
             value["keyboard"]["use_default_bindings"].as_bool(),
             Some(true)
