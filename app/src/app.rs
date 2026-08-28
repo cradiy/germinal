@@ -1440,6 +1440,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 }
                 self.set_window_focused(focused);
             }
+            WindowEvent::Occluded(occluded) => {
+                if let Some(render_runtime) = self.render_runtime.as_mut() {
+                    render_runtime.set_window_occluded(occluded);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.drain_media_bridge_frames();
                 self.present_workspace();

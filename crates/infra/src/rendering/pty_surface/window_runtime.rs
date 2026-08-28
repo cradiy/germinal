@@ -121,6 +121,7 @@ pub struct WgpuTerminalWindowRuntime {
     background_opacity: f32,
     background_shader_enabled: bool,
     background_shader_animated: bool,
+    window_occluded: bool,
     retain_terminal_frame: bool,
     next_background_frame_at: Option<Instant>,
     needs_redraw: bool,
@@ -633,6 +634,7 @@ impl WgpuTerminalWindowRuntime {
             background_opacity,
             background_shader_enabled,
             background_shader_animated,
+            window_occluded: false,
             retain_terminal_frame,
             next_background_frame_at: background_shader_animated.then_some(now),
             needs_redraw: false,
@@ -903,6 +905,24 @@ impl WgpuTerminalWindowRuntime {
         self.needs_redraw = true;
     }
 
+    pub fn set_window_occluded(&mut self, occluded: bool) {
+        if self.window_occluded == occluded {
+            return;
+        }
+
+        self.window_occluded = occluded;
+        if occluded {
+            self.next_background_frame_at = None;
+            return;
+        }
+
+        let now = Instant::now();
+        self.next_present_at = now;
+        self.next_background_frame_at = self.background_shader_animated.then_some(now);
+        self.next_cursor_motion_frame_at = (!self.cursor_motions.is_empty()).then_some(now);
+        self.schedule_redraw();
+    }
+
     pub fn refresh_display_timing(&mut self) -> bool {
         let Some(refresh_rate_millihertz) = display_refresh_rate_millihertz(self.window.as_ref())
         else {
@@ -919,7 +939,7 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn take_redraw_request(&mut self) -> bool {
-        if !self.needs_redraw || Instant::now() < self.next_present_at {
+        if self.window_occluded || !self.needs_redraw || Instant::now() < self.next_present_at {
             return false;
         }
         self.needs_redraw = false;
@@ -947,6 +967,10 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
+        if self.window_occluded {
+            return;
+        }
+
         if self.display_refresh_rate_millihertz.is_none() {
             self.refresh_display_timing();
         }
@@ -1088,6 +1112,10 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn next_render_deadline(&self) -> Option<Instant> {
+        if self.window_occluded {
+            return None;
+        }
+
         [
             self.next_cursor_blink_at,
             self.next_cursor_motion_frame_at,
@@ -1100,6 +1128,10 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn take_due_render_deadline(&mut self, now: Instant) -> bool {
+        if self.window_occluded {
+            return false;
+        }
+
         let cursor_due = self
             .next_cursor_blink_at
             .is_some_and(|deadline| deadline <= now);

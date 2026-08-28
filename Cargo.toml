@@ -13,6 +13,7 @@ members = [
   "crates/gnative_demo",
   "app",
 ]
+exclude = ["external/forks/alacritty_terminal", "external/forks/vte"]
 
 [workspace.package]
 version = "0.0.1"
@@ -53,7 +54,7 @@ png = "0.18"
 kudi = "0.1"
 
 # infra
-alacritty_terminal = "0.26"
+alacritty_terminal = { path = "external/forks/alacritty_terminal" }
 wgpu = { version = "30.0", default-features = false, features = [
   "dx12",
   "metal",
@@ -79,6 +80,9 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 notify-rust = "4"
 memmap2 = "0.9"
 flume = "0.12"
+
+[patch.crates-io]
+vte = { path = "external/forks/vte" }
 
 [profile.product]
 inherits = "release"
