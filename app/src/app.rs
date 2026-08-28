@@ -205,7 +205,8 @@ impl App {
             terminal_color_theme,
             window_opacity,
         )
-        .with_cursor_motion_modes(config.cursor.motion_on_input, config.cursor.motion_on_enter);
+        .with_cursor_motion_modes(config.cursor.motion_on_input, config.cursor.motion_on_enter)
+        .with_power_preference(config.terminal_power_preference());
         let render_runtime_factory = match background_shader {
             Some(shader) => render_runtime_factory.with_background_shader(shader),
             None => render_runtime_factory,

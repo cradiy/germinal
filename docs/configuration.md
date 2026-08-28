@@ -25,6 +25,17 @@ decorations = true
   transparency.
 - `decorations = false` requests a frameless window. The compositor may still draw a focus border.
 
+## Rendering
+
+```toml
+[rendering]
+power_preference = "high"
+```
+
+When Germinal creates this file for the first time, it writes `high` if a discrete GPU is detected
+and `low` otherwise. `high` prefers a discrete GPU and falls back to an available integrated GPU;
+`low` prefers an integrated GPU. Existing configuration is never replaced by device detection.
+
 ## Font
 
 ```toml

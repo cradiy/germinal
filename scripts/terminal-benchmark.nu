@@ -106,17 +106,20 @@ def process-snapshot [pid: int] {
     } else {
         []
     }
+    let rss_lines = ($status | where {|line| $line starts-with "VmRSS:" })
+    let virtual_lines = ($status | where {|line| $line starts-with "VmSize:" })
+    if ($rss_lines | is-empty) or ($virtual_lines | is-empty) {
+        return null
+    }
     let rss = (
-        $status
-        | where {|line| $line starts-with "VmRSS:" }
+        $rss_lines
         | first
         | parse --regex 'VmRSS:\s+(?<value>\d+)'
         | get 0.value
         | into int
     )
     let virtual = (
-        $status
-        | where {|line| $line starts-with "VmSize:" }
+        $virtual_lines
         | first
         | parse --regex 'VmSize:\s+(?<value>\d+)'
         | get 0.value
@@ -240,6 +243,7 @@ def write-suite-config [
     post_hold_ms: int
     font_family: string
     font_size: float
+    power_preference: string
 ] {
     let shell_args = [
         "worker"
@@ -276,6 +280,9 @@ def write-suite-config [
             width_px: 960
             height_px: 540
             opacity: 1.0
+        }
+        rendering: {
+            power_preference: $power_preference
         }
         font: $font
         terminal: {
@@ -317,6 +324,7 @@ def run-suite-case [
     interval: duration
     font_family: string
     font_size: float
+    power_preference: string
     perf_seconds: int
     perf_frequency: int
 ] {
@@ -330,7 +338,7 @@ def run-suite-case [
     let result_path = ($signal_dir | path join "result.txt")
     let started_path = ($signal_dir | path join "started")
     mkdir $signal_dir
-    write-suite-config $config_path $script $benchmark $signal_dir $case.workload $text_profile $case.shader $refresh_hz $idle_ms $paced_duration_ms $flood_lines $columns $warmup_ms $post_hold_ms $font_family $font_size
+    write-suite-config $config_path $script $benchmark $signal_dir $case.workload $text_profile $case.shader $refresh_hz $idle_ms $paced_duration_ms $flood_lines $columns $warmup_ms $post_hold_ms $font_family $font_size $power_preference
 
     let unit = $"germinal-bench-($nu.pid)-($index).service"
     mut launch_args = [
@@ -608,6 +616,7 @@ def "main germinal" [
     --interval: duration = 100ms
     --font-family: string = ""
     --font-size: float = 20.0
+    --power-preference: string = "high"
     --perf-seconds: int = 0
     --perf-frequency: int = 749
     --skip-shader
@@ -621,6 +630,9 @@ def "main germinal" [
     }
     if $perf_frequency < 1 {
         fail $"--perf-frequency must be positive, got: ($perf_frequency)"
+    }
+    if not ($power_preference in ["high" "low"]) {
+        fail $"--power-preference must be high or low, got: ($power_preference)"
     }
 
     let repo_root = ($env.FILE_PWD | path dirname | path expand)
@@ -701,6 +713,7 @@ def "main germinal" [
                 $interval
                 $font_family
                 $font_size
+                $power_preference
                 $perf_seconds
                 $perf_frequency
         )

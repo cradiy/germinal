@@ -4,7 +4,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use germinal_infra::rendering::pty_surface::background_shader_renderer::WgpuBackgroundShaderSource;
+use germinal_infra::rendering::pty_surface::{
+    background_shader_renderer::WgpuBackgroundShaderSource,
+    window_runtime::{WgpuTerminalPowerPreference, detect_terminal_power_preference},
+};
 use germinal_ports::pty_host::{
     color_theme::TerminalColorTheme,
     cursor_style::{TerminalCursorShape, TerminalCursorStyle},
@@ -66,6 +69,7 @@ impl AppPaths {
 #[serde(default)]
 pub struct GerminalConfig {
     pub window: WindowConfig,
+    pub rendering: RenderingConfig,
     #[serde(skip_serializing_if = "BackgroundConfig::is_disabled")]
     pub background: BackgroundConfig,
     pub font: FontConfig,
@@ -127,6 +131,10 @@ impl GerminalConfig {
 
     pub fn background_shader(&self) -> Option<WgpuBackgroundShaderSource> {
         self.background.resolved.clone()
+    }
+
+    pub fn terminal_power_preference(&self) -> WgpuTerminalPowerPreference {
+        self.rendering.power_preference.into()
     }
 
     pub fn pty_shell_command(&self) -> Option<PtyShellCommand> {
@@ -218,6 +226,38 @@ impl GerminalConfig {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderingConfig {
+    pub power_preference: GpuPowerPreference,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuPowerPreference {
+    #[default]
+    High,
+    Low,
+}
+
+impl From<GpuPowerPreference> for WgpuTerminalPowerPreference {
+    fn from(preference: GpuPowerPreference) -> Self {
+        match preference {
+            GpuPowerPreference::High => Self::High,
+            GpuPowerPreference::Low => Self::Low,
+        }
+    }
+}
+
+impl From<WgpuTerminalPowerPreference> for GpuPowerPreference {
+    fn from(preference: WgpuTerminalPowerPreference) -> Self {
+        match preference {
+            WgpuTerminalPowerPreference::High => Self::High,
+            WgpuTerminalPowerPreference::Low => Self::Low,
+        }
     }
 }
 
@@ -876,12 +916,18 @@ fn is_executable_file(path: &Path) -> bool {
 
 fn write_default_config(paths: &AppPaths) -> AppResult<()> {
     create_dir_all(paths.config_dir())?;
-    let contents =
-        toml::to_string_pretty(&GerminalConfig::default()).map_err(AppError::SerializeConfig)?;
+    let config = first_run_config(detect_terminal_power_preference());
+    let contents = toml::to_string_pretty(&config).map_err(AppError::SerializeConfig)?;
     fs::write(paths.config_file(), contents).map_err(|source| AppError::WriteConfig {
         path: paths.config_file().to_path_buf(),
         source,
     })
+}
+
+fn first_run_config(power_preference: WgpuTerminalPowerPreference) -> GerminalConfig {
+    let mut config = GerminalConfig::default();
+    config.rendering.power_preference = power_preference.into();
+    config
 }
 
 fn xdg_dir(env_name: &str, home_suffix: &str) -> AppResult<PathBuf> {
@@ -905,6 +951,7 @@ pub fn create_dir_all(path: &Path) -> AppResult<()> {
 mod tests {
     use std::{fs, path::Path, time::SystemTime};
 
+    use germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalPowerPreference;
     use germinal_ports::pty_host::{
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
         font_family::TerminalFontFamily,
@@ -912,7 +959,10 @@ mod tests {
     };
     use germinal_ports::rendering::tab_bar::TabBarPosition;
 
-    use super::{BackgroundConfig, GerminalConfig, KeyboardAction, ShellConfig};
+    use super::{
+        BackgroundConfig, GerminalConfig, GpuPowerPreference, KeyboardAction, ShellConfig,
+        first_run_config,
+    };
 
     #[test]
     fn default_config_serializes_alacritty_style_fields() {
@@ -922,6 +972,10 @@ mod tests {
         assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
         assert_eq!(value["window"]["decorations"].as_bool(), Some(true));
         assert_eq!(value["window"]["maximized"].as_bool(), Some(false));
+        assert_eq!(
+            value["rendering"]["power_preference"].as_str(),
+            Some("high")
+        );
         assert!(value.get("background").is_none());
         assert_eq!(value["font"]["size"].as_float(), Some(16.0));
         assert_eq!(value["font"]["ligatures"].as_bool(), Some(true));
@@ -957,6 +1011,30 @@ mod tests {
         let round_trip: GerminalConfig = toml::from_str(&contents).unwrap();
         assert!(round_trip.keyboard.use_default_bindings);
         assert_eq!(round_trip.keyboard.bindings.len(), 27);
+    }
+
+    #[test]
+    fn parses_rendering_power_preference() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [rendering]
+            power_preference = "low"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.rendering.power_preference, GpuPowerPreference::Low);
+        assert_eq!(
+            config.terminal_power_preference(),
+            WgpuTerminalPowerPreference::Low
+        );
+    }
+
+    #[test]
+    fn first_run_config_uses_detected_power_preference() {
+        let config = first_run_config(WgpuTerminalPowerPreference::Low);
+
+        assert_eq!(config.rendering.power_preference, GpuPowerPreference::Low);
     }
 
     #[test]

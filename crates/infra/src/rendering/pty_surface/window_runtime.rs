@@ -98,6 +98,48 @@ pub enum WindowRuntimeError {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WgpuTerminalPowerPreference {
+    #[default]
+    High,
+    Low,
+}
+
+impl WgpuTerminalPowerPreference {
+    fn wgpu(self) -> wgpu::PowerPreference {
+        match self {
+            Self::High => wgpu::PowerPreference::HighPerformance,
+            Self::Low => wgpu::PowerPreference::LowPower,
+        }
+    }
+}
+
+pub fn detect_terminal_power_preference() -> WgpuTerminalPowerPreference {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: terminal_wgpu_backends(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapters = pollster::block_on(instance.enumerate_adapters(terminal_wgpu_backends()));
+    terminal_power_preference_for_device_types(
+        adapters
+            .into_iter()
+            .map(|adapter| adapter.get_info().device_type),
+    )
+}
+
+fn terminal_power_preference_for_device_types(
+    device_types: impl IntoIterator<Item = wgpu::DeviceType>,
+) -> WgpuTerminalPowerPreference {
+    if device_types
+        .into_iter()
+        .any(|device_type| device_type == wgpu::DeviceType::DiscreteGpu)
+    {
+        WgpuTerminalPowerPreference::High
+    } else {
+        WgpuTerminalPowerPreference::Low
+    }
+}
+
 pub struct WgpuTerminalWindowRuntime {
     window: Arc<Window>,
     base_title: String,
@@ -338,6 +380,7 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     background_shader: Option<WgpuBackgroundShaderSource>,
+    power_preference: WgpuTerminalPowerPreference,
 }
 
 struct WgpuTerminalWindowRuntimeOptions {
@@ -351,6 +394,7 @@ struct WgpuTerminalWindowRuntimeOptions {
     background_opacity: f32,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     background_shader: Option<WgpuBackgroundShaderSource>,
+    power_preference: WgpuTerminalPowerPreference,
 }
 
 impl WgpuTerminalWindowRuntimeFactory {
@@ -372,6 +416,7 @@ impl WgpuTerminalWindowRuntimeFactory {
             color_theme,
             background_opacity: normalized_opacity(background_opacity),
             background_shader: None,
+            power_preference: WgpuTerminalPowerPreference::default(),
         }
     }
 
@@ -383,6 +428,11 @@ impl WgpuTerminalWindowRuntimeFactory {
     pub fn with_cursor_motion_modes(mut self, on_input: bool, on_enter: bool) -> Self {
         self.cursor_motion_on_input = on_input;
         self.cursor_motion_on_enter = on_enter;
+        self
+    }
+
+    pub fn with_power_preference(mut self, power_preference: WgpuTerminalPowerPreference) -> Self {
+        self.power_preference = power_preference;
         self
     }
 
@@ -411,6 +461,7 @@ impl WgpuTerminalWindowRuntimeFactory {
                 background_opacity: self.background_opacity,
                 render_plugins,
                 background_shader: self.background_shader.clone(),
+                power_preference: self.power_preference,
             },
         ))
     }
@@ -459,6 +510,7 @@ impl WgpuTerminalWindowRuntime {
                 background_opacity,
                 render_plugins,
                 background_shader: None,
+                power_preference: WgpuTerminalPowerPreference::default(),
             },
         )
         .await
@@ -479,6 +531,7 @@ impl WgpuTerminalWindowRuntime {
             background_opacity,
             render_plugins,
             background_shader,
+            power_preference,
         } = options;
         let background_opacity = normalized_opacity(background_opacity);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -496,7 +549,7 @@ impl WgpuTerminalWindowRuntime {
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: power_preference.wgpu(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
@@ -1928,10 +1981,11 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, accumulate_pending_surface_damage,
-        build_cursor_motion, build_tab_bar_surface, cursor_blink_phase,
-        frame_interval_for_refresh_rate, ime_cursor_area, is_enter_cursor_motion,
-        normalized_opacity, terminal_wgpu_backends, transparent_surface_alpha_mode,
+        CursorMotion, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE, WgpuTerminalPowerPreference,
+        accumulate_pending_surface_damage, build_cursor_motion, build_tab_bar_surface,
+        cursor_blink_phase, frame_interval_for_refresh_rate, ime_cursor_area,
+        is_enter_cursor_motion, normalized_opacity, terminal_power_preference_for_device_types,
+        terminal_wgpu_backends, transparent_surface_alpha_mode,
     };
 
     #[test]
@@ -2113,6 +2167,25 @@ mod tests {
 
         assert_eq!(backends, wgpu::Backends::PRIMARY);
         assert!(!backends.contains(wgpu::Backends::GL));
+    }
+
+    #[test]
+    fn first_run_power_detection_prefers_discrete_and_falls_back_to_low_power() {
+        assert_eq!(
+            terminal_power_preference_for_device_types([
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::DeviceType::DiscreteGpu,
+            ]),
+            WgpuTerminalPowerPreference::High
+        );
+        assert_eq!(
+            terminal_power_preference_for_device_types([wgpu::DeviceType::IntegratedGpu]),
+            WgpuTerminalPowerPreference::Low
+        );
+        assert_eq!(
+            terminal_power_preference_for_device_types([]),
+            WgpuTerminalPowerPreference::Low
+        );
     }
 
     #[test]
