@@ -218,6 +218,7 @@ def write-suite-config [
     benchmark: path
     signal_dir: path
     workload: string
+    text_profile: string
     shader: string
     refresh_hz: int
     idle_ms: int
@@ -236,6 +237,8 @@ def write-suite-config [
         ($benchmark | into string)
         "--signal-dir"
         ($signal_dir | into string)
+        "--text-profile"
+        $text_profile
         "--refresh-hz"
         ($refresh_hz | into string)
         "--idle-ms"
@@ -292,6 +295,7 @@ def run-suite-case [
     script: path
     germinal: path
     benchmark: path
+    text_profile: string
     refresh_hz: int
     idle_ms: int
     paced_duration_ms: int
@@ -311,7 +315,7 @@ def run-suite-case [
     let raw_path = ($case_dir | path join "samples.csv")
     let result_path = ($signal_dir | path join "result.txt")
     mkdir $signal_dir
-    write-suite-config $config_path $script $benchmark $signal_dir $case.workload $case.shader $refresh_hz $idle_ms $paced_duration_ms $flood_lines $columns $warmup_ms $post_hold_ms $font_family $font_size
+    write-suite-config $config_path $script $benchmark $signal_dir $case.workload $text_profile $case.shader $refresh_hz $idle_ms $paced_duration_ms $flood_lines $columns $warmup_ms $post_hold_ms $font_family $font_size
 
     let unit = $"germinal-bench-($nu.pid)-($index).service"
     mut launch_args = [
@@ -488,6 +492,7 @@ def "main worker" [
     workload: string
     --benchmark: path
     --signal-dir: path
+    --text-profile: string = "ascii"
     --refresh-hz: int = 165
     --idle-ms: int = 10000
     --paced-duration-ms: int = 15000
@@ -512,7 +517,7 @@ def "main worker" [
             (
                 ^$benchmark text
                     --mode paced
-                    --profile ascii
+                    --profile $text_profile
                     --duration-ms $paced_duration_ms
                     --fps $refresh_hz
                     --columns $columns
@@ -524,7 +529,7 @@ def "main worker" [
             (
                 ^$benchmark text
                     --mode flood
-                    --profile ascii
+                    --profile $text_profile
                     --lines $flood_lines
                     --columns $columns
                     err> $result_path
@@ -546,6 +551,7 @@ def "main worker" [
 def "main germinal" [
     --output-root: path = "/tmp/germinal-performance"
     --refresh-hz: int = 165
+    --text-profile: string = "ascii"
     --idle-ms: int = 10000
     --paced-duration-ms: int = 15000
     --flood-lines: int = 2500000
@@ -558,6 +564,10 @@ def "main germinal" [
     --skip-shader
     --skip-build
 ] {
+    if not ($text_profile in ["ascii" "unicode"]) {
+        fail $"--text-profile must be ascii or unicode, got: ($text_profile)"
+    }
+
     let repo_root = ($env.FILE_PWD | path dirname | path expand)
     let script = ($env.FILE_PWD | path join "terminal-benchmark.nu" | path expand)
     let germinal = ($repo_root | path join "target" "release" "germinal")
@@ -599,15 +609,15 @@ def "main germinal" [
     mkdir $run_dir
     let base_cases = [
         { name: "static-idle", workload: "idle", shader: "" }
-        { name: "static-paced-ascii", workload: "paced-ascii", shader: "" }
-        { name: "static-flood-ascii", workload: "flood-ascii", shader: "" }
+        { name: $"static-paced-($text_profile)", workload: "paced-ascii", shader: "" }
+        { name: $"static-flood-($text_profile)", workload: "flood-ascii", shader: "" }
     ]
     let cases = if $skip_shader {
         $base_cases
     } else {
         $base_cases | append [
             { name: "starfield-idle", workload: "idle", shader: "starfield" }
-            { name: "starfield-paced-ascii", workload: "paced-ascii", shader: "starfield" }
+            { name: $"starfield-paced-($text_profile)", workload: "paced-ascii", shader: "starfield" }
         ]
     }
 
@@ -622,6 +632,7 @@ def "main germinal" [
                 $script
                 $germinal
                 $benchmark
+                $text_profile
                 $refresh_hz
                 $idle_ms
                 $paced_duration_ms

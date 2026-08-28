@@ -26,6 +26,14 @@ pub trait GridCell: Sized {
     /// Perform an opinionated cell reset based on a template cell.
     fn reset(&mut self, template: &Self);
 
+    /// Reset a contiguous range of cells based on a template cell.
+    #[inline]
+    fn reset_slice(cells: &mut [Self], template: &Self) {
+        for cell in cells {
+            cell.reset(template);
+        }
+    }
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
 }
@@ -255,10 +263,31 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        self.scroll_up_impl(region, positions, true);
+    }
+
+    /// Move lines at the bottom toward the top without clearing the newly exposed rows.
+    ///
+    /// The caller must overwrite every cell in these rows before observing the grid.
+    pub(crate) fn scroll_up_without_reset<D>(&mut self, region: &Range<Line>, positions: usize)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
+        self.scroll_up_impl(region, positions, false);
+    }
+
+    fn scroll_up_impl<D>(&mut self, region: &Range<Line>, positions: usize, reset_rows: bool)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
         // When rotating the entire region with fixed lines at the top, just reset everything.
         if region.end - region.start <= positions && region.start != 0 {
-            for i in (region.start.0..region.end.0).map(Line::from) {
-                self.raw[i].reset(&self.cursor.template);
+            if reset_rows {
+                for i in (region.start.0..region.end.0).map(Line::from) {
+                    self.raw[i].reset(&self.cursor.template);
+                }
             }
 
             return;
@@ -302,8 +331,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         }
 
         // Ensure all new lines are fully cleared.
-        for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
-            self.raw[i].reset(&self.cursor.template);
+        if reset_rows {
+            for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
+                self.raw[i].reset(&self.cursor.template);
+            }
         }
     }
 

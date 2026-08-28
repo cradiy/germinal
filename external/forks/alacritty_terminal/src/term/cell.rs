@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use bitflags::bitflags;
 #[cfg(feature = "serde")]
@@ -38,6 +38,10 @@ bitflags! {
 
 /// Counter for hyperlinks without explicit ID.
 static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
+
+/// Plain default cells used as a source for resetting ordinary terminal rows.
+static DEFAULT_CELL_BLOCK: OnceLock<Box<[Cell]>> = OnceLock::new();
+const DEFAULT_CELL_BLOCK_LEN: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -260,6 +264,54 @@ impl GridCell for Cell {
             ..Cell::default()
         };
     }
+
+    #[inline]
+    fn reset_slice(cells: &mut [Self], template: &Self) {
+        if cells.is_empty() {
+            return;
+        }
+
+        // Dynamic cell content must be released normally. Plain terminal text does not allocate
+        // `CellExtra`, so its rows can use a much cheaper block reset after this linear check.
+        if template.extra.is_some() || cells.iter().any(|cell| cell.extra.is_some()) {
+            for cell in cells {
+                cell.reset(template);
+            }
+            return;
+        }
+
+        let default_bg = Color::Named(NamedColor::Background);
+        if template.bg == default_bg {
+            let defaults = DEFAULT_CELL_BLOCK
+                .get_or_init(|| vec![Cell::default(); DEFAULT_CELL_BLOCK_LEN].into_boxed_slice());
+
+            // The scan above proves that no destination cell owns dynamic content. The source
+            // cells also contain no `Arc`, so duplicating their representation does not duplicate
+            // ownership. Copying a whole terminal row at once is substantially cheaper than
+            // reconstructing every default cell separately during scrollback.
+            for chunk in cells.chunks_mut(DEFAULT_CELL_BLOCK_LEN) {
+                unsafe {
+                    chunk
+                        .as_mut_ptr()
+                        .copy_from_nonoverlapping(defaults.as_ptr(), chunk.len());
+                }
+            }
+            return;
+        }
+
+        // Every old and new `extra` value is `None`, so replacing these cells cannot leak or
+        // duplicate an `Arc`. Raw writes avoid redundant drop checks while allowing LLVM to
+        // combine consecutive stores without repeated `memmove` calls.
+        unsafe {
+            let pointer = cells.as_mut_ptr();
+            for index in 0..cells.len() {
+                pointer.add(index).write(Cell {
+                    bg: template.bg,
+                    ..Cell::default()
+                });
+            }
+        }
+    }
 }
 
 impl From<Color> for Cell {
@@ -331,5 +383,41 @@ mod tests {
         row[Column(9)].flags.insert(super::Flags::WRAPLINE);
 
         assert_eq!(row.line_length(), Column(10));
+    }
+
+    #[test]
+    fn reset_slice_clears_plain_and_dynamic_cells() {
+        let mut plain_cells = vec![Cell::default(); DEFAULT_CELL_BLOCK_LEN + 7];
+        for cell in &mut plain_cells {
+            cell.c = 'x';
+            cell.fg = Color::Indexed(7);
+            cell.flags = Flags::ITALIC;
+        }
+        <Cell as GridCell>::reset_slice(&mut plain_cells, &Cell::default());
+        assert!(plain_cells.iter().all(|cell| cell == &Cell::default()));
+
+        let mut cells = vec![Cell::default(); 8];
+        for (index, cell) in cells.iter_mut().enumerate() {
+            cell.c = char::from(b'a' + index as u8);
+            cell.fg = Color::Indexed(index as u8);
+            cell.flags = Flags::BOLD | Flags::UNDERLINE;
+        }
+        cells[3].push_zerowidth('\u{0301}');
+        let dynamic = Arc::downgrade(cells[3].extra.as_ref().unwrap());
+
+        let template = Cell {
+            bg: Color::Indexed(42),
+            ..Cell::default()
+        };
+        <Cell as GridCell>::reset_slice(&mut cells, &template);
+
+        assert!(dynamic.upgrade().is_none());
+        assert!(cells.iter().all(|cell| {
+            cell.c == ' '
+                && cell.fg == Color::Named(NamedColor::Foreground)
+                && cell.bg == Color::Indexed(42)
+                && cell.flags.is_empty()
+                && cell.extra.is_none()
+        }));
     }
 }

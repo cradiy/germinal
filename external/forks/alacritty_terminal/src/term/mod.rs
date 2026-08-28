@@ -824,7 +824,16 @@ impl<T> Term<T> {
     /// Text moves up; clear at top
     /// Expects origin to be in scroll range.
     #[inline]
-    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
+    fn scroll_up_relative(&mut self, origin: Line, lines: usize) {
+        self.scroll_up_relative_impl(origin, lines, true);
+    }
+
+    #[inline]
+    fn scroll_up_relative_without_reset(&mut self, origin: Line, lines: usize) {
+        self.scroll_up_relative_impl(origin, lines, false);
+    }
+
+    fn scroll_up_relative_impl(&mut self, origin: Line, mut lines: usize, reset_rows: bool) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
 
         lines = cmp::min(
@@ -840,7 +849,11 @@ impl<T> Term<T> {
             .take()
             .and_then(|s| s.rotate(self, &region, lines as i32));
 
-        self.grid.scroll_up(&region, lines);
+        if reset_rows {
+            self.grid.scroll_up(&region, lines);
+        } else {
+            self.grid.scroll_up_without_reset(&region, lines);
+        }
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));
@@ -1031,6 +1044,22 @@ impl<T> Term<T> {
     where
         T: EventListener,
     {
+        self.wrapline_impl(true);
+    }
+
+    /// Wrap to a row which will be completely overwritten by the caller.
+    #[inline]
+    fn wrapline_without_reset(&mut self)
+    where
+        T: EventListener,
+    {
+        self.wrapline_impl(false);
+    }
+
+    fn wrapline_impl(&mut self, reset_row: bool)
+    where
+        T: EventListener,
+    {
         if !self.mode.contains(TermMode::LINE_WRAP) {
             return;
         }
@@ -1040,7 +1069,12 @@ impl<T> Term<T> {
         self.grid.cursor_cell().flags.insert(Flags::WRAPLINE);
 
         if self.grid.cursor.point.line + 1 >= self.scroll_region.end {
-            self.linefeed();
+            if reset_row {
+                self.linefeed();
+            } else {
+                let origin = self.scroll_region.start;
+                self.scroll_up_relative_without_reset(origin, 1);
+            }
         } else {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -1250,17 +1284,71 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         let columns = self.columns();
-        for byte in text.bytes() {
+        let bytes = text.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
             if self.grid.cursor.input_needs_wrap {
-                self.wrapline();
+                if bytes.len() - offset >= columns {
+                    self.wrapline_without_reset();
+                } else {
+                    self.wrapline();
+                }
             }
 
-            self.write_at_cursor(char::from(byte));
-            if self.grid.cursor.point.column + 1 < columns {
-                self.grid.cursor.point.column += 1;
+            let line = self.grid.cursor.point.line;
+            let start = self.grid.cursor.point.column.0;
+            let count = (columns - start).min(bytes.len() - offset);
+            let end = start + count;
+            let range = Column(start)..Column(end);
+            let fast_write = self.grid.cursor.template.extra.is_none()
+                && self.grid[line][range.clone()].iter().all(|cell| {
+                    cell.extra.is_none()
+                        && !cell
+                            .flags
+                            .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                });
+
+            if fast_write {
+                let charset = self.grid.cursor.charsets[self.active_charset];
+                let fg = self.grid.cursor.template.fg;
+                let bg = self.grid.cursor.template.bg;
+                let flags = self.grid.cursor.template.flags;
+                let cells = &mut self.grid[line][range];
+
+                // The scan above guarantees that raw replacement cannot leak dynamic content or
+                // leave half of a wide glyph behind. This avoids one bounds update, wide-cell
+                // branch, and `Arc` drop check for every ordinary ASCII cell.
+                unsafe {
+                    let pointer = cells.as_mut_ptr();
+                    for (index, byte) in bytes[offset..offset + count].iter().copied().enumerate() {
+                        pointer.add(index).write(Cell {
+                            c: charset.map(char::from(byte)),
+                            fg,
+                            bg,
+                            flags,
+                            extra: None,
+                        });
+                    }
+                }
+
+                if end < columns {
+                    self.grid.cursor.point.column = Column(end);
+                } else {
+                    self.grid.cursor.point.column = Column(columns - 1);
+                    self.grid.cursor.input_needs_wrap = true;
+                }
             } else {
-                self.grid.cursor.input_needs_wrap = true;
+                for byte in bytes[offset..offset + count].iter().copied() {
+                    self.write_at_cursor(char::from(byte));
+                    if self.grid.cursor.point.column + 1 < columns {
+                        self.grid.cursor.point.column += 1;
+                    } else {
+                        self.grid.cursor.input_needs_wrap = true;
+                    }
+                }
             }
+
+            offset += count;
         }
     }
 
@@ -2714,6 +2802,36 @@ mod tests {
 
         for c in text.chars() {
             scalar.input(c);
+        }
+        batched.input_str(text);
+
+        scalar.grid.truncate();
+        batched.grid.truncate();
+
+        assert_eq!(batched.grid, scalar.grid);
+        assert_eq!(batched.grid.cursor, scalar.grid.cursor);
+    }
+
+    #[test]
+    fn printable_ascii_batch_matches_character_input_over_dynamic_and_wide_cells() {
+        let size = TermSize::new(3, 5);
+        let mut scalar = Term::new(Config::default(), &size, VoidListener);
+        let mut batched = Term::new(Config::default(), &size, VoidListener);
+
+        for term in [&mut scalar, &mut batched] {
+            term.grid[Line(0)][Column(0)].c = '界';
+            term.grid[Line(0)][Column(0)].flags.insert(Flags::WIDE_CHAR);
+            term.grid[Line(0)][Column(1)]
+                .flags
+                .insert(Flags::WIDE_CHAR_SPACER);
+            term.grid[Line(0)][Column(2)].push_zerowidth('\u{0301}');
+            term.grid.cursor.template.fg = Color::Indexed(42);
+            term.grid.cursor.template.flags = Flags::BOLD;
+        }
+
+        let text = "0123456789abcdef";
+        for character in text.chars() {
+            scalar.input(character);
         }
         batched.input_str(text);
 
