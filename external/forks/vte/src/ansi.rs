@@ -170,7 +170,7 @@ impl FromStr for Rgb {
                 color >>= 8;
                 let r = color as u8;
                 Ok(Rgb { r, g, b })
-            },
+            }
             Err(_) => Err(()),
         }
     }
@@ -206,7 +206,11 @@ fn parse_rgb_color(color: &[u8]) -> Option<Rgb> {
         }
     };
 
-    Some(Rgb { r: scale(colors[0])?, g: scale(colors[1])?, b: scale(colors[2])? })
+    Some(Rgb {
+        r: scale(colors[0])?,
+        g: scale(colors[1])?,
+        b: scale(colors[2])?,
+    })
 }
 
 /// Parse colors in `#r(rrr)g(ggg)b(bbb)` format.
@@ -234,7 +238,9 @@ fn parse_number(input: &[u8]) -> Option<u8> {
     for c in input {
         let c = *c as char;
         let digit = c.to_digit(10)?;
-        num = num.checked_mul(10).and_then(|v| v.checked_add(digit as u8))?;
+        num = num
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(digit as u8))?;
     }
     Some(num)
 }
@@ -260,7 +266,10 @@ struct SyncState<T: Timeout> {
 
 impl<T: Timeout> Default for SyncState<T> {
     fn default() -> Self {
-        Self { buffer: Vec::with_capacity(SYNC_BUFFER_SIZE), timeout: Default::default() }
+        Self {
+            buffer: Vec::with_capacity(SYNC_BUFFER_SIZE),
+            timeout: Default::default(),
+        }
     }
 }
 
@@ -305,8 +314,9 @@ impl<T: Timeout> Processor<T> {
                 processed += self.advance_sync(handler, &bytes[processed..]);
             } else {
                 let mut performer = Performer::new(&mut self.state, handler);
-                processed +=
-                    self.parser.advance_until_terminated(&mut performer, &bytes[processed..]);
+                processed += self
+                    .parser
+                    .advance_until_terminated(&mut performer, &bytes[processed..]);
             }
         }
     }
@@ -347,13 +357,13 @@ impl<T: Timeout> Processor<T> {
                 let new_len = self.state.sync_state.buffer.len() - bsu_offset;
                 self.state.sync_state.buffer.copy_within(bsu_offset.., 0);
                 self.state.sync_state.buffer.truncate(new_len);
-            },
+            }
             // Report mode and clear state if no new BSU is present.
             None => {
                 handler.unset_private_mode(NamedPrivateMode::SyncUpdate.into());
                 self.state.sync_state.timeout.clear_timeout();
                 self.state.sync_state.buffer.clear();
-            },
+            }
         }
     }
 
@@ -408,7 +418,10 @@ impl<T: Timeout> Processor<T> {
             let escape = &self.state.sync_state.buffer[offset..offset + SYNC_ESCAPE_LEN];
 
             if escape == BSU_CSI {
-                self.state.sync_state.timeout.set_timeout(SYNC_UPDATE_TIMEOUT);
+                self.state
+                    .sync_state
+                    .timeout
+                    .set_timeout(SYNC_UPDATE_TIMEOUT);
                 bsu_offset = Some(offset);
             } else if escape == ESU_CSI {
                 self.stop_sync_internal(handler, bsu_offset);
@@ -434,7 +447,11 @@ impl<'a, H: Handler + 'a, T: Timeout> Performer<'a, H, T> {
     /// Create a performer.
     #[inline]
     pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H) -> Performer<'b, H, T> {
-        Performer { state, handler, terminated: Default::default() }
+        Performer {
+            state,
+            handler,
+            terminated: Default::default(),
+        }
     }
 }
 
@@ -1373,7 +1390,7 @@ where
                     return;
                 }
                 unhandled(params);
-            },
+            }
 
             // Set color index.
             b"4" => {
@@ -1388,19 +1405,20 @@ where
                         None => {
                             unhandled(params);
                             continue;
-                        },
+                        }
                     };
 
                     if let Some(c) = xparse_color(chunk[1]) {
                         self.handler.set_color(index as usize, c);
                     } else if chunk[1] == b"?" {
                         let prefix = alloc::format!("4;{index}");
-                        self.handler.dynamic_color_sequence(prefix, index as usize, terminator);
+                        self.handler
+                            .dynamic_color_sequence(prefix, index as usize, terminator);
                     } else {
                         unhandled(params);
                     }
                 }
-            },
+            }
 
             // Hyperlink.
             b"8" if params.len() > 2 => {
@@ -1429,7 +1447,7 @@ where
                     .and_then(|kv| str::from_utf8(kv).ok().map(|e| e.to_owned()));
 
                 self.handler.set_hyperlink(Some(Hyperlink { id, uri }));
-            },
+            }
 
             // Get/set Foreground, Background, Cursor colors.
             b"10" | b"11" | b"12" => {
@@ -1463,7 +1481,7 @@ where
                     }
                 }
                 unhandled(params);
-            },
+            }
 
             // Set mouse cursor shape.
             b"22" if params.len() == 2 => {
@@ -1472,7 +1490,7 @@ where
                     Ok(cursor_icon) => self.handler.set_mouse_cursor_icon(cursor_icon),
                     Err(_) => debug!("[osc 22] unrecognized cursor icon shape: {shape:?}"),
                 }
-            },
+            }
 
             // Set cursor style.
             b"50" => {
@@ -1490,7 +1508,7 @@ where
                     return;
                 }
                 unhandled(params);
-            },
+            }
 
             // Set clipboard.
             b"52" => {
@@ -1503,7 +1521,7 @@ where
                     b"?" => self.handler.clipboard_load(*clipboard, terminator),
                     base64 => self.handler.clipboard_store(*clipboard, base64),
                 }
-            },
+            }
 
             // Reset color index.
             b"104" => {
@@ -1522,7 +1540,7 @@ where
                         None => unhandled(params),
                     }
                 }
-            },
+            }
 
             // Reset foreground color.
             b"110" => self.handler.reset_color(NamedColor::Foreground as usize),
@@ -1580,11 +1598,11 @@ where
                 } else {
                     debug!("tried to repeat with no preceding char");
                 }
-            },
+            }
             ('C', []) | ('a', []) => handler.move_forward(next_param_or(1) as usize),
             ('c', intermediates) if next_param_or(0) == 0 => {
                 handler.identify_terminal(intermediates.first().map(|&i| i as char))
-            },
+            }
             ('D', []) => handler.move_backward(next_param_or(1) as usize),
             ('d', []) => handler.goto_line(next_param_or(1) as i32 - 1),
             ('E', []) => handler.move_down_and_cr(next_param_or(1) as usize),
@@ -1598,32 +1616,35 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
 
                 handler.clear_tabs(mode);
-            },
+            }
             ('H', []) | ('f', []) => {
                 let y = next_param_or(1) as i32;
                 let x = next_param_or(1) as usize;
                 handler.goto(y - 1, x - 1);
-            },
+            }
             ('h', []) => {
                 for param in params_iter.map(|param| param[0]) {
                     handler.set_mode(Mode::new(param))
                 }
-            },
+            }
             ('h', [b'?']) => {
                 for param in params_iter.map(|param| param[0]) {
                     // Handle sync updates opaquely.
                     if param == NamedPrivateMode::SyncUpdate as u16 {
-                        self.state.sync_state.timeout.set_timeout(SYNC_UPDATE_TIMEOUT);
+                        self.state
+                            .sync_state
+                            .timeout
+                            .set_timeout(SYNC_UPDATE_TIMEOUT);
                         self.terminated = true;
                     }
 
                     handler.set_private_mode(PrivateMode::new(param))
                 }
-            },
+            }
             ('I', []) => handler.move_forward_tabs(next_param_or(1)),
             ('J', []) => {
                 let mode = match next_param_or(0) {
@@ -1634,11 +1655,11 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
 
                 handler.clear_screen(mode);
-            },
+            }
             ('K', []) => {
                 let mode = match next_param_or(0) {
                     0 => LineClearMode::Right,
@@ -1647,11 +1668,11 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
 
                 handler.clear_line(mode);
-            },
+            }
             ('k', [b' ']) => {
                 // SCP control.
                 let char_path = match next_param_or(0) {
@@ -1661,7 +1682,7 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
 
                 let update_mode = match next_param_or(0) {
@@ -1671,22 +1692,22 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
 
                 handler.set_scp(char_path, update_mode);
-            },
+            }
             ('L', []) => handler.insert_blank_lines(next_param_or(1) as usize),
             ('l', []) => {
                 for param in params_iter.map(|param| param[0]) {
                     handler.unset_mode(Mode::new(param))
                 }
-            },
+            }
             ('l', [b'?']) => {
                 for param in params_iter.map(|param| param[0]) {
                     handler.unset_private_mode(PrivateMode::new(param))
                 }
-            },
+            }
             ('M', []) => handler.delete_lines(next_param_or(1) as usize),
             ('m', []) => {
                 if params.is_empty() {
@@ -1694,7 +1715,7 @@ where
                 } else {
                     attrs_from_sgr_parameters(*handler, &mut params_iter);
                 }
-            },
+            }
             ('m', [b'>']) => {
                 let mode = match (next_param_or(1) == 4).then(|| next_param_or(0)) {
                     Some(0) => ModifyOtherKeys::Reset,
@@ -1703,24 +1724,24 @@ where
                     _ => return unhandled!(),
                 };
                 handler.set_modify_other_keys(mode);
-            },
+            }
             ('m', [b'?']) => {
                 if params_iter.next() == Some(&[4]) {
                     handler.report_modify_other_keys();
                 } else {
                     unhandled!()
                 }
-            },
+            }
             ('n', []) => handler.device_status(next_param_or(0) as usize),
             ('P', []) => handler.delete_chars(next_param_or(1) as usize),
             ('p', [b'$']) => {
                 let mode = next_param_or(0);
                 handler.report_mode(Mode::new(mode));
-            },
+            }
             ('p', [b'?', b'$']) => {
                 let mode = next_param_or(0);
                 handler.report_private_mode(PrivateMode::new(mode));
-            },
+            }
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -1732,20 +1753,24 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
-                let cursor_style =
-                    shape.map(|shape| CursorStyle { shape, blinking: cursor_style_id % 2 == 1 });
+                let cursor_style = shape.map(|shape| CursorStyle {
+                    shape,
+                    blinking: cursor_style_id % 2 == 1,
+                });
 
                 handler.set_cursor_style(cursor_style);
-            },
+            }
             ('r', []) => {
                 let top = next_param_or(1) as usize;
-                let bottom =
-                    params_iter.next().map(|param| param[0] as usize).filter(|&param| param != 0);
+                let bottom = params_iter
+                    .next()
+                    .map(|param| param[0] as usize)
+                    .filter(|&param| param != 0);
 
                 handler.set_scrolling_region(top, bottom);
-            },
+            }
             ('S', []) => handler.scroll_up(next_param_or(1) as usize),
             ('s', []) => handler.save_cursor_position(),
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
@@ -1766,15 +1791,15 @@ where
                     _ => KeyboardModesApplyBehavior::Replace,
                 };
                 handler.set_keyboard_mode(mode, behavior);
-            },
+            }
             ('u', [b'>']) => {
                 let mode = KeyboardModes::from_bits_truncate(next_param_or(0) as u8);
                 handler.push_keyboard_mode(mode);
-            },
+            }
             ('u', [b'<']) => {
                 // The default is 1.
                 handler.pop_keyboard_modes(next_param_or(1));
-            },
+            }
             ('u', []) => handler.restore_cursor_position(),
             ('X', []) => handler.erase_chars(next_param_or(1) as usize),
             ('Z', []) => handler.move_backward_tabs(next_param_or(1)),
@@ -1803,7 +1828,7 @@ where
                     _ => {
                         unhandled!();
                         return;
-                    },
+                    }
                 };
                 self.handler.configure_charset(index, $charset)
             }};
@@ -1815,14 +1840,17 @@ where
             (b'E', []) => {
                 self.handler.linefeed();
                 self.handler.carriage_return();
-            },
+            }
             (b'H', []) => self.handler.set_horizontal_tabstop(),
             (b'M', []) => self.handler.reverse_index(),
             (b'Z', []) => self.handler.identify_terminal(None),
             (b'c', []) => self.handler.reset_state(),
             (b'0', intermediates) => {
-                configure_charset!(StandardCharset::SpecialCharacterAndLineDrawing, intermediates)
-            },
+                configure_charset!(
+                    StandardCharset::SpecialCharacterAndLineDrawing,
+                    intermediates
+                )
+            }
             (b'7', []) => self.handler.save_cursor_position(),
             (b'8', [b'#']) => self.handler.decaln(),
             (b'8', []) => self.handler.restore_cursor_position(),
@@ -1878,7 +1906,7 @@ fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIte
             [38] => {
                 let mut iter = params.map(|param| param[0]);
                 parse_sgr_color(&mut iter).map(Attr::Foreground)
-            },
+            }
             [38, params @ ..] => handle_colon_rgb(params).map(Attr::Foreground),
             [39] => Some(Attr::Foreground(Color::Named(NamedColor::Foreground))),
             [40] => Some(Attr::Background(Color::Named(NamedColor::Black))),
@@ -1892,16 +1920,16 @@ fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIte
             [48] => {
                 let mut iter = params.map(|param| param[0]);
                 parse_sgr_color(&mut iter).map(Attr::Background)
-            },
+            }
             [48, params @ ..] => handle_colon_rgb(params).map(Attr::Background),
             [49] => Some(Attr::Background(Color::Named(NamedColor::Background))),
             [58] => {
                 let mut iter = params.map(|param| param[0]);
                 parse_sgr_color(&mut iter).map(|color| Attr::UnderlineColor(Some(color)))
-            },
+            }
             [58, params @ ..] => {
                 handle_colon_rgb(params).map(|color| Attr::UnderlineColor(Some(color)))
-            },
+            }
             [59] => Some(Attr::UnderlineColor(None)),
             [90] => Some(Attr::Foreground(Color::Named(NamedColor::BrightBlack))),
             [91] => Some(Attr::Foreground(Color::Named(NamedColor::BrightRed))),
@@ -2178,7 +2206,11 @@ mod tests {
 
         parser.advance(&mut handler, BYTES);
 
-        let spec = Rgb { r: 128, g: 66, b: 255 };
+        let spec = Rgb {
+            r: 128,
+            g: 66,
+            b: 255,
+        };
 
         assert_eq!(handler.attr, Some(Attr::Foreground(Color::Spec(spec))));
     }
@@ -2217,7 +2249,10 @@ mod tests {
         parser.advance(&mut handler, BYTES);
 
         assert_eq!(handler.index, CharsetIndex::G0);
-        assert_eq!(handler.charset, StandardCharset::SpecialCharacterAndLineDrawing);
+        assert_eq!(
+            handler.charset,
+            StandardCharset::SpecialCharacterAndLineDrawing
+        );
     }
 
     #[test]
@@ -2229,7 +2264,10 @@ mod tests {
         parser.advance(&mut handler, &BYTES[..3]);
 
         assert_eq!(handler.index, CharsetIndex::G1);
-        assert_eq!(handler.charset, StandardCharset::SpecialCharacterAndLineDrawing);
+        assert_eq!(
+            handler.charset,
+            StandardCharset::SpecialCharacterAndLineDrawing
+        );
 
         let mut handler = MockHandler::default();
         parser.advance(&mut handler, &[BYTES[3]]);
@@ -2239,18 +2277,74 @@ mod tests {
 
     #[test]
     fn parse_valid_rgb_colors() {
-        assert_eq!(xparse_color(b"rgb:f/e/d"), Some(Rgb { r: 0xFF, g: 0xEE, b: 0xDD }));
-        assert_eq!(xparse_color(b"rgb:11/aa/ff"), Some(Rgb { r: 0x11, g: 0xAA, b: 0xFF }));
-        assert_eq!(xparse_color(b"rgb:f/ed1/cb23"), Some(Rgb { r: 0xFF, g: 0xEC, b: 0xCA }));
-        assert_eq!(xparse_color(b"rgb:ffff/0/0"), Some(Rgb { r: 0xFF, g: 0x0, b: 0x0 }));
+        assert_eq!(
+            xparse_color(b"rgb:f/e/d"),
+            Some(Rgb {
+                r: 0xFF,
+                g: 0xEE,
+                b: 0xDD
+            })
+        );
+        assert_eq!(
+            xparse_color(b"rgb:11/aa/ff"),
+            Some(Rgb {
+                r: 0x11,
+                g: 0xAA,
+                b: 0xFF
+            })
+        );
+        assert_eq!(
+            xparse_color(b"rgb:f/ed1/cb23"),
+            Some(Rgb {
+                r: 0xFF,
+                g: 0xEC,
+                b: 0xCA
+            })
+        );
+        assert_eq!(
+            xparse_color(b"rgb:ffff/0/0"),
+            Some(Rgb {
+                r: 0xFF,
+                g: 0x0,
+                b: 0x0
+            })
+        );
     }
 
     #[test]
     fn parse_valid_legacy_rgb_colors() {
-        assert_eq!(xparse_color(b"#1af"), Some(Rgb { r: 0x10, g: 0xA0, b: 0xF0 }));
-        assert_eq!(xparse_color(b"#11aaff"), Some(Rgb { r: 0x11, g: 0xAA, b: 0xFF }));
-        assert_eq!(xparse_color(b"#110aa0ff0"), Some(Rgb { r: 0x11, g: 0xAA, b: 0xFF }));
-        assert_eq!(xparse_color(b"#1100aa00ff00"), Some(Rgb { r: 0x11, g: 0xAA, b: 0xFF }));
+        assert_eq!(
+            xparse_color(b"#1af"),
+            Some(Rgb {
+                r: 0x10,
+                g: 0xA0,
+                b: 0xF0
+            })
+        );
+        assert_eq!(
+            xparse_color(b"#11aaff"),
+            Some(Rgb {
+                r: 0x11,
+                g: 0xAA,
+                b: 0xFF
+            })
+        );
+        assert_eq!(
+            xparse_color(b"#110aa0ff0"),
+            Some(Rgb {
+                r: 0x11,
+                g: 0xAA,
+                b: 0xFF
+            })
+        );
+        assert_eq!(
+            xparse_color(b"#1100aa00ff00"),
+            Some(Rgb {
+                r: 0x11,
+                g: 0xAA,
+                b: 0xFF
+            })
+        );
     }
 
     #[test]
@@ -2289,7 +2383,14 @@ mod tests {
 
         parser.advance(&mut handler, bytes);
 
-        assert_eq!(handler.color, Some(Rgb { r: 0xF0, g: 0xF0, b: 0xF0 }));
+        assert_eq!(
+            handler.color,
+            Some(Rgb {
+                r: 0xF0,
+                g: 0xF0,
+                b: 0xF0
+            })
+        );
     }
 
     #[test]
@@ -2453,19 +2554,47 @@ mod tests {
     #[test]
     #[cfg(feature = "std")]
     fn contrast() {
-        let rgb1 = Rgb { r: 0xFF, g: 0xFF, b: 0xFF };
-        let rgb2 = Rgb { r: 0x00, g: 0x00, b: 0x00 };
+        let rgb1 = Rgb {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+        };
+        let rgb2 = Rgb {
+            r: 0x00,
+            g: 0x00,
+            b: 0x00,
+        };
         assert!((rgb1.contrast(rgb2) - 21.).abs() < f64::EPSILON);
 
-        let rgb1 = Rgb { r: 0xFF, g: 0xFF, b: 0xFF };
+        let rgb1 = Rgb {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+        };
         assert!((rgb1.contrast(rgb1) - 1.).abs() < f64::EPSILON);
 
-        let rgb1 = Rgb { r: 0xFF, g: 0x00, b: 0xFF };
-        let rgb2 = Rgb { r: 0x00, g: 0xFF, b: 0x00 };
+        let rgb1 = Rgb {
+            r: 0xFF,
+            g: 0x00,
+            b: 0xFF,
+        };
+        let rgb2 = Rgb {
+            r: 0x00,
+            g: 0xFF,
+            b: 0x00,
+        };
         assert!((rgb1.contrast(rgb2) - 2.285_543_608_124_253_3).abs() < f64::EPSILON);
 
-        let rgb1 = Rgb { r: 0x12, g: 0x34, b: 0x56 };
-        let rgb2 = Rgb { r: 0xFE, g: 0xDC, b: 0xBA };
+        let rgb1 = Rgb {
+            r: 0x12,
+            g: 0x34,
+            b: 0x56,
+        };
+        let rgb2 = Rgb {
+            r: 0xFE,
+            g: 0xDC,
+            b: 0xBA,
+        };
         assert!((rgb1.contrast(rgb2) - 9.786_558_997_257_74).abs() < f64::EPSILON);
     }
 }
