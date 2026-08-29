@@ -194,7 +194,11 @@ impl App {
             window_opacity,
         )
         .with_cursor_motion_modes(config.cursor.motion_on_input, config.cursor.motion_on_enter)
-        .with_power_preference(config.terminal_power_preference());
+        .with_power_preference(config.terminal_power_preference())
+        .with_background_shader_frame_rate(
+            config.background.max_fps,
+            config.background.pause_when_unfocused,
+        );
         let render_runtime_factory = match background_shader {
             Some(shader) => render_runtime_factory.with_background_shader(shader),
             None => render_runtime_factory,
@@ -1161,12 +1165,11 @@ impl App {
 impl ApplicationHandler<RuntimeEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         let now = Instant::now();
-        if self
-            .render_runtime
-            .as_mut()
-            .is_some_and(|runtime| runtime.take_due_render_deadline(now))
+        if let Some(runtime) = self.render_runtime.as_mut()
+            && runtime.take_due_render_deadline(now)
         {
-            self.request_redraw();
+            // Submit the request while winit can still dispatch it in this event-loop cycle.
+            runtime.request_window_redraw();
         }
     }
 
@@ -1407,6 +1410,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         self.reset_input_modifiers();
                     }
                     self.route_focus_changed(self.focused_gshell(), focused);
+                }
+                if let Some(render_runtime) = self.render_runtime.as_mut() {
+                    render_runtime.set_window_focused(focused);
                 }
                 self.set_window_focused(focused);
             }

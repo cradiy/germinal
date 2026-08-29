@@ -153,8 +153,13 @@ pub struct WgpuTerminalWindowRuntime {
     background_shader_enabled: bool,
     background_shader_animated: bool,
     window_occluded: bool,
+    window_focused: bool,
     retain_terminal_frame: bool,
     next_background_frame_at: Option<Instant>,
+    background_shader_max_fps: u32,
+    pause_background_shader_when_unfocused: bool,
+    background_shader_elapsed: Duration,
+    background_shader_active_since: Option<Instant>,
     needs_redraw: bool,
     display_refresh_rate_millihertz: Option<u32>,
     frame_interval: Duration,
@@ -292,8 +297,9 @@ fn terminal_wgpu_backends() -> wgpu::Backends {
     wgpu::Backends::PRIMARY
 }
 
-const LOW_LATENCY_SURFACE_FRAME_QUEUE: u32 = 1;
+const LOW_LATENCY_SURFACE_FRAME_QUEUE: u32 = 2;
 const DEFAULT_CURSOR_MOTION_DURATION: Duration = Duration::from_millis(80);
+pub const DEFAULT_BACKGROUND_SHADER_MAX_FPS: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceFrameRecovery {
@@ -318,6 +324,27 @@ fn frame_interval_for_refresh_rate(refresh_rate_millihertz: Option<u32>) -> Dura
         .filter(|rate| *rate > 0)
         .unwrap_or(60_000);
     Duration::from_nanos(1_000_000_000_000_u64 / u64::from(refresh_rate_millihertz))
+}
+
+fn background_shader_frame_interval(max_fps: u32) -> Duration {
+    Duration::from_nanos((1_000_000_000_u64 / u64::from(max_fps)).max(1))
+}
+
+fn advance_periodic_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
+    let elapsed = now.saturating_duration_since(deadline);
+    let steps = elapsed.as_nanos() / interval.as_nanos() + 1;
+    let steps = u32::try_from(steps).unwrap_or(u32::MAX);
+    let next = deadline + interval.saturating_mul(steps);
+    if next > now { next } else { now + interval }
+}
+
+fn background_shader_should_run(
+    animated: bool,
+    occluded: bool,
+    focused: bool,
+    pause_when_unfocused: bool,
+) -> bool {
+    animated && !occluded && (focused || !pause_when_unfocused)
 }
 
 fn display_refresh_rate_millihertz(window: &Window) -> Option<u32> {
@@ -387,6 +414,8 @@ pub struct WgpuTerminalWindowRuntimeFactory {
     color_theme: TerminalColorTheme,
     background_opacity: f32,
     background_shader: Option<WgpuBackgroundShaderSource>,
+    background_shader_max_fps: u32,
+    pause_background_shader_when_unfocused: bool,
     power_preference: WgpuTerminalPowerPreference,
 }
 
@@ -401,6 +430,8 @@ struct WgpuTerminalWindowRuntimeOptions {
     background_opacity: f32,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     background_shader: Option<WgpuBackgroundShaderSource>,
+    background_shader_max_fps: u32,
+    pause_background_shader_when_unfocused: bool,
     power_preference: WgpuTerminalPowerPreference,
 }
 
@@ -423,12 +454,24 @@ impl WgpuTerminalWindowRuntimeFactory {
             color_theme,
             background_opacity: normalized_opacity(background_opacity),
             background_shader: None,
+            background_shader_max_fps: DEFAULT_BACKGROUND_SHADER_MAX_FPS,
+            pause_background_shader_when_unfocused: true,
             power_preference: WgpuTerminalPowerPreference::default(),
         }
     }
 
     pub fn with_background_shader(mut self, shader: WgpuBackgroundShaderSource) -> Self {
         self.background_shader = Some(shader);
+        self
+    }
+
+    pub fn with_background_shader_frame_rate(
+        mut self,
+        max_fps: u32,
+        pause_when_unfocused: bool,
+    ) -> Self {
+        self.background_shader_max_fps = max_fps.max(1);
+        self.pause_background_shader_when_unfocused = pause_when_unfocused;
         self
     }
 
@@ -468,6 +511,8 @@ impl WgpuTerminalWindowRuntimeFactory {
                 background_opacity: self.background_opacity,
                 render_plugins,
                 background_shader: self.background_shader.clone(),
+                background_shader_max_fps: self.background_shader_max_fps,
+                pause_background_shader_when_unfocused: self.pause_background_shader_when_unfocused,
                 power_preference: self.power_preference,
             },
         ))
@@ -517,6 +562,8 @@ impl WgpuTerminalWindowRuntime {
                 background_opacity,
                 render_plugins,
                 background_shader: None,
+                background_shader_max_fps: DEFAULT_BACKGROUND_SHADER_MAX_FPS,
+                pause_background_shader_when_unfocused: true,
                 power_preference: WgpuTerminalPowerPreference::default(),
             },
         )
@@ -538,6 +585,8 @@ impl WgpuTerminalWindowRuntime {
             background_opacity,
             render_plugins,
             background_shader,
+            background_shader_max_fps,
+            pause_background_shader_when_unfocused,
             power_preference,
         } = options;
         let background_opacity = normalized_opacity(background_opacity);
@@ -598,9 +647,9 @@ impl WgpuTerminalWindowRuntime {
                 height_px: height,
             },
         )?;
-        // Terminal frames are cheap and input latency matters more than CPU/GPU overlap. Keeping a
-        // single monitor refresh in flight prevents a completed frame from waiting behind another
-        // frame in the swapchain queue.
+        // Keep enough swapchain images available for the CPU, GPU, and compositor to overlap.
+        // A single frame in flight serializes surface acquisition on high-refresh-rate displays
+        // and can prevent an otherwise cheap Shader frame from reaching the monitor cadence.
         surface_config.desired_maximum_frame_latency = LOW_LATENCY_SURFACE_FRAME_QUEUE;
         let surface_capabilities = surface.get_capabilities(&adapter);
         let retain_terminal_frame = adapter_info.device_type == wgpu::DeviceType::Cpu
@@ -672,6 +721,13 @@ impl WgpuTerminalWindowRuntime {
         let now = Instant::now();
         let display_refresh_rate_millihertz = display_refresh_rate_millihertz(window.as_ref());
         let frame_interval = frame_interval_for_refresh_rate(display_refresh_rate_millihertz);
+        if background_shader_animated {
+            info!(
+                max_fps = background_shader_max_fps,
+                pause_when_unfocused = pause_background_shader_when_unfocused,
+                "configured background shader frame pacing"
+            );
+        }
         Ok(Self {
             window,
             base_title,
@@ -696,8 +752,13 @@ impl WgpuTerminalWindowRuntime {
             background_shader_enabled,
             background_shader_animated,
             window_occluded: false,
+            window_focused: true,
             retain_terminal_frame,
             next_background_frame_at: background_shader_animated.then_some(now),
+            background_shader_max_fps,
+            pause_background_shader_when_unfocused,
+            background_shader_elapsed: Duration::ZERO,
+            background_shader_active_since: background_shader_animated.then_some(now),
             needs_redraw: false,
             display_refresh_rate_millihertz,
             frame_interval,
@@ -960,20 +1021,76 @@ impl WgpuTerminalWindowRuntime {
         self.needs_redraw = true;
     }
 
+    fn background_frame_interval(&self) -> Duration {
+        background_shader_frame_interval(self.background_shader_max_fps)
+    }
+
+    fn next_background_frame_after(&self, now: Instant) -> Option<Instant> {
+        if !background_shader_should_run(
+            self.background_shader_animated,
+            self.window_occluded,
+            self.window_focused,
+            self.pause_background_shader_when_unfocused,
+        ) {
+            return None;
+        }
+        Some(now + self.background_frame_interval())
+    }
+
+    fn background_shader_elapsed_at(&self, now: Instant) -> Duration {
+        self.background_shader_elapsed
+            + self
+                .background_shader_active_since
+                .map_or(Duration::ZERO, |started_at| {
+                    now.saturating_duration_since(started_at)
+                })
+    }
+
+    fn sync_background_shader_clock(&mut self, now: Instant) {
+        let should_run = background_shader_should_run(
+            self.background_shader_animated,
+            self.window_occluded,
+            self.window_focused,
+            self.pause_background_shader_when_unfocused,
+        );
+        match (should_run, self.background_shader_active_since) {
+            (true, None) => self.background_shader_active_since = Some(now),
+            (false, Some(started_at)) => {
+                self.background_shader_elapsed += now.saturating_duration_since(started_at);
+                self.background_shader_active_since = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_window_focused(&mut self, focused: bool) {
+        if self.window_focused == focused {
+            return;
+        }
+
+        self.window_focused = focused;
+        let now = Instant::now();
+        self.sync_background_shader_clock(now);
+        self.next_background_frame_at = self.next_background_frame_after(now).map(|_| now);
+        self.next_present_at = now;
+        self.schedule_redraw();
+    }
+
     pub fn set_window_occluded(&mut self, occluded: bool) {
         if self.window_occluded == occluded {
             return;
         }
 
         self.window_occluded = occluded;
+        let now = Instant::now();
+        self.sync_background_shader_clock(now);
         if occluded {
             self.next_background_frame_at = None;
             return;
         }
 
-        let now = Instant::now();
         self.next_present_at = now;
-        self.next_background_frame_at = self.background_shader_animated.then_some(now);
+        self.next_background_frame_at = self.next_background_frame_after(now).map(|_| now);
         self.next_cursor_motion_frame_at = (!self.cursor_motions.is_empty()).then_some(now);
         self.schedule_redraw();
     }
@@ -989,7 +1106,9 @@ impl WgpuTerminalWindowRuntime {
 
         self.display_refresh_rate_millihertz = Some(refresh_rate_millihertz);
         self.frame_interval = frame_interval_for_refresh_rate(Some(refresh_rate_millihertz));
-        self.next_present_at = Instant::now();
+        let now = Instant::now();
+        self.next_present_at = now;
+        self.next_background_frame_at = self.next_background_frame_after(now);
         true
     }
 
@@ -1030,6 +1149,7 @@ impl WgpuTerminalWindowRuntime {
             self.refresh_display_timing();
         }
         let now = Instant::now();
+        let background_elapsed = self.background_shader_elapsed_at(now);
         let cursor_motion_positions = self
             .cursor_motions
             .iter()
@@ -1117,7 +1237,6 @@ impl WgpuTerminalWindowRuntime {
             .flat_map(|surface| &surface.surface_snapshot.rows)
             .map(|row| row.runs.len() as u64)
             .sum();
-
         match self
             .presenter
             .present_workspace_frame(WgpuTerminalWorkspacePresentInput {
@@ -1133,6 +1252,7 @@ impl WgpuTerminalWindowRuntime {
                 height_px: self.surface_config.height,
                 scale_factor: self.scale_factor.value(),
                 elapsed: self.started_at.elapsed(),
+                background_elapsed,
                 background_opacity: self.background_opacity,
                 visual_bell,
                 clear_color: if self.background_shader_enabled || self.background_opacity < 1.0 {
@@ -1159,9 +1279,6 @@ impl WgpuTerminalWindowRuntime {
             }
         }
         self.next_present_at = now + self.frame_interval;
-        self.next_background_frame_at = self
-            .background_shader_animated
-            .then_some(now + self.frame_interval);
         self.next_cursor_motion_frame_at =
             (!self.cursor_motions.is_empty()).then_some(now + self.frame_interval);
     }
@@ -1205,7 +1322,9 @@ impl WgpuTerminalWindowRuntime {
             .next_background_frame_at
             .is_some_and(|deadline| deadline <= now);
         if background_due {
-            self.next_background_frame_at = Some(now + self.frame_interval);
+            self.next_background_frame_at = self.next_background_frame_at.map(|deadline| {
+                advance_periodic_deadline(deadline, now, self.background_frame_interval())
+            });
         }
 
         let redraw_due = self.needs_redraw && self.next_present_at <= now;
@@ -2008,7 +2127,8 @@ mod tests {
 
     use super::{
         CursorMotion, SurfaceFrameRecovery, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE,
-        WgpuTerminalPowerPreference, accumulate_pending_surface_damage, build_cursor_motion,
+        WgpuTerminalPowerPreference, accumulate_pending_surface_damage, advance_periodic_deadline,
+        background_shader_frame_interval, background_shader_should_run, build_cursor_motion,
         build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
         ime_cursor_area, is_enter_cursor_motion, normalized_opacity, render_target_is_visible,
         surface_frame_recovery, terminal_power_preference_for_device_types, terminal_wgpu_backends,
@@ -2268,6 +2388,43 @@ mod tests {
             Duration::from_nanos(16_666_666),
         );
     }
+
+    #[test]
+    fn background_shader_frame_interval_uses_configured_cap() {
+        assert_eq!(
+            background_shader_frame_interval(60),
+            Duration::from_nanos(16_666_666),
+        );
+        assert_eq!(
+            background_shader_frame_interval(165),
+            Duration::from_nanos(6_060_606),
+        );
+    }
+
+    #[test]
+    fn background_shader_pauses_only_when_configured_and_unfocused() {
+        assert!(background_shader_should_run(true, false, true, true));
+        assert!(!background_shader_should_run(true, false, false, true));
+        assert!(background_shader_should_run(true, false, false, false));
+        assert!(!background_shader_should_run(true, true, true, false));
+        assert!(!background_shader_should_run(false, false, true, false));
+    }
+
+    #[test]
+    fn periodic_deadline_does_not_accumulate_late_wakeups() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(6);
+
+        assert_eq!(
+            advance_periodic_deadline(start, start + Duration::from_millis(9), interval),
+            start + Duration::from_millis(12),
+        );
+        assert_eq!(
+            advance_periodic_deadline(start, start + Duration::from_millis(30), interval),
+            start + Duration::from_millis(36),
+        );
+    }
+
     #[test]
     fn opacity_is_clamped_and_non_finite_values_fall_back_to_opaque() {
         assert_eq!(normalized_opacity(-0.5), 0.0);

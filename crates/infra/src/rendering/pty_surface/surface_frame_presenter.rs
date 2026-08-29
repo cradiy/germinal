@@ -158,7 +158,7 @@ impl WgpuTerminalSurfaceFramePresenter {
                         WgpuBackgroundShaderFrame {
                             width_px: input.width_px,
                             height_px: input.height_px,
-                            elapsed_seconds: input.elapsed.as_secs_f32(),
+                            elapsed_seconds: input.background_elapsed.as_secs_f32(),
                             opacity: input.background_opacity,
                         },
                     );
@@ -671,6 +671,7 @@ pub struct WgpuTerminalWorkspacePresentInput<'a, 'window> {
     pub height_px: u32,
     pub scale_factor: f64,
     pub elapsed: Duration,
+    pub background_elapsed: Duration,
     pub background_opacity: f32,
     pub visual_bell: Option<WgpuVisualBellFrame>,
     pub clear_color: WgpuTerminalClearColor,

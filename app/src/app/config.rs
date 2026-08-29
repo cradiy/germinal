@@ -6,7 +6,10 @@ use std::{
 
 use germinal_infra::rendering::pty_surface::{
     background_shader_renderer::WgpuBackgroundShaderSource,
-    window_runtime::{WgpuTerminalPowerPreference, detect_terminal_power_preference},
+    window_runtime::{
+        DEFAULT_BACKGROUND_SHADER_MAX_FPS, WgpuTerminalPowerPreference,
+        detect_terminal_power_preference,
+    },
 };
 use germinal_ports::pty_host::{
     color_theme::TerminalColorTheme,
@@ -154,6 +157,9 @@ impl GerminalConfig {
         if !self.window.opacity.is_finite() || !(0.0..=1.0).contains(&self.window.opacity) {
             return Err("window.opacity must be a finite number between 0.0 and 1.0".to_string());
         }
+        if self.background.max_fps == 0 || self.background.max_fps > 1_000 {
+            return Err("background.max_fps must be between 1 and 1000".to_string());
+        }
 
         for (name, face) in [
             ("font.normal", Some(&self.font.normal)),
@@ -292,15 +298,29 @@ pub struct ColorsConfig {
     resolved: TerminalColorTheme,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackgroundConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shader: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub animated: Option<bool>,
+    pub max_fps: u32,
+    pub pause_when_unfocused: bool,
     #[serde(skip)]
     resolved: Option<WgpuBackgroundShaderSource>,
+}
+
+impl Default for BackgroundConfig {
+    fn default() -> Self {
+        Self {
+            shader: None,
+            animated: None,
+            max_fps: DEFAULT_BACKGROUND_SHADER_MAX_FPS,
+            pause_when_unfocused: true,
+            resolved: None,
+        }
+    }
 }
 
 impl BackgroundConfig {
@@ -1088,6 +1108,8 @@ mod tests {
 
         background.resolve(Path::new("/unused")).unwrap();
 
+        assert_eq!(background.max_fps, 60);
+        assert!(background.pause_when_unfocused);
         let shader = background.resolved.unwrap();
         assert_eq!(shader.label(), "starfield");
         assert!(shader.animated());
@@ -1158,6 +1180,32 @@ mod tests {
             config.window.opacity = opacity;
             assert!(config.validate().unwrap_err().contains("window.opacity"));
         }
+    }
+
+    #[test]
+    fn parses_and_validates_background_shader_frame_rate() {
+        let config: GerminalConfig = toml::from_str(
+            r#"
+            [background]
+            shader = "starfield"
+            max_fps = 48
+            pause_when_unfocused = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.background.max_fps, 48);
+        assert!(!config.background.pause_when_unfocused);
+        assert!(config.validate().is_ok());
+
+        let mut config = GerminalConfig::default();
+        config.background.max_fps = 0;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .contains("background.max_fps")
+        );
     }
 
     #[test]

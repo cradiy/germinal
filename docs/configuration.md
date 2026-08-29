@@ -117,6 +117,8 @@ Use the built-in animated background:
 ```toml
 [background]
 shader = "starfield"
+max_fps = 60
+pause_when_unfocused = true
 ```
 
 Or load a custom WGSL file:
@@ -139,6 +141,13 @@ fn background(
 ```
 
 `window.opacity` is applied to the shader output.
+
+The background animation scheduler never exceeds `max_fps`. When
+`pause_when_unfocused = true`, an unfocused, occluded, or minimized window freezes Shader time and
+stops scheduling Shader frames, then resumes immediately when focused. Set it to `false` to keep
+the animation running while the window is unfocused. Terminal output, cursor motion, and other UI
+rendering continue to follow the display refresh rate and may cause additional complete window
+frames while active.
 
 ## Terminal
 
