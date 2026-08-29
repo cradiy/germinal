@@ -1,8 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs, io,
+    io,
     io::stdout,
-    path::{Path, PathBuf},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::Duration,
@@ -16,7 +15,6 @@ use germinal_gnative_protocol::{
             GNativeInputElementState, GNativeInputEvent, GNativeInputKey, GNativeInputModifiers,
             GNativeInputNamedKey,
         },
-        media::GNativeMediaControlCommand,
     },
     rendering::frame_plan_builder::RenderCommandDto,
     seq::Seq,
@@ -28,7 +26,7 @@ use germinal_gnative_sdk::{
 use germinal_gnative_ui::{
     CompiledUi, Element, GridSize, IntoElementNode, UiTree,
     elements::div::{div, h_flex, v_flex},
-    px, rgb, rgba, video,
+    px, rgb, rgba,
 };
 use germinal_gnative_widgets::{
     checkbox::Checkbox,
@@ -39,11 +37,6 @@ use germinal_gnative_widgets::{
 use thiserror::Error;
 
 const MAX_TODO_EVENTS: usize = 10;
-const VIDEO_SURFACE_ID: &str = "video-player-surface";
-const VIDEO_SEEK_STEP_US: u64 = 1_000_000;
-const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "mpeg", "mpg", "flv", "wmv",
-];
 
 #[derive(Debug, Error)]
 enum DemoError {
@@ -53,24 +46,6 @@ enum DemoError {
     WriteEnterControlSequence(#[source] io::Error),
     #[error("host closed before initial resize")]
     HostClosedBeforeInitialResize,
-    #[error("video path is empty; enter an existing directory")]
-    EmptyVideoPath,
-    #[error("path does not exist: {path}")]
-    VideoPathMissing { path: String },
-    #[error("path is not a directory: {path}")]
-    VideoPathNotDirectory { path: String },
-    #[error("failed to read video directory {path}: {source}")]
-    ReadVideoDirectory {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("failed to read a video directory entry under {path}: {source}")]
-    ReadVideoDirectoryEntry {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
 }
 
 fn main() -> Result<(), DemoError> {
@@ -102,7 +77,7 @@ fn main() -> Result<(), DemoError> {
     loop {
         match input_rx.recv_timeout(Duration::from_secs(60)) {
             Ok(message) => {
-                if !handle_session_message(&mut app, &mut emitter, message) {
+                if !handle_session_message(&mut app, message) {
                     app.should_quit = true;
                 }
                 draw_app(&mut app, &mut emitter)?;
@@ -141,15 +116,10 @@ fn spawn_input_reader(mut session: LocalGNativeSession, tx: mpsc::Sender<Session
     });
 }
 
-fn handle_session_message(
-    app: &mut DemoHostApp,
-    emitter: &mut DemoFrameEmitter,
-    message: SessionMessage,
-) -> bool {
+fn handle_session_message(app: &mut DemoHostApp, message: SessionMessage) -> bool {
     match message {
         SessionMessage::Input(input) => {
             handle_input(app, input);
-            flush_media_commands(app, emitter);
             true
         }
         SessionMessage::Closed => {
@@ -159,16 +129,6 @@ fn handle_session_message(
         SessionMessage::Error(error) => {
             app.push_notice(format!("session error: {error}"));
             false
-        }
-    }
-}
-
-fn flush_media_commands(app: &mut DemoHostApp, emitter: &mut DemoFrameEmitter) {
-    for command in app.drain_media_commands() {
-        if let Err(error) = emitter.send_control(command) {
-            app.push_notice(format!("failed to send media control: {error}"));
-            app.should_quit = true;
-            return;
         }
     }
 }
@@ -344,11 +304,6 @@ impl DemoFrameEmitter {
         self.last_compiled = Some(compiled);
         Ok(true)
     }
-
-    fn send_control(&mut self, command: GNativeMediaControlCommand) -> Result<(), DemoError> {
-        self.writer.send_control(command)?;
-        Ok(())
-    }
 }
 
 fn frame_delta(
@@ -429,7 +384,6 @@ impl FullUiFrame {
                     rows.entry(*y).or_default().push(command.clone());
                 }
                 RenderCommandDto::PixelFillRect { .. }
-                | RenderCommandDto::VideoSurface { .. }
                 | RenderCommandDto::PngSurface { .. }
                 | RenderCommandDto::SharedRgbaSurface { .. } => {
                     structural_commands.push(command.clone());
@@ -457,23 +411,20 @@ impl FullUiFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DemoId {
     Todo,
-    VideoPlayer,
 }
 
 impl DemoId {
-    const ALL: [DemoId; 2] = [DemoId::Todo, DemoId::VideoPlayer];
+    const ALL: [DemoId; 1] = [DemoId::Todo];
 
     fn title(self) -> &'static str {
         match self {
             DemoId::Todo => "Todo",
-            DemoId::VideoPlayer => "Video Player",
         }
     }
 
     fn subtitle(self) -> &'static str {
         match self {
             DemoId::Todo => "Keyboard-first form and list interactions",
-            DemoId::VideoPlayer => "Directory-backed video browser with dedicated Video element",
         }
     }
 }
@@ -490,7 +441,6 @@ struct DemoHostApp {
     size: GridSize,
     switcher: DemoSwitcherState,
     active_demo: ActiveDemo,
-    pending_controls: Vec<GNativeMediaControlCommand>,
     notice: Option<String>,
     should_quit: bool,
 }
@@ -501,7 +451,6 @@ impl DemoHostApp {
             size,
             switcher: DemoSwitcherState::new(DemoId::Todo),
             active_demo: ActiveDemo::new(DemoId::Todo),
-            pending_controls: Vec::new(),
             notice: Some("F1 opens demo list. j/k switches. space confirms.".to_string()),
             should_quit: false,
         }
@@ -539,8 +488,6 @@ impl DemoHostApp {
     fn activate_selected_demo(&mut self) {
         let selected = self.switcher.selected_demo();
         if self.active_demo.id() != selected {
-            self.pending_controls
-                .extend(self.active_demo.shutdown_controls());
             self.active_demo = ActiveDemo::new(selected);
             self.active_demo.resize(self.size);
             self.notice = Some(format!("loaded demo: {}", selected.title()));
@@ -555,8 +502,6 @@ impl DemoHostApp {
         modifiers: GNativeInputModifiers,
     ) {
         let demo_notice = self.active_demo.handle_key(logical_key, text, modifiers);
-        self.pending_controls
-            .extend(self.active_demo.drain_controls());
         if let Some(notice) = demo_notice {
             self.notice = Some(notice);
         }
@@ -564,15 +509,9 @@ impl DemoHostApp {
 
     fn paste(&mut self, text: &str) {
         let demo_notice = self.active_demo.paste(text);
-        self.pending_controls
-            .extend(self.active_demo.drain_controls());
         if let Some(notice) = demo_notice {
             self.notice = Some(notice);
         }
-    }
-
-    fn drain_media_commands(&mut self) -> Vec<GNativeMediaControlCommand> {
-        std::mem::take(&mut self.pending_controls)
     }
 
     fn ui_tree(&self) -> UiTree {
@@ -711,35 +650,30 @@ impl DemoSwitcherState {
 
 enum ActiveDemo {
     Todo(TodoDemo),
-    VideoPlayer(VideoPlayerDemo),
 }
 
 impl ActiveDemo {
     fn new(id: DemoId) -> Self {
         match id {
             DemoId::Todo => Self::Todo(TodoDemo::new()),
-            DemoId::VideoPlayer => Self::VideoPlayer(VideoPlayerDemo::new()),
         }
     }
 
     fn id(&self) -> DemoId {
         match self {
             Self::Todo(_) => DemoId::Todo,
-            Self::VideoPlayer(_) => DemoId::VideoPlayer,
         }
     }
 
     fn resize(&mut self, size: GridSize) {
         match self {
             Self::Todo(demo) => demo.resize(size),
-            Self::VideoPlayer(demo) => demo.resize(size),
         }
     }
 
     fn render(&self) -> DemoRender {
         match self {
             Self::Todo(demo) => demo.render(),
-            Self::VideoPlayer(demo) => demo.render(),
         }
     }
 
@@ -751,28 +685,12 @@ impl ActiveDemo {
     ) -> Option<String> {
         match self {
             Self::Todo(demo) => demo.handle_key(logical_key, text, modifiers),
-            Self::VideoPlayer(demo) => demo.handle_key(logical_key, text, modifiers),
         }
     }
 
     fn paste(&mut self, text: &str) -> Option<String> {
         match self {
             Self::Todo(demo) => demo.paste(text),
-            Self::VideoPlayer(demo) => demo.paste(text),
-        }
-    }
-
-    fn drain_controls(&mut self) -> Vec<GNativeMediaControlCommand> {
-        match self {
-            Self::Todo(_) => Vec::new(),
-            Self::VideoPlayer(demo) => demo.drain_controls(),
-        }
-    }
-
-    fn shutdown_controls(&mut self) -> Vec<GNativeMediaControlCommand> {
-        match self {
-            Self::Todo(_) => Vec::new(),
-            Self::VideoPlayer(demo) => demo.shutdown_controls(),
         }
     }
 }
@@ -1181,542 +1099,12 @@ impl TodoDemo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VideoEntry {
-    name: String,
-    path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct VideoLibrary {
-    root_path: PathBuf,
-    videos: Vec<VideoEntry>,
-    selected_index: usize,
-    loaded_index: Option<usize>,
-    playback: PlaybackState,
-    position_us: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlaybackState {
-    Stopped,
-    Playing,
-    Paused,
-}
-
-struct VideoPlayerDemo {
-    size: GridSize,
-    path_input: InputState,
-    library: Option<VideoLibrary>,
-    error_message: Option<String>,
-    info_message: Option<String>,
-    pending_controls: Vec<GNativeMediaControlCommand>,
-}
-
-impl VideoPlayerDemo {
-    fn new() -> Self {
-        let mut path_input = InputState::new("video-root-path")
-            .placeholder("Enter a directory path that contains videos")
-            .clean_on_escape();
-        path_input.set_focused(true);
-        Self {
-            size: GridSize::new(1, 1),
-            path_input,
-            library: None,
-            error_message: None,
-            info_message: Some(
-                "Enter confirms the directory. F1 opens the demo switcher.".to_string(),
-            ),
-            pending_controls: Vec::new(),
-        }
-    }
-
-    fn resize(&mut self, size: GridSize) {
-        self.size = size;
-    }
-
-    fn render(&self) -> DemoRender {
-        let content = if self.library.is_some() {
-            self.browser_view()
-        } else {
-            self.path_prompt_view()
-        };
-
-        DemoRender {
-            title: "Video Player",
-            help: "Path prompt uses Enter. Browser uses j/k, space, h/l. Selection does not auto-play.",
-            content,
-            overlay: None,
-        }
-    }
-
-    fn handle_key(
-        &mut self,
-        logical_key: GNativeInputKey,
-        text: Option<&str>,
-        modifiers: GNativeInputModifiers,
-    ) -> Option<String> {
-        if self.library.is_none() {
-            match logical_key {
-                GNativeInputKey::Named(GNativeInputNamedKey::ArrowLeft) => {
-                    self.path_input.move_cursor_left()
-                }
-                GNativeInputKey::Named(GNativeInputNamedKey::ArrowRight) => {
-                    self.path_input.move_cursor_right();
-                }
-                GNativeInputKey::Named(GNativeInputNamedKey::Backspace) => self.backspace_path(),
-                GNativeInputKey::Named(GNativeInputNamedKey::Escape) => self.clear_prompt_error(),
-                GNativeInputKey::Named(GNativeInputNamedKey::Enter) => self.submit_path(),
-                _ if !modifiers.control && !modifiers.alt => {
-                    if let Some(value) = text_input_of(&logical_key, text) {
-                        self.insert_path_text(&value);
-                    }
-                }
-                _ => {}
-            }
-            return self.current_notice();
-        }
-
-        let Some(library) = self.library.as_mut() else {
-            return self.current_notice();
-        };
-
-        match logical_key {
-            GNativeInputKey::Named(GNativeInputNamedKey::ArrowUp) => {
-                if library.selected_index > 0 {
-                    library.selected_index -= 1;
-                }
-            }
-            GNativeInputKey::Named(GNativeInputNamedKey::ArrowDown) => {
-                if library.selected_index + 1 < library.videos.len() {
-                    library.selected_index += 1;
-                }
-            }
-            _ if !modifiers.control && !modifiers.alt => {
-                if let Some(ch) = character_of(&logical_key, text) {
-                    match ch {
-                        'j' => {
-                            if library.selected_index + 1 < library.videos.len() {
-                                library.selected_index += 1;
-                            }
-                        }
-                        'k' => {
-                            if library.selected_index > 0 {
-                                library.selected_index -= 1;
-                            }
-                        }
-                        ' ' => self.toggle_playback(),
-                        'h' => self.seek_by(-1),
-                        'l' => self.seek_by(1),
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        self.current_notice()
-    }
-
-    fn paste(&mut self, text: &str) -> Option<String> {
-        if self.library.is_none() {
-            self.insert_path_text(text);
-        }
-        self.current_notice()
-    }
-
-    fn drain_controls(&mut self) -> Vec<GNativeMediaControlCommand> {
-        std::mem::take(&mut self.pending_controls)
-    }
-
-    fn shutdown_controls(&mut self) -> Vec<GNativeMediaControlCommand> {
-        if self
-            .library
-            .as_ref()
-            .is_some_and(|library| library.loaded_index.is_some())
-        {
-            vec![GNativeMediaControlCommand::Stop]
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn current_notice(&self) -> Option<String> {
-        self.error_message
-            .clone()
-            .or_else(|| self.info_message.clone())
-    }
-
-    fn insert_path_text(&mut self, text: &str) {
-        self.path_input.insert_text(text);
-        self.error_message = None;
-    }
-
-    fn backspace_path(&mut self) {
-        self.path_input.backspace();
-        self.error_message = None;
-    }
-
-    fn clear_prompt_error(&mut self) {
-        self.error_message = None;
-        if self.path_input.clean_on_escape_enabled() && !self.path_input.value().is_empty() {
-            self.path_input.clear();
-        }
-    }
-
-    fn submit_path(&mut self) {
-        let value = self.path_input.value().trim();
-        match scan_video_entries(value) {
-            Ok(videos) => {
-                let root_path = PathBuf::from(value);
-                let video_count = videos.len();
-                self.library = Some(VideoLibrary {
-                    root_path,
-                    videos,
-                    selected_index: 0,
-                    loaded_index: None,
-                    playback: PlaybackState::Stopped,
-                    position_us: 0,
-                });
-                self.path_input.set_focused(false);
-                self.error_message = None;
-                self.info_message = Some(format!(
-                    "loaded directory. videos={} selected file does not auto-play; press space to start.",
-                    video_count
-                ));
-            }
-            Err(error) => {
-                self.error_message = Some(error.to_string());
-                self.info_message = None;
-            }
-        }
-    }
-
-    fn toggle_playback(&mut self) {
-        let Some(library) = self.library.as_mut() else {
-            return;
-        };
-        if library.videos.is_empty() {
-            self.error_message =
-                Some("the selected directory has no supported video files".to_string());
-            self.info_message = None;
-            return;
-        }
-
-        let selected_index = library.selected_index;
-        if library.loaded_index != Some(selected_index) {
-            if library.loaded_index.is_some() {
-                self.pending_controls.push(GNativeMediaControlCommand::Stop);
-            }
-            let path = library.videos[selected_index]
-                .path
-                .to_string_lossy()
-                .into_owned();
-            library.loaded_index = Some(selected_index);
-            library.playback = PlaybackState::Playing;
-            library.position_us = 0;
-            self.pending_controls
-                .push(GNativeMediaControlCommand::OpenFile {
-                    path,
-                    surface_id: VIDEO_SURFACE_ID.to_string(),
-                });
-            self.pending_controls.push(GNativeMediaControlCommand::Play);
-            self.info_message = Some(format!(
-                "queued play: {}",
-                library.videos[selected_index].name
-            ));
-            self.error_message = None;
-            return;
-        }
-
-        match library.playback {
-            PlaybackState::Playing => {
-                library.playback = PlaybackState::Paused;
-                self.pending_controls
-                    .push(GNativeMediaControlCommand::Pause);
-                self.info_message = Some("queued pause".to_string());
-            }
-            PlaybackState::Paused | PlaybackState::Stopped => {
-                library.playback = PlaybackState::Playing;
-                self.pending_controls.push(GNativeMediaControlCommand::Play);
-                self.info_message = Some("queued play".to_string());
-            }
-        }
-        self.error_message = None;
-    }
-
-    fn seek_by(&mut self, seconds: i64) {
-        let Some(library) = self.library.as_mut() else {
-            return;
-        };
-        if library.loaded_index.is_none() {
-            self.error_message = Some("select a video and press space before seeking".to_string());
-            self.info_message = None;
-            return;
-        }
-
-        if seconds < 0 {
-            library.position_us = library
-                .position_us
-                .saturating_sub(seconds.unsigned_abs() * VIDEO_SEEK_STEP_US);
-        } else {
-            library.position_us = library
-                .position_us
-                .saturating_add((seconds as u64).saturating_mul(VIDEO_SEEK_STEP_US));
-        }
-        self.pending_controls
-            .push(GNativeMediaControlCommand::Seek {
-                position_us: library.position_us,
-            });
-        self.info_message = Some(format!(
-            "queued seek to {}",
-            format_duration_us(library.position_us)
-        ));
-        self.error_message = None;
-    }
-
-    fn path_prompt_view(&self) -> Element {
-        let status = self
-            .error_message
-            .as_deref()
-            .unwrap_or("Enter an existing directory path. Invalid paths keep the prompt open.");
-        GroupBox::new()
-			.id("video-path-prompt")
-			.outline()
-			.fill()
-			.title("Open Video Directory")
-			.child(Label::new(
-				"The browser loads the directory on the left and reserves a dedicated Video surface on \
-				 the right.",
-			))
-			.child(Label::new(status).text_color(if self.error_message.is_some() {
-				rgb(255, 120, 120)
-			} else {
-				rgb(80, 220, 255)
-			}))
-			.child(Input::new(&self.path_input))
-			.child(Label::new("Supported extensions").secondary(VIDEO_EXTENSIONS.join(", ")))
-			.into_element()
-    }
-
-    fn browser_view(&self) -> Element {
-        let Some(library) = self.library.as_ref() else {
-            return div().into_element();
-        };
-
-        h_flex()
-            .gap_1()
-            .size_full()
-            .child(div().w(px(42.0)).child(self.video_list_panel(library)))
-            .child(div().flex_1().child(self.video_player_panel(library)))
-            .into_element()
-    }
-
-    fn video_list_panel(&self, library: &VideoLibrary) -> Element {
-        let mut panel = GroupBox::new()
-            .id("video-list")
-            .outline()
-            .fill()
-            .title("Videos")
-            .child(
-                Label::new(library.root_path.display().to_string()).secondary("j/k move selection"),
-            );
-
-        if library.videos.is_empty() {
-            panel = panel.child(
-                Label::new("No supported videos found")
-                    .secondary("Use F1 to switch demos or restart and enter another directory."),
-            );
-            return panel.into_element();
-        }
-
-        let mut rows = v_flex().gap_1();
-        for (index, entry) in library.videos.iter().enumerate() {
-            let selected = index == library.selected_index;
-            let active = library.loaded_index == Some(index);
-            let state_label = if active {
-                match library.playback {
-                    PlaybackState::Playing => "playing",
-                    PlaybackState::Paused => "paused",
-                    PlaybackState::Stopped => "stopped",
-                }
-            } else {
-                "queued"
-            };
-
-            let row = v_flex()
-                .child(
-                    Label::new(format!(
-                        "{} {}",
-                        if selected { ">" } else { " " },
-                        entry.name
-                    ))
-                    .font_semibold()
-                    .text_color(if selected {
-                        rgb(255, 214, 92)
-                    } else {
-                        rgb(226, 230, 238)
-                    }),
-                )
-                .child(Label::new(entry.path.display().to_string()).secondary(state_label));
-            rows = rows.child(row);
-        }
-
-        panel.child(rows).into_element()
-    }
-
-    fn video_player_panel(&self, library: &VideoLibrary) -> Element {
-        let current_file = library
-            .loaded_index
-            .and_then(|index| library.videos.get(index))
-            .map(|entry| entry.name.as_str())
-            .unwrap_or("not playing");
-        let playback = match library.playback {
-            PlaybackState::Stopped => "stopped",
-            PlaybackState::Playing => "playing",
-            PlaybackState::Paused => "paused",
-        };
-        let notice = self
-            .error_message
-            .as_deref()
-            .or(self.info_message.as_deref())
-            .unwrap_or(" ");
-
-        GroupBox::new()
-			.id("video-player-panel")
-			.outline()
-			.fill()
-			.title("Player")
-			.child(Label::new(format!(
-				"current={}  state={}  position={}",
-				current_file,
-				playback,
-				format_duration_us(library.position_us)
-			)))
-			.child(Label::new("space play/pause  h -1s  l +1s").secondary(notice))
-			.child(div().h(px(22.0)).bg(rgba(8, 12, 24, 255)).child(video(VIDEO_SURFACE_ID)))
-			.child(Label::new(
-				"The dedicated Video element reserves a GPU-backed surface here; it is no longer faked \
-				 through text rows.",
-			))
-			.into_element()
-    }
-}
-
-fn scan_video_entries(path: &str) -> Result<Vec<VideoEntry>, DemoError> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(DemoError::EmptyVideoPath);
-    }
-
-    let root = Path::new(trimmed);
-    if !root.exists() {
-        return Err(DemoError::VideoPathMissing {
-            path: trimmed.to_string(),
-        });
-    }
-    if !root.is_dir() {
-        return Err(DemoError::VideoPathNotDirectory {
-            path: trimmed.to_string(),
-        });
-    }
-
-    let mut videos = Vec::new();
-    for entry in fs::read_dir(root).map_err(|source| DemoError::ReadVideoDirectory {
-        path: root.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| DemoError::ReadVideoDirectoryEntry {
-            path: root.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if !path.is_file() || !is_supported_video_path(&path) {
-            continue;
-        }
-
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| path.display().to_string());
-        videos.push(VideoEntry { name, path });
-    }
-
-    videos.sort_by_key(|video| video.name.to_lowercase());
-    Ok(videos)
-}
-
-fn is_supported_video_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
-        })
-}
-
-fn format_duration_us(position_us: u64) -> String {
-    let total_seconds = position_us / 1_000_000;
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{minutes:02}:{seconds:02}")
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
     use germinal_gnative_protocol::rendering::frame_plan_builder::RenderCommandDto;
     use germinal_gnative_ui::CompiledUi;
 
-    use super::{
-        ActiveDemo, DemoHostApp, DemoId, VIDEO_EXTENSIONS, diff_compiled_commands,
-        format_duration_us, frame_delta, scan_video_entries,
-    };
-
-    #[test]
-    fn scan_video_entries_filters_and_sorts_supported_files() {
-        let temp_dir = unique_temp_dir("gnative-video-demo-scan");
-        fs::create_dir_all(&temp_dir).unwrap();
-        fs::write(temp_dir.join("zeta.mkv"), b"").unwrap();
-        fs::write(temp_dir.join("alpha.MP4"), b"").unwrap();
-        fs::write(temp_dir.join("notes.txt"), b"").unwrap();
-
-        let videos = scan_video_entries(temp_dir.to_str().unwrap()).unwrap();
-        assert_eq!(videos.len(), 2);
-        assert_eq!(videos[0].name, "alpha.MP4");
-        assert_eq!(videos[1].name, "zeta.mkv");
-        assert!(
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|extension| extension.eq_ignore_ascii_case("mp4"))
-        );
-
-        fs::remove_dir_all(&temp_dir).unwrap();
-    }
-
-    #[test]
-    fn demo_host_switch_confirmation_replaces_active_demo() {
-        let mut app = DemoHostApp::new(germinal_gnative_ui::GridSize::new(80, 24));
-        app.select_next_demo();
-        app.activate_selected_demo();
-
-        assert_eq!(app.active_demo.id(), DemoId::VideoPlayer);
-        app.active_demo = ActiveDemo::new(DemoId::Todo);
-        assert_eq!(app.active_demo.id(), DemoId::Todo);
-    }
-
-    #[test]
-    fn formats_seek_position_as_minutes_and_seconds() {
-        assert_eq!(format_duration_us(0), "00:00");
-        assert_eq!(format_duration_us(61_000_000), "01:01");
-    }
+    use super::{diff_compiled_commands, frame_delta};
 
     #[test]
     fn compiled_ui_diff_emits_only_changed_rows_when_structure_matches() {
@@ -1728,13 +1116,6 @@ mod tests {
                 width_px: 10,
                 height_px: 10,
                 color: germinal_gnative_ui::rgba(1, 2, 3, 4),
-            },
-            RenderCommandDto::VideoSurface {
-                id: "player".to_string(),
-                x_px: 0,
-                y_px: 0,
-                width_px: 10,
-                height_px: 10,
             },
             RenderCommandDto::TextRun {
                 x: 0,
@@ -1755,13 +1136,6 @@ mod tests {
                 width_px: 10,
                 height_px: 10,
                 color: germinal_gnative_ui::rgba(1, 2, 3, 4),
-            },
-            RenderCommandDto::VideoSurface {
-                id: "player".to_string(),
-                x_px: 0,
-                y_px: 0,
-                width_px: 10,
-                height_px: 10,
             },
             RenderCommandDto::TextRun {
                 x: 0,
@@ -1792,12 +1166,12 @@ mod tests {
     fn compiled_ui_diff_falls_back_to_full_frame_when_structure_changes() {
         let previous = compiled_ui(vec![
             RenderCommandDto::Clear,
-            RenderCommandDto::VideoSurface {
-                id: "player".to_string(),
+            RenderCommandDto::PixelFillRect {
                 x_px: 0,
                 y_px: 0,
                 width_px: 10,
                 height_px: 10,
+                color: germinal_gnative_ui::rgba(1, 2, 3, 4),
             },
             RenderCommandDto::TextRun {
                 x: 0,
@@ -1807,12 +1181,12 @@ mod tests {
         ]);
         let current = compiled_ui(vec![
             RenderCommandDto::Clear,
-            RenderCommandDto::VideoSurface {
-                id: "player".to_string(),
+            RenderCommandDto::PixelFillRect {
                 x_px: 1,
                 y_px: 0,
                 width_px: 10,
                 height_px: 10,
+                color: germinal_gnative_ui::rgba(1, 2, 3, 4),
             },
             RenderCommandDto::TextRun {
                 x: 0,
@@ -1840,14 +1214,6 @@ mod tests {
 
         assert_eq!(frame_delta(None, &compiled).unwrap().0, compiled.commands);
         assert!(frame_delta(Some(&compiled), &compiled).is_none());
-    }
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}-{unique}"))
     }
 
     fn compiled_ui(commands: Vec<RenderCommandDto>) -> CompiledUi {

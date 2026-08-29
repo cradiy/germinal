@@ -865,7 +865,6 @@ impl AlacrittyTerminalStore {
             latest_seq: state.latest_seq,
             default_background,
             rows,
-            video_surfaces: Vec::new(),
             image_surfaces: state.graphics.snapshots(&placeholder_cells),
             dirty_rows,
             cursor: None,

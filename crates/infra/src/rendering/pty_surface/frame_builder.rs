@@ -27,7 +27,6 @@ use crate::rendering::pty_surface::{
     render_pass_plan::WgpuTerminalRenderPassPlan,
     renderer_backend::{WgpuRendererBackend, WgpuRendererConfig},
     shader::WgpuViewportUniform,
-    video_surface_registry::WgpuVideoSurfaceRegistry,
     viewport_bind_group::{WgpuViewportBindGroupFactory, WgpuViewportUploadBytes},
 };
 
@@ -37,7 +36,6 @@ pub struct WgpuTerminalFrameBuilder {
     glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder,
     vertex_buffer_builder: WgpuQuadVertexBufferBuilder,
     renderer_backend: Rc<RefCell<WgpuRendererBackend>>,
-    video_surface_registry: WgpuVideoSurfaceRegistry,
     prepared_frame_cache: Rc<RefCell<HashMap<RenderTargetId, WgpuTerminalPreparedFrameCacheEntry>>>,
 }
 
@@ -48,7 +46,6 @@ impl WgpuTerminalFrameBuilder {
             glyph_atlas_frame_builder: WgpuTerminalGlyphAtlasFrameBuilder::debug_5x7(),
             vertex_buffer_builder: WgpuQuadVertexBufferBuilder::new(),
             renderer_backend: Rc::new(RefCell::new(WgpuRendererBackend::new(renderer_config))),
-            video_surface_registry: WgpuVideoSurfaceRegistry::default(),
             prepared_frame_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -91,18 +88,6 @@ impl WgpuTerminalFrameBuilder {
         self.renderer_config
     }
 
-    pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry {
-        &self.video_surface_registry
-    }
-
-    pub fn with_video_surface_registry(
-        mut self,
-        video_surface_registry: WgpuVideoSurfaceRegistry,
-    ) -> Self {
-        self.video_surface_registry = video_surface_registry;
-        self
-    }
-
     pub fn release_render_target_cache(&self, target_id: RenderTargetId) {
         self.glyph_atlas_frame_builder
             .remove_render_target(target_id);
@@ -111,7 +96,6 @@ impl WgpuTerminalFrameBuilder {
 
     pub fn remove_render_target(&self, target_id: RenderTargetId) {
         self.release_render_target_cache(target_id);
-        self.video_surface_registry.remove_render_target(target_id);
     }
 
     pub fn glyph_atlas_source_kind(&self) -> WgpuTerminalGlyphAtlasSourceKind {
@@ -133,7 +117,6 @@ impl WgpuTerminalFrameBuilder {
         renderer_config: WgpuRendererConfig,
     ) -> WgpuTerminalPreparedFrame {
         let total_started_at = Instant::now();
-        self.video_surface_registry.sync_snapshot(surface_snapshot);
         let cache_key = WgpuTerminalPreparedFrameCacheKey {
             seq: surface_snapshot.latest_seq,
             viewport,
@@ -411,7 +394,6 @@ mod tests {
                     decoration: Default::default(),
                 }],
             }],
-            video_surfaces: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,

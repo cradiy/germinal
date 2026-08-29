@@ -5,15 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-media-gstreamer = [
-  "dep:gstreamer",
-  "dep:gstreamer-allocators",
-  "dep:gstreamer-app",
-  "dep:gstreamer-video",
-]
-
 [dependencies]
 germinal-ports.workspace = true
 germinal-domain.workspace = true
@@ -35,7 +26,6 @@ smol_str.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
-ash.workspace = true
 compio = { workspace = true, features = ["runtime", "time", "io", "fs", "net"] }
 flume.workspace = true
 base64.workspace = true
@@ -50,10 +40,5 @@ nix = { workspace = true, features = ["term", "process", "fs", "mman"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 compio = { workspace = true, features = ["io-uring"] }
-gstreamer = { workspace = true, optional = true }
-gstreamer-allocators = { workspace = true, optional = true }
-gstreamer-app = { workspace = true, optional = true }
-gstreamer-video = { workspace = true, optional = true }
-
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 compio = { workspace = true, features = ["polling"] }

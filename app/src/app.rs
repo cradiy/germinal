@@ -31,8 +31,6 @@ use germinal_domain::{
         },
     },
 };
-#[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-use germinal_infra::gnative::gst_video_player_bridge::GstVideoPlayerBridge;
 use germinal_infra::rendering::pty_surface::render_plugin::WgpuPaneRenderPlugin;
 use germinal_infra::{
     pty::PlatformPtyBackend,
@@ -103,8 +101,6 @@ pub struct App {
     runtime_event_dispatcher: AppRuntimeEventDispatcher,
     pty_backend: PlatformPtyBackend,
     gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel<AppRuntimeEventDispatcher>,
-    #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-    media_bridge: std::sync::Arc<GstVideoPlayerBridge>,
     terminal_worker_backend: PlatformTerminalWorkerBackend<AppRuntimeEventDispatcher>,
     render_runtime_factory: WgpuTerminalWindowRuntimeFactory,
     render_runtime: Option<WgpuTerminalWindowRuntime>,
@@ -178,15 +174,6 @@ impl App {
                 GShellRuntimeEvent::SystemNotificationActivated { gshell_id },
             ));
         });
-        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-        let media_dispatcher = {
-            let runtime_event_dispatcher = runtime_event_dispatcher.clone();
-            std::sync::Arc::new(move |event: RuntimeEvent| runtime_event_dispatcher.dispatch(event))
-        };
-        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-        let media_bridge = std::sync::Arc::new(
-            GstVideoPlayerBridge::new(media_dispatcher).map_err(AppError::MediaBridge)?,
-        );
         let terminal_profile = config.terminal_profile();
         let scrollback_history = config.scrolling.history;
         let terminal_cursor_style = config.terminal_cursor_style();
@@ -224,8 +211,6 @@ impl App {
             pty_backend: PlatformPtyBackend::new(),
             gnative_tunnel: germinal_infra::gnative::tunnel::GNativeTunnel::new()
                 .map_err(AppError::CreateGNativeTunnel)?,
-            #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-            media_bridge: std::sync::Arc::clone(&media_bridge),
             terminal_worker_backend: PlatformTerminalWorkerBackend::new(
                 runtime_event_dispatcher,
                 scrollback_history,
@@ -260,9 +245,6 @@ impl App {
             app.snapshot_wake_pending(),
             app.surface_snapshot_sender(),
         );
-        #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-        app.gnative_tunnel.configure_media_bridge(media_bridge);
-
         app.restore_workspace()
             .map_err(AppError::RestoreWorkspace)?;
 
@@ -1167,24 +1149,6 @@ impl App {
         self.route_window_input(gshell_id, WindowInputEvent::PointerLeft);
     }
 
-    #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-    fn drain_media_bridge_frames(&self) {
-        let Some(render_runtime) = self.render_runtime.as_ref() else {
-            return;
-        };
-
-        for pending in self.media_bridge.drain_pending_video_surface_frames() {
-            let import_result = render_runtime
-                .import_video_surface_dma_buf_frame(&pending.surface_id, &pending.frame);
-            if let Err(error) = import_result {
-                warn!(surface_id = %pending.surface_id, error = %error, "failed to import video surface frame");
-            }
-        }
-    }
-
-    #[cfg(not(all(feature = "media-gstreamer", target_os = "linux")))]
-    fn drain_media_bridge_frames(&self) {}
-
     fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.persist_workspace() {
             error!(error = %error, "failed to persist workspace");
@@ -1378,7 +1342,6 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.exit_and_persist(event_loop);
             }
             RuntimeEvent::Workspace(WorkspaceRuntimeEvent::RedrawRequested) => {
-                self.drain_media_bridge_frames();
                 self.request_redraw();
             }
             RuntimeEvent::Workspace(WorkspaceRuntimeEvent::SplitFocusedPane { direction }) => {
@@ -1453,7 +1416,6 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.drain_media_bridge_frames();
                 self.present_workspace();
             }
             WindowEvent::ModifiersChanged(modifiers) => {

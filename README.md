@@ -57,14 +57,6 @@ architecture:
 
 Targeted builds are written to `target/<rust-target>/product/germinal`.
 
-Local video playback for GNative applications is available through an optional GStreamer backend:
-
-```sh
-cargo build --locked --profile product -p germinal --features media-gstreamer
-```
-
-The standard build does not require GStreamer.
-
 ## Linux packages
 
 Create a portable Linux archive with:

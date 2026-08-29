@@ -431,7 +431,6 @@ fn retained_frame_eligible(
         && surface.render_target_plan.height_px == input.height_px
         && surface.renderer_config.background_alpha == u8::MAX
         && surface.surface_snapshot.image_surfaces.is_empty()
-        && surface.surface_snapshot.video_surfaces.is_empty()
 }
 
 fn retained_frame_action(
@@ -802,7 +801,6 @@ mod tests {
                     }],
                 })
                 .collect(),
-            video_surfaces: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows,
             cursor: None,

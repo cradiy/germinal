@@ -252,7 +252,6 @@ mod tests {
                     decoration: Default::default(),
                 }],
             }],
-            video_surfaces: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![0],
             cursor: None,

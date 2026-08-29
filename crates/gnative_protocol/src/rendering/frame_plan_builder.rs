@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 pub const PIXEL_FILL_RECT_MARKER: &str = "\u{E000}germinal.pixel_fill_rect:";
-pub const VIDEO_SURFACE_MARKER: &str = "\u{E001}germinal.video_surface:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderCommandDto {
@@ -26,13 +25,6 @@ pub enum RenderCommandDto {
         width_px: u32,
         height_px: u32,
         color: RgbaColorDto,
-    },
-    VideoSurface {
-        id: String,
-        x_px: u32,
-        y_px: u32,
-        width_px: u32,
-        height_px: u32,
     },
     PngSurface {
         id: String,
@@ -161,52 +153,6 @@ pub fn decode_pixel_fill_rect_command(text: &str) -> Option<RenderCommandDto> {
     })
 }
 
-pub fn encode_video_surface_command(command: &RenderCommandDto) -> Option<String> {
-    let RenderCommandDto::VideoSurface {
-        id,
-        x_px,
-        y_px,
-        width_px,
-        height_px,
-    } = command
-    else {
-        return None;
-    };
-
-    Some(format!(
-        "{VIDEO_SURFACE_MARKER}{}:{id},{x_px},{y_px},{width_px},{height_px}",
-        id.len()
-    ))
-}
-
-pub fn decode_video_surface_command(text: &str) -> Option<RenderCommandDto> {
-    let payload = text.strip_prefix(VIDEO_SURFACE_MARKER)?;
-    let (id_len_text, remainder) = payload.split_once(':')?;
-    let id_len: usize = id_len_text.parse().ok()?;
-    if remainder.len() < id_len + 1 {
-        return None;
-    }
-    let id = remainder.get(..id_len)?.to_string();
-    let numbers = remainder.get(id_len..)?;
-    let numbers = numbers.strip_prefix(',')?;
-    let mut parts = numbers.split(',');
-    let x_px = parts.next()?.parse().ok()?;
-    let y_px = parts.next()?.parse().ok()?;
-    let width_px = parts.next()?.parse().ok()?;
-    let height_px = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(RenderCommandDto::VideoSurface {
-        id,
-        x_px,
-        y_px,
-        width_px,
-        height_px,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,19 +170,5 @@ mod tests {
         let encoded =
             encode_pixel_fill_rect_command(&command).expect("pixel command should encode");
         assert_eq!(decode_pixel_fill_rect_command(&encoded), Some(command));
-    }
-
-    #[test]
-    fn video_surface_round_trips_through_marker_text() {
-        let command = RenderCommandDto::VideoSurface {
-            id: "demo.player".to_string(),
-            x_px: 12,
-            y_px: 34,
-            width_px: 56,
-            height_px: 78,
-        };
-
-        let encoded = encode_video_surface_command(&command).expect("video command should encode");
-        assert_eq!(decode_video_surface_command(&encoded), Some(command));
     }
 }

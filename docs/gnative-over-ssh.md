@@ -40,8 +40,7 @@ select shared memory, compression, or SSH explicitly.
 
 - Transparent reconnection or session migration.
 - Mosh support.
-- Remote DMA-BUF or shared GPU textures.
-- Full-screen video through the UI surface transport.
+- Remote shared GPU textures.
 - WSL-specific launch, GPU, or networking support.
 
 ## Current local path
@@ -149,7 +148,7 @@ Selection rules:
 
 ## Binary wire framing
 
-Newline-delimited JSON remains unsuitable for pixel, audio, and video bytes because `Vec<u8>`
+Newline-delimited JSON remains unsuitable for pixel bytes because `Vec<u8>`
 becomes a large integer array. The upgraded channel uses bounded length-prefixed binary messages:
 
 ```text
@@ -321,11 +320,10 @@ Exit: loopback network mode passes pixel, flow-control, resize, and failure test
 Exit: a remote GPUI demo enters GNative mode, handles all input classes and resize, exits, and
 returns to the same PTY pane.
 
-### Phase 5: Optimization and media separation
+### Phase 5: Optimization
 
 - Tune tile size, batches, and worker allocation from profiles.
 - Investigate GPUI damage propagation to avoid hashing a complete readback.
-- Keep video on the media stream or a dedicated codec path instead of UI tiles.
 - Document measured LAN and WAN operating ranges.
 
 Exit: common UI interaction meets measured targets without regressing local mode.

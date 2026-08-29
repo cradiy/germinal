@@ -37,10 +37,6 @@ use winit::{
     window::{UserAttentionType, Window, WindowId},
 };
 
-#[cfg(target_os = "linux")]
-use crate::rendering::pty_surface::video_surface_dmabuf_importer::{
-    VideoSurfaceImportError, import_nv12_dmabuf_frame,
-};
 use crate::rendering::pty_surface::{
     background_shader_renderer::{
         WgpuBackgroundShaderError, WgpuBackgroundShaderRenderer, WgpuBackgroundShaderSource,
@@ -59,8 +55,6 @@ use crate::rendering::pty_surface::{
         WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
         WgpuTerminalWorkspacePresentInput, WgpuTerminalWorkspaceSurface,
     },
-    video_surface_frame::WgpuVideoSurfaceNv12DmaBufFrame,
-    video_surface_registry::WgpuVideoSurfaceRegistry,
     visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
@@ -90,12 +84,6 @@ pub enum WindowRuntimeError {
     LoadCrossfontMetrics(#[source] WgpuCrossfontGlyphAtlasError),
     #[error("failed to create terminal background shader: {0}")]
     CreateBackgroundShader(#[source] WgpuBackgroundShaderError),
-    #[cfg(target_os = "linux")]
-    #[error("failed to import an NV12 dma_buf video frame into the terminal renderer: {source}")]
-    ImportVideoSurfaceFrame {
-        #[source]
-        source: VideoSurfaceImportError,
-    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -300,7 +288,7 @@ fn normalized_opacity(opacity: f32) -> f32 {
 
 fn terminal_wgpu_backends() -> wgpu::Backends {
     // GL is a secondary wgpu backend and initializes an additional driver stack even when Vulkan
-    // is selected. Germinal's Linux dma-buf video path also requires Vulkan.
+    // is selected.
     wgpu::Backends::PRIMARY
 }
 
@@ -736,42 +724,6 @@ impl WgpuTerminalWindowRuntime {
 
     pub fn window_size(&self) -> winit::dpi::PhysicalSize<u32> {
         self.window.inner_size()
-    }
-
-    pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry {
-        self.presenter.frame_renderer().video_surface_registry()
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn import_video_surface_dma_buf_frame(
-        &self,
-        id: &str,
-        frame: &WgpuVideoSurfaceNv12DmaBufFrame,
-    ) -> Result<bool, WindowRuntimeError> {
-        let targets = self
-            .surface_snapshots
-            .values()
-            .filter(|snapshot| {
-                snapshot
-                    .video_surfaces
-                    .iter()
-                    .any(|surface| surface.id == id)
-            })
-            .map(|snapshot| snapshot.target_id)
-            .collect::<Vec<_>>();
-        let mut replaced_any = false;
-
-        for target_id in targets {
-            let imported = import_nv12_dmabuf_frame(&self.device, frame)
-                .map_err(|source| WindowRuntimeError::ImportVideoSurfaceFrame { source })?;
-            replaced_any |= self
-                .video_surface_registry()
-                .replace_nv12_frame(target_id, id, imported);
-        }
-        if replaced_any {
-            self.request_window_redraw();
-        }
-        Ok(replaced_any)
     }
 
     pub fn request_window_redraw(&self) {
@@ -1565,7 +1517,6 @@ fn build_tab_bar_surface(
             latest_seq: Seq::new(0),
             default_background: palette.background,
             rows: vec![RenderSurfaceRowSnapshot { y: 0, runs }],
-            video_surfaces: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows: Vec::new(),
             cursor: None,
@@ -2255,7 +2206,6 @@ mod tests {
             latest_seq: Seq::new(seq),
             default_background: RgbColorDto::new(0, 0, 0),
             rows: Vec::new(),
-            video_surfaces: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows,
             cursor: None,
@@ -2374,7 +2324,6 @@ mod tests {
             latest_seq: Seq::new(1),
             default_background: RgbColorDto::new(0, 0, 0),
             rows: vec![],
-            video_surfaces: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
             cursor: Some(RenderSurfaceCursorSnapshot {

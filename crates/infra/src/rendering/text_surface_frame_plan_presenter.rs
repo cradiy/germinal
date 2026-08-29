@@ -34,7 +34,6 @@ use germinal_ports::{
         surface_snapshot::{
             RenderSurfaceImageSnapshot, RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot,
             RenderSurfaceSnapshot, RenderSurfaceSnapshotProvider,
-            RenderSurfaceVideoSurfaceSnapshot,
         },
     },
     seq::Seq,
@@ -95,7 +94,6 @@ fn present_incremental(
             RenderCommandDto::Clear => {
                 surface.rows.clear();
                 surface.pixel_rects.clear();
-                surface.video_surfaces.clear();
                 surface.image_surfaces.clear();
                 full_damage = true;
             }
@@ -113,12 +111,6 @@ fn present_incremental(
             }
             RenderCommandDto::PixelFillRect { .. } => {
                 surface.pixel_rects.push(command.clone());
-                full_damage = true;
-            }
-            RenderCommandDto::VideoSurface { .. } => {
-                surface
-                    .video_surfaces
-                    .push(video_surface_snapshot_of(command));
                 full_damage = true;
             }
             RenderCommandDto::PngSurface { .. } => {
@@ -153,7 +145,6 @@ fn try_present_fast(surface: &mut TextSurface, frame: &BuiltFramePlan) -> Option
     let mut dirty_rows = BTreeSet::new();
     let mut staged_rows: BTreeMap<u32, Vec<TextSurfaceRun>> = BTreeMap::new();
     let mut staged_pixel_rects = Vec::<RenderCommandDto>::new();
-    let mut staged_video_surfaces = Vec::<RenderSurfaceVideoSurfaceSnapshot>::new();
     let mut cleared_rows = BTreeSet::new();
     let mut full_damage = false;
 
@@ -162,11 +153,9 @@ fn try_present_fast(surface: &mut TextSurface, frame: &BuiltFramePlan) -> Option
             RenderCommandDto::Clear => {
                 surface.rows.clear();
                 surface.pixel_rects.clear();
-                surface.video_surfaces.clear();
                 surface.image_surfaces.clear();
                 staged_rows.clear();
                 staged_pixel_rects.clear();
-                staged_video_surfaces.clear();
                 cleared_rows.clear();
                 dirty_rows.clear();
                 full_damage = true;
@@ -204,12 +193,6 @@ fn try_present_fast(surface: &mut TextSurface, frame: &BuiltFramePlan) -> Option
                 }
                 staged_pixel_rects.push(command.clone());
             }
-            RenderCommandDto::VideoSurface { .. } => {
-                if !full_damage {
-                    return None;
-                }
-                staged_video_surfaces.push(video_surface_snapshot_of(command));
-            }
             RenderCommandDto::PngSurface { .. } | RenderCommandDto::SharedRgbaSurface { .. } => {
                 return None;
             }
@@ -226,7 +209,6 @@ fn try_present_fast(surface: &mut TextSurface, frame: &BuiltFramePlan) -> Option
     }
     if full_damage {
         surface.pixel_rects = staged_pixel_rects;
-        surface.video_surfaces = staged_video_surfaces;
     }
 
     Some((
@@ -280,7 +262,6 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
             latest_seq: surface.latest_seq,
             default_background: RgbColorDto::new(0, 0, 0),
             rows,
-            video_surfaces: surface.video_surfaces.clone(),
             image_surfaces: surface.image_surfaces.clone(),
             dirty_rows: surface.latest_dirty_rows.clone(),
             cursor: None,
@@ -487,34 +468,12 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     ))
 }
 
-fn video_surface_snapshot_of(command: &RenderCommandDto) -> RenderSurfaceVideoSurfaceSnapshot {
-    let RenderCommandDto::VideoSurface {
-        id,
-        x_px,
-        y_px,
-        width_px,
-        height_px,
-    } = command
-    else {
-        panic!("video_surface_snapshot_of requires a VideoSurface command");
-    };
-
-    RenderSurfaceVideoSurfaceSnapshot {
-        id: id.clone(),
-        x_px: *x_px,
-        y_px: *y_px,
-        width_px: *width_px,
-        height_px: *height_px,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextSurface {
     pub latest_seq: Seq,
     pub latest_dirty_rows: Vec<u32>,
     rows: BTreeMap<u32, TextSurfaceRow>,
     pixel_rects: Vec<RenderCommandDto>,
-    video_surfaces: Vec<RenderSurfaceVideoSurfaceSnapshot>,
     image_surfaces: Vec<RenderSurfaceImageSnapshot>,
 }
 
@@ -525,7 +484,6 @@ impl Default for TextSurface {
             latest_dirty_rows: Vec::new(),
             rows: BTreeMap::new(),
             pixel_rects: Vec::new(),
-            video_surfaces: Vec::new(),
             image_surfaces: Vec::new(),
         }
     }

@@ -46,11 +46,6 @@ pub enum AppError {
     },
     #[error("failed to initialize tracing subscriber: {0}")]
     LoggingInit(#[source] tracing_subscriber::util::TryInitError),
-    #[cfg(all(feature = "media-gstreamer", target_os = "linux"))]
-    #[error("failed to create GStreamer media bridge: {0}")]
-    MediaBridge(
-        #[source] germinal_infra::gnative::gst_video_player_bridge::GstVideoPlayerBridgeError,
-    ),
     #[error("failed to create gnative tunnel: {0}")]
     CreateGNativeTunnel(#[source] germinal_ports::service::gnative_tunnel::GNativeTunnelError),
     #[error("failed to restore workspace: {0}")]

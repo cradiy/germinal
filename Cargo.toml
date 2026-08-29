@@ -72,10 +72,6 @@ nix = { version = "0.31", default-features = false }
 compio = { version = "0.19", default-features = false }
 rayon = "1"
 ash = "0.38"
-gstreamer = { version = "0.25.3", features = ["v1_28"] }
-gstreamer-app = { version = "0.25.2", features = ["v1_28"] }
-gstreamer-video = { version = "0.25.3", features = ["v1_28"] }
-gstreamer-allocators = { version = "0.25.2", features = ["v1_28"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
 notify-rust = "4"
 memmap2 = "0.9"

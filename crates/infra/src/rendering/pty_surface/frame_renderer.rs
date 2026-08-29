@@ -5,8 +5,6 @@ use germinal_ports::{
     seq::Seq,
 };
 
-#[cfg(target_os = "linux")]
-use crate::rendering::pty_surface::video_surface_dmabuf_importer::import_nv12_dmabuf_frame;
 use crate::rendering::pty_surface::{
     buffer_uploader::WgpuBufferUploader,
     command_encoder_adapter::{
@@ -24,9 +22,6 @@ use crate::rendering::pty_surface::{
     render_target_plan::WgpuTerminalRenderTargetPlan,
     renderer_backend::WgpuRendererConfig,
     shader::WgpuViewportUniform,
-    video_surface_frame::WgpuVideoSurfaceFrame,
-    video_surface_registry::WgpuVideoSurfaceRegistry,
-    video_surface_renderer::WgpuVideoSurfaceRenderer,
 };
 
 #[derive(Debug, Clone)]
@@ -35,7 +30,6 @@ pub struct WgpuTerminalFrameRenderer {
     buffer_uploader: WgpuBufferUploader,
     command_encoder_adapter: WgpuTerminalCommandEncoderAdapter,
     glyph_atlas_gpu_cache: WgpuTerminalGlyphAtlasGpuCache,
-    video_surface_renderer: WgpuVideoSurfaceRenderer,
     image_surface_renderer: WgpuImageSurfaceRenderer,
 }
 
@@ -46,7 +40,6 @@ impl WgpuTerminalFrameRenderer {
             buffer_uploader: WgpuBufferUploader::new(),
             command_encoder_adapter: WgpuTerminalCommandEncoderAdapter::new(),
             glyph_atlas_gpu_cache: WgpuTerminalGlyphAtlasGpuCache::new(),
-            video_surface_renderer: WgpuVideoSurfaceRenderer::new(),
             image_surface_renderer: WgpuImageSurfaceRenderer::new(),
         }
     }
@@ -55,13 +48,8 @@ impl WgpuTerminalFrameRenderer {
         &self.frame_builder
     }
 
-    pub fn video_surface_registry(&self) -> &WgpuVideoSurfaceRegistry {
-        self.frame_builder.video_surface_registry()
-    }
-
     pub fn replace_frame_builder(&mut self, frame_builder: WgpuTerminalFrameBuilder) {
-        let video_surface_registry = self.frame_builder.video_surface_registry().clone();
-        self.frame_builder = frame_builder.with_video_surface_registry(video_surface_registry);
+        self.frame_builder = frame_builder;
         self.glyph_atlas_gpu_cache = WgpuTerminalGlyphAtlasGpuCache::new();
     }
 
@@ -74,9 +62,6 @@ impl WgpuTerminalFrameRenderer {
 
     pub fn remove_render_target(&self, target_id: RenderTargetId) {
         self.release_render_target_cache(target_id);
-        self.frame_builder
-            .video_surface_registry()
-            .remove_render_target(target_id);
     }
 
     pub fn prepare(
@@ -173,8 +158,6 @@ impl WgpuTerminalFrameRenderer {
                 glyph_atlas_uploaded: false,
                 glyph_atlas_cpu_cache_hit: false,
                 glyph_atlas_gpu_cache_hit: false,
-                video_surface_count: 0,
-                video_draw_count: 0,
                 image_surface_count: 0,
                 image_draw_count: 0,
                 timings: WgpuTerminalFrameRenderTimings {
@@ -185,11 +168,6 @@ impl WgpuTerminalFrameRenderer {
         }
 
         let prepare_started_at = Instant::now();
-        resolve_dma_buf_video_frames(
-            view.surface_snapshot,
-            gpu.device,
-            self.video_surface_registry(),
-        );
         let prepared = self.prepare_with_renderer_config(
             view.surface_snapshot,
             view.render_target_plan,
@@ -197,13 +175,6 @@ impl WgpuTerminalFrameRenderer {
         );
         let prepare_time = prepare_started_at.elapsed();
         let prepared_frame_timings = prepared.timings;
-        let prepared_video_frame = self.video_surface_renderer.prepare(
-            view.surface_snapshot,
-            view.render_target_plan,
-            view.renderer_config,
-            self.video_surface_registry(),
-        );
-        let has_video_draw_work = !prepared_video_frame.is_empty();
         let prepared_image_frame = self.image_surface_renderer.prepare(
             gpu.device,
             gpu.queue,
@@ -217,7 +188,7 @@ impl WgpuTerminalFrameRenderer {
         let upload_plan = self.build_upload_plan(&prepared);
         let upload_plan_time = upload_plan_started_at.elapsed();
 
-        if !upload_plan.has_draw_work() && !has_video_draw_work && !has_image_draw_work {
+        if !upload_plan.has_draw_work() && !has_image_draw_work {
             return WgpuTerminalFrameRenderResult {
                 target_id: prepared.target_id,
                 seq: prepared.seq,
@@ -233,8 +204,6 @@ impl WgpuTerminalFrameRenderer {
                 glyph_atlas_uploaded: false,
                 glyph_atlas_cpu_cache_hit: prepared.glyph_atlas_frame.cache_hit,
                 glyph_atlas_gpu_cache_hit: false,
-                video_surface_count: 0,
-                video_draw_count: 0,
                 image_surface_count: 0,
                 image_draw_count: 0,
                 timings: WgpuTerminalFrameRenderTimings {
@@ -379,14 +348,6 @@ impl WgpuTerminalFrameRenderer {
             &prepared_image_frame,
             WgpuImageLayer::AboveText,
         );
-        let video_result = self.video_surface_renderer.encode_prepared_frame(
-            gpu.device,
-            view.command_encoder,
-            view.target_view,
-            view.pipeline.spec.color_format,
-            view.render_target_plan,
-            &prepared_video_frame,
-        );
         let encode_time = encode_started_at.elapsed();
 
         WgpuTerminalFrameRenderResult {
@@ -399,22 +360,19 @@ impl WgpuTerminalFrameRenderer {
                 || foreground_text_result.encoded_frame
                 || below_background_image_result.encoded
                 || below_text_image_result.encoded
-                || above_image_result.encoded
-                || video_result.encoded(),
+                || above_image_result.encoded,
             command_count: first_text_result.command_count
                 + cell_background_result.command_count
                 + foreground_text_result.command_count
                 + usize::from(below_background_image_result.encoded)
                 + usize::from(below_text_image_result.encoded)
-                + usize::from(above_image_result.encoded)
-                + usize::from(video_result.encoded()),
+                + usize::from(above_image_result.encoded),
             draw_count: first_text_result.draw_count
                 + cell_background_result.draw_count
                 + foreground_text_result.draw_count
                 + below_background_image_result.draw_count
                 + below_text_image_result.draw_count
-                + above_image_result.draw_count
-                + video_result.draw_count,
+                + above_image_result.draw_count,
             index_count: first_text_result.index_count
                 + cell_background_result.index_count
                 + foreground_text_result.index_count,
@@ -424,8 +382,6 @@ impl WgpuTerminalFrameRenderer {
             glyph_atlas_uploaded,
             glyph_atlas_cpu_cache_hit: prepared.glyph_atlas_frame.cache_hit,
             glyph_atlas_gpu_cache_hit,
-            video_surface_count: video_result.surface_count,
-            video_draw_count: video_result.draw_count,
             image_surface_count: below_background_image_result.surface_count
                 + below_text_image_result.surface_count
                 + above_image_result.surface_count,
@@ -442,34 +398,6 @@ impl WgpuTerminalFrameRenderer {
             },
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn resolve_dma_buf_video_frames(
-    surface_snapshot: &RenderSurfaceSnapshot,
-    device: &wgpu::Device,
-    registry: &WgpuVideoSurfaceRegistry,
-) {
-    for surface in &surface_snapshot.video_surfaces {
-        let Some(frame) = registry.attached_frame(surface_snapshot.target_id, &surface.id) else {
-            continue;
-        };
-        let WgpuVideoSurfaceFrame::Nv12DmaBuf(frame) = frame else {
-            continue;
-        };
-        let Ok(imported) = import_nv12_dmabuf_frame(device, &frame) else {
-            continue;
-        };
-        registry.replace_nv12_frame(surface_snapshot.target_id, &surface.id, imported);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn resolve_dma_buf_video_frames(
-    _surface_snapshot: &RenderSurfaceSnapshot,
-    _device: &wgpu::Device,
-    _registry: &WgpuVideoSurfaceRegistry,
-) {
 }
 
 #[derive(Clone, Copy)]
@@ -519,8 +447,6 @@ pub struct WgpuTerminalFrameRenderResult {
     pub glyph_atlas_uploaded: bool,
     pub glyph_atlas_cpu_cache_hit: bool,
     pub glyph_atlas_gpu_cache_hit: bool,
-    pub video_surface_count: usize,
-    pub video_draw_count: usize,
     pub image_surface_count: usize,
     pub image_draw_count: usize,
     pub timings: WgpuTerminalFrameRenderTimings,

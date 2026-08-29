@@ -136,7 +136,6 @@ mod tests {
             latest_seq: Seq::new(seq),
             default_background: RgbColorDto::new(0, 0, 0),
             rows: Vec::new(),
-            video_surfaces: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows,
             cursor: None,

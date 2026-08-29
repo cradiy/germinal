@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const GNATIVE_TUNNEL_ENDPOINT_ENV: &str = "GERMINAL_GNATIVE_TUNNEL_ENDPOINT";
 pub const GNATIVE_TUNNEL_TOKEN_ENV: &str = "GERMINAL_GNATIVE_TUNNEL_TOKEN";
 pub const GNATIVE_TUNNEL_PROTOCOL_VERSION_ENV: &str = "GERMINAL_GNATIVE_TUNNEL_PROTOCOL_VERSION";
-pub const GNATIVE_PROTOCOL_VERSION: u32 = 3;
+pub const GNATIVE_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GNativeSessionDescriptor {

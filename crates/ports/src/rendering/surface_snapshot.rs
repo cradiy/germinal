@@ -15,7 +15,6 @@ pub struct RenderSurfaceSnapshot {
     pub latest_seq: Seq,
     pub default_background: RgbColorDto,
     pub rows: Vec<RenderSurfaceRowSnapshot>,
-    pub video_surfaces: Vec<RenderSurfaceVideoSurfaceSnapshot>,
     pub image_surfaces: Vec<RenderSurfaceImageSnapshot>,
     pub dirty_rows: Vec<u32>,
     pub cursor: Option<RenderSurfaceCursorSnapshot>,
@@ -116,15 +115,6 @@ pub enum RenderSurfaceUnderlineStyle {
     Curly,
     Dotted,
     Dashed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderSurfaceVideoSurfaceSnapshot {
-    pub id: String,
-    pub x_px: u32,
-    pub y_px: u32,
-    pub width_px: u32,
-    pub height_px: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -23,10 +23,7 @@ use germinal_gnative_protocol::gnative::{
     frame::{GNativeFrame, GNativeFrameCursor},
     input::GNativeInputEvent,
     session::{GNativeSessionAccepted, GNativeSessionDescriptor},
-    tunnel::{
-        GNATIVE_MAX_MESSAGE_BYTES, GNativeAppPayload, GNativeAppToHost, GNativeHostMuxFrame,
-        GNativeHostToApp,
-    },
+    tunnel::{GNATIVE_MAX_MESSAGE_BYTES, GNativeAppToHost, GNativeHostToApp},
 };
 use germinal_gnative_protocol::seq::Seq;
 use germinal_ports::{
@@ -45,12 +42,7 @@ use germinal_ports::{
 };
 use tracing::warn;
 
-use crate::{
-    gnative::media_bridge::{
-        GNativeMediaBridgeHandle, IGNativeMediaBridge, NoopGNativeMediaBridge,
-    },
-    rendering::text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter,
-};
+use crate::rendering::text_surface_frame_plan_presenter::TextSurfaceFramePlanPresenter;
 
 const TCP_ENDPOINT_PREFIX: &str = "tcp://";
 const TUNNEL_COMMAND_QUEUE_CAPACITY: usize = 256;
@@ -59,7 +51,6 @@ const ACCEPT_SESSION_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct GNativeTunnel<Dispatch> {
     command_tx: flume::Sender<TunnelCommand<Dispatch>>,
     dispatcher: RefCell<Option<Dispatch>>,
-    media_bridge: RefCell<GNativeMediaBridgeHandle>,
     snapshot_wake_pending: RefCell<Arc<AtomicBool>>,
     surface_snapshot_tx: RefCell<Option<SurfaceSnapshotSender>>,
     accept_session_timeout: Duration,
@@ -76,10 +67,6 @@ impl<Dispatch> GNativeTunnel<Dispatch> {
         snapshot_wake_pending.store(false, Ordering::Release);
         *self.snapshot_wake_pending.borrow_mut() = snapshot_wake_pending;
         *self.surface_snapshot_tx.borrow_mut() = Some(surface_snapshot_tx);
-    }
-
-    pub fn configure_media_bridge(&self, media_bridge: GNativeMediaBridgeHandle) {
-        *self.media_bridge.borrow_mut() = media_bridge;
     }
 
     fn enqueue_command(&self, command: TunnelCommand<Dispatch>) -> Result<(), GNativeTunnelError> {
@@ -130,7 +117,6 @@ where
         Ok(Self {
             command_tx,
             dispatcher: RefCell::new(None),
-            media_bridge: RefCell::new(Arc::new(NoopGNativeMediaBridge)),
             snapshot_wake_pending: RefCell::new(Arc::new(AtomicBool::new(false))),
             surface_snapshot_tx: RefCell::new(None),
             accept_session_timeout,
@@ -171,11 +157,9 @@ where
             .clone()
             .ok_or(GNativeTunnelError::SnapshotSenderNotConfigured)?;
         let snapshot_wake_pending = Arc::clone(&self.snapshot_wake_pending.borrow());
-        let media_bridge = self.media_bridge.borrow().clone();
         self.enqueue_command(TunnelCommand::BeginAcceptSession {
             gshell_id,
             dispatcher,
-            media_bridge,
             snapshot_wake_pending,
             surface_snapshot_tx,
             accept_timeout: self.accept_session_timeout,
@@ -204,7 +188,6 @@ enum TunnelCommand<Dispatch> {
     BeginAcceptSession {
         gshell_id: GShellId,
         dispatcher: Dispatch,
-        media_bridge: GNativeMediaBridgeHandle,
         snapshot_wake_pending: Arc<AtomicBool>,
         surface_snapshot_tx: SurfaceSnapshotSender,
         accept_timeout: Duration,
@@ -222,7 +205,6 @@ struct TunnelSlot {
     descriptor: GNativeSessionDescriptor,
     listener: TcpListener,
     writer: Option<TcpStream>,
-    next_host_mux_seq: u64,
     accepting: bool,
     accept_generation: u64,
 }
@@ -248,7 +230,6 @@ where
             TunnelCommand::BeginAcceptSession {
                 gshell_id,
                 dispatcher,
-                media_bridge,
                 snapshot_wake_pending,
                 surface_snapshot_tx,
                 accept_timeout,
@@ -279,7 +260,6 @@ where
                                     descriptor,
                                     listener,
                                     dispatcher.clone(),
-                                    media_bridge,
                                     snapshot_wake_pending,
                                     surface_snapshot_tx,
                                 ),
@@ -342,7 +322,6 @@ async fn ensure_session_descriptor_async(
             descriptor: descriptor.clone(),
             listener,
             writer: None,
-            next_host_mux_seq: 1,
             accepting: false,
             accept_generation: 0,
         },
@@ -395,7 +374,6 @@ async fn accept_session_async<Dispatch>(
     descriptor: GNativeSessionDescriptor,
     listener: TcpListener,
     dispatcher: Dispatch,
-    media_bridge: GNativeMediaBridgeHandle,
     snapshot_wake_pending: Arc<AtomicBool>,
     surface_snapshot_tx: SurfaceSnapshotSender,
 ) -> Result<(GNativeSessionAccepted, TcpStream), GNativeTunnelError>
@@ -442,7 +420,6 @@ where
             gshell_id,
             reader,
             dispatcher,
-            media_bridge,
             snapshot_wake_pending,
             surface_snapshot_tx,
         )
@@ -502,16 +479,8 @@ async fn send_input_async(
             .ok_or(GNativeTunnelError::MissingTunnelSlot {
                 gshell_id: gshell_id.value(),
             })?;
-    let mux_seq = next_host_mux_seq(&mut slot);
-
     let result = match slot.writer.as_mut() {
-        Some(writer) => {
-            write_host_message(
-                writer,
-                &GNativeHostToApp::Mux(GNativeHostMuxFrame::input(mux_seq, input)),
-            )
-            .await
-        }
+        Some(writer) => write_host_message(writer, &GNativeHostToApp::Input(input)).await,
         None => Err(GNativeTunnelError::InactiveSession {
             gshell_id: gshell_id.value(),
         }),
@@ -625,7 +594,6 @@ async fn read_frames_loop<Dispatch>(
     gshell_id: GShellId,
     mut reader: TcpStream,
     dispatcher: Dispatch,
-    media_bridge: GNativeMediaBridgeHandle,
     snapshot_wake_pending: Arc<AtomicBool>,
     surface_snapshot_tx: SurfaceSnapshotSender,
 ) where
@@ -648,11 +616,10 @@ async fn read_frames_loop<Dispatch>(
         };
 
         match message {
-            GNativeAppToHost::Mux(frame) => handle_app_mux_payload(
+            GNativeAppToHost::Frame(frame) => present_frame(
                 gshell_id,
-                frame.payload,
+                frame,
                 &dispatcher,
-                media_bridge.as_ref(),
                 snapshot_wake_pending.as_ref(),
                 &surface_snapshot_tx,
                 &presenter,
@@ -668,38 +635,6 @@ async fn read_frames_loop<Dispatch>(
 
     if !exit_dispatched {
         dispatch_exit_gnative(gshell_id, &dispatcher);
-    }
-}
-
-fn handle_app_mux_payload<Dispatch>(
-    gshell_id: GShellId,
-    payload: GNativeAppPayload,
-    dispatcher: &Dispatch,
-    media_bridge: &dyn IGNativeMediaBridge,
-    snapshot_wake_pending: &AtomicBool,
-    surface_snapshot_tx: &SurfaceSnapshotSender,
-    presenter: &TextSurfaceFramePlanPresenter,
-) where
-    Dispatch: IRuntimeEventDispatcher,
-{
-    match payload {
-        GNativeAppPayload::Render(frame) => present_frame(
-            gshell_id,
-            frame,
-            dispatcher,
-            snapshot_wake_pending,
-            surface_snapshot_tx,
-            presenter,
-        ),
-        GNativeAppPayload::Control(command) => {
-            media_bridge.handle_media_control_command(command);
-        }
-        GNativeAppPayload::Audio(packet) => {
-            media_bridge.handle_audio_packet(packet);
-        }
-        GNativeAppPayload::Video(packet) => {
-            media_bridge.handle_video_packet(packet);
-        }
     }
 }
 
@@ -814,12 +749,6 @@ fn dispatch_gnative_connection_failed<Dispatch>(
 
 fn encode_tcp_endpoint(addr: std::net::SocketAddr) -> String {
     format!("{TCP_ENDPOINT_PREFIX}{addr}")
-}
-
-fn next_host_mux_seq(slot: &mut TunnelSlot) -> u64 {
-    let mux_seq = slot.next_host_mux_seq;
-    slot.next_host_mux_seq += 1;
-    mux_seq
 }
 
 fn unique_token() -> String {
