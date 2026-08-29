@@ -1702,10 +1702,11 @@ fn visible_lines_and_runs(
             continue;
         }
 
+        let character = display_cell_character(cell.c);
         let style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
         cells_by_row.entry(row).or_default().push(StyledCell {
             col,
-            c: cell.c,
+            c: character,
             zerowidth: cell.zerowidth().unwrap_or_default().to_vec(),
             style: if selected {
                 selected_style(style, color_theme)
@@ -1880,6 +1881,7 @@ fn visible_surface_rows(
         if cell.c == KITTY_IMAGE_PLACEHOLDER {
             continue;
         }
+        let character = display_cell_character(cell.c);
 
         let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
         let mut decoration = decoration_of_cell(cell, colors, color_theme);
@@ -1894,14 +1896,14 @@ fn visible_surface_rows(
         } else {
             style
         };
-        if cell.c == ' '
+        if character == ' '
             && cell.zerowidth().is_none_or(<[char]>::is_empty)
             && !surface_style_has_visible_content(style, decoration)
         {
             continue;
         }
 
-        let cell_width = terminal_char_cell_width(cell.c).max(1);
+        let cell_width = terminal_char_cell_width(character).max(1);
         let is_contiguous = current_style.is_some() && col == current_next_x;
 
         match current_style {
@@ -1910,7 +1912,7 @@ fn visible_surface_rows(
                 current_next_x = col + cell_width;
                 push_cell_characters(
                     &mut current_text,
-                    cell.c,
+                    character,
                     cell.zerowidth().unwrap_or_default(),
                 );
                 current_style = Some((style, decoration));
@@ -1922,7 +1924,7 @@ fn visible_surface_rows(
             {
                 push_cell_characters(
                     &mut current_text,
-                    cell.c,
+                    character,
                     cell.zerowidth().unwrap_or_default(),
                 );
                 current_next_x = col + cell_width;
@@ -1941,7 +1943,7 @@ fn visible_surface_rows(
                 current_text.clear();
                 push_cell_characters(
                     &mut current_text,
-                    cell.c,
+                    character,
                     cell.zerowidth().unwrap_or_default(),
                 );
                 current_style = Some((style, decoration));
@@ -2109,6 +2111,13 @@ fn styled_runs_from_cells(row: u32, cells: &[StyledCell]) -> Vec<TerminalTextRun
 fn push_cell_characters(text: &mut String, c: char, zerowidth: &[char]) {
     text.push(c);
     text.extend(zerowidth.iter().copied());
+}
+
+fn display_cell_character(character: char) -> char {
+    // Alacritty stores a horizontal tab marker in the cursor's origin cell so copied text can
+    // reconstruct tabs. It has no visible glyph; the cells up to the next tab stop already carry
+    // its screen position. Keep the marker in the terminal grid, but never send it to a renderer.
+    if character == '\t' { ' ' } else { character }
 }
 
 fn push_run_if_not_blank(
@@ -3816,6 +3825,43 @@ mod tests {
         assert!(texts.iter().any(|line| line == "world"));
         assert!(!snapshot.dirty_rows.is_empty());
         assert!(!snapshot.text_runs.is_empty());
+    }
+
+    #[test]
+    fn tab_markers_are_not_exported_as_renderable_glyphs() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(1);
+
+        store.apply_bytes(target_id, Seq::new(1), b"GPU\tUsage");
+
+        let snapshot = store.snapshot_of(target_id).expect("snapshot should exist");
+        assert_eq!(snapshot.lines[0].text, "GPU     Usage");
+        assert_eq!(
+            snapshot
+                .text_runs
+                .iter()
+                .map(|run| (run.x, run.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "GPU"), (8, "Usage")],
+        );
+
+        let surface = store
+            .render_surface_snapshot_of(target_id)
+            .expect("surface snapshot should exist");
+        assert_eq!(
+            surface.rows[0]
+                .runs
+                .iter()
+                .map(|run| (run.x, run.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "GPU"), (8, "Usage")],
+        );
+        assert!(
+            surface.rows[0]
+                .runs
+                .iter()
+                .all(|run| !run.text.contains('\t'))
+        );
     }
 
     #[test]
