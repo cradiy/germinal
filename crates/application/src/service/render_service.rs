@@ -234,6 +234,13 @@ where
         self.prj_ref_mut().as_mut().redraw_pending = true;
     }
 
+    fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
+        self.prj_ref()
+            .window_runtime()
+            .expect("window runtime must be initialized before use")
+            .tab_index_at_position(x_px, y_px)
+    }
+
     fn set_window_title(&mut self, title: &str) {
         self.prj_ref_mut()
             .window_runtime_mut()

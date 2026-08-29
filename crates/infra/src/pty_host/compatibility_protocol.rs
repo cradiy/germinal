@@ -562,7 +562,9 @@ fn decode_hex(encoded: &[u8]) -> Option<Vec<u8>> {
     }
 
     encoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some(hex_value(pair[0])? << 4 | hex_value(pair[1])?))
         .collect()
 }

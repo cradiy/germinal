@@ -87,7 +87,6 @@ pub(super) fn resolve_color_theme(
             "active_border_color" => theme.active_border = parse_entry_rgb(entry)?,
             "inactive_border_color" => theme.inactive_border = parse_entry_rgb(entry)?,
             "bell_border_color" => theme.bell_border = parse_entry_rgb(entry)?,
-            "tab_bar_background" => theme.tab_bar_background = parse_entry_rgb(entry)?,
             "active_tab_foreground" => theme.active_tab_foreground = parse_entry_rgb(entry)?,
             "active_tab_background" => theme.active_tab_background = parse_entry_rgb(entry)?,
             "inactive_tab_foreground" => theme.inactive_tab_foreground = parse_entry_rgb(entry)?,
@@ -134,7 +133,6 @@ fn is_supported_key(key: &str) -> bool {
             | "active_border_color"
             | "inactive_border_color"
             | "bell_border_color"
-            | "tab_bar_background"
             | "active_tab_foreground"
             | "active_tab_background"
             | "inactive_tab_foreground"

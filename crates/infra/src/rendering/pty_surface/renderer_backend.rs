@@ -1259,6 +1259,7 @@ pub struct WgpuQuadDrawItem {
     pub style: TextStyleDto,
     pub alpha: u8,
 }
+
 impl WgpuQuadDrawItem {
     fn surface_background(config: WgpuRendererConfig, color: RgbColorDto) -> Self {
         Self {
@@ -1345,7 +1346,7 @@ impl WgpuQuadDrawItem {
         }
     }
 
-    pub fn underline(
+    fn underline(
         x: u32,
         y: u32,
         cell_width: u32,

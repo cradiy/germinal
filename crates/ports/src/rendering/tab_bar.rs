@@ -10,6 +10,14 @@ pub enum TabBarPosition {
     Bottom,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBarStyle {
+    #[default]
+    Fade,
+    Powerline,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabBarSnapshot {
     pub titles: Vec<String>,
@@ -17,4 +25,5 @@ pub struct TabBarSnapshot {
     pub render_target_ids: Vec<RenderTargetId>,
     pub active_tab_index: usize,
     pub position: TabBarPosition,
+    pub style: TabBarStyle,
 }

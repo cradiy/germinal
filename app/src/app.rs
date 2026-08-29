@@ -120,6 +120,7 @@ pub struct App {
     pending_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
     terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
     hyperlink_pointer_consumed: bool,
+    tab_pointer_consumed: bool,
     pane_navigation_enabled: bool,
     config: GerminalConfig,
 }
@@ -240,6 +241,7 @@ impl App {
             pending_working_directories: RefCell::new(HashMap::new()),
             terminal_hyperlinks: HashMap::new(),
             hyperlink_pointer_consumed: false,
+            tab_pointer_consumed: false,
             pane_navigation_enabled,
             config,
         };
@@ -321,6 +323,7 @@ impl App {
                 .collect(),
             active_tab_index: self.active_tab_index(),
             position: self.config.tabs.position,
+            style: self.config.tabs.style,
         })
     }
 
@@ -929,6 +932,29 @@ impl App {
         true
     }
 
+    fn try_activate_tab_at_cursor(&mut self) -> bool {
+        let Some(position) = self.cursor_position else {
+            return false;
+        };
+        let Some(tab_index) = self.tab_index_at_position(position.x, position.y) else {
+            return false;
+        };
+        let Some(focused_gshell) = self.tab_gshells().get(tab_index).copied() else {
+            return false;
+        };
+        let previous_gshell = self.focused_gshell();
+        if previous_gshell == focused_gshell {
+            return true;
+        }
+        if !self.focus_gshell(focused_gshell) {
+            return false;
+        }
+
+        debug!(tab_index, "activated tab from pointer");
+        self.activate_workspace_tab(previous_gshell, focused_gshell);
+        true
+    }
+
     fn apply_gshell_focus_change(&mut self, previous: GShellId, focused: GShellId) {
         if previous != focused {
             self.clear_ime_preedit(previous);
@@ -1402,6 +1428,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     if !focused {
                         self.clear_ime_preedit(self.focused_gshell());
                         self.pointer_capture = None;
+                        self.tab_pointer_consumed = false;
                         self.route_pointer_left();
                         // Some compositors do not deliver modifier key releases after
                         // focus moves away. Never carry those stale keys into the next
@@ -1449,6 +1476,14 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
+                    if state == ElementState::Pressed && self.try_activate_tab_at_cursor() {
+                        self.tab_pointer_consumed = true;
+                        return;
+                    }
+                    if state == ElementState::Released && self.tab_pointer_consumed {
+                        self.tab_pointer_consumed = false;
+                        return;
+                    }
                     if state == ElementState::Pressed
                         && self.window_input_modifiers.control_key()
                         && self.try_open_hyperlink_at_cursor()

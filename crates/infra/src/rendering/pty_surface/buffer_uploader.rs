@@ -119,7 +119,9 @@ impl WgpuBufferUploadBytes {
     pub fn background_index_count(&self) -> u32 {
         let background_quads = self
             .vertex_data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take_while(|quad| {
                 quad.iter()
                     .all(|vertex| vertex.kind == WGPU_VERTEX_KIND_BACKGROUND)

@@ -13,7 +13,6 @@ pub struct TerminalColorTheme {
     pub active_border: RgbColorDto,
     pub inactive_border: RgbColorDto,
     pub bell_border: RgbColorDto,
-    pub tab_bar_background: RgbColorDto,
     pub active_tab_foreground: RgbColorDto,
     pub active_tab_background: RgbColorDto,
     pub inactive_tab_foreground: RgbColorDto,
@@ -27,8 +26,7 @@ impl TerminalColorTheme {
         self.active_border = mix_rgb(self.background, contrast, 155, 255);
         self.bell_border = self.palette[11];
         self.url = self.palette[12];
-        self.tab_bar_background = mix_rgb(self.background, contrast, 12, 255);
-        self.inactive_tab_background = self.tab_bar_background;
+        self.inactive_tab_background = mix_rgb(self.background, contrast, 24, 255);
         self.inactive_tab_foreground = mix_rgb(self.background, contrast, 132, 255);
         self.active_tab_background = mix_rgb(self.background, contrast, 48, 255);
         self.active_tab_foreground = mix_rgb(
@@ -56,11 +54,10 @@ impl Default for TerminalColorTheme {
             active_border: RgbColorDto::new(167, 178, 201),
             inactive_border: RgbColorDto::new(60, 69, 87),
             bell_border: RgbColorDto::new(255, 158, 46),
-            tab_bar_background: RgbColorDto::new(30, 32, 44),
             active_tab_foreground: RgbColorDto::new(225, 228, 236),
             active_tab_background: RgbColorDto::new(72, 75, 88),
             inactive_tab_foreground: RgbColorDto::new(132, 136, 153),
-            inactive_tab_background: RgbColorDto::new(30, 32, 44),
+            inactive_tab_background: RgbColorDto::new(42, 44, 56),
         }
     }
 }

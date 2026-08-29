@@ -301,7 +301,7 @@ fn image_surface_snapshot_of(command: &RenderCommandDto) -> Option<RenderSurface
     match info.color_type {
         png::ColorType::Rgba => rgba.extend_from_slice(&pixels),
         png::ColorType::Rgb => {
-            for rgb in pixels.chunks_exact(3) {
+            for rgb in pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
         }
@@ -311,7 +311,7 @@ fn image_surface_snapshot_of(command: &RenderCommandDto) -> Option<RenderSurface
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for gray_alpha in pixels.chunks_exact(2) {
+            for gray_alpha in pixels.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[
                     gray_alpha[0],
                     gray_alpha[0],

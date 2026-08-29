@@ -2362,7 +2362,7 @@ fn decode_raw(
         bytes.to_vec()
     } else {
         let mut rgba = Vec::with_capacity(pixels * 4);
-        for rgb in bytes.chunks_exact(3) {
+        for rgb in bytes.as_chunks::<3>().0 {
             rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
         }
         rgba
@@ -2413,7 +2413,7 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, KittyGraphicsError> {
     match info.color_type {
         png::ColorType::Rgba => rgba.extend_from_slice(&pixels),
         png::ColorType::Rgb => {
-            for rgb in pixels.chunks_exact(3) {
+            for rgb in pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
         }
@@ -2423,7 +2423,7 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, KittyGraphicsError> {
             }
         }
         png::ColorType::GrayscaleAlpha => {
-            for gray_alpha in pixels.chunks_exact(2) {
+            for gray_alpha in pixels.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[
                     gray_alpha[0],
                     gray_alpha[0],

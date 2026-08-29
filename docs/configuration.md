@@ -103,7 +103,7 @@ the built-in colors. Colors accept `#RGB` and `#RRGGBB`.
 
 Supported inline keys are `foreground`, `background`, `cursor`, `cursor_text_color`,
 `selection_foreground`, `selection_background`, `url_color`, `active_border_color`,
-`inactive_border_color`, `bell_border_color`, `tab_bar_background`, `active_tab_foreground`,
+`inactive_border_color`, `bell_border_color`, `active_tab_foreground`,
 `active_tab_background`, `inactive_tab_foreground`, `inactive_tab_background`, and `color0`
 through `color255`.
 
@@ -195,9 +195,11 @@ args = ["--id", "bell"]
 ```toml
 [tabs]
 position = "bottom"
+style = "fade"
 ```
 
 `position` accepts `top` or `bottom`.
+`style` accepts `fade` or `powerline`.
 
 ## Keyboard
 

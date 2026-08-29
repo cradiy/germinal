@@ -398,6 +398,10 @@ impl IRenderService for App {
         RenderService::inj_ref_mut(self).set_tab_bar(tab_bar)
     }
 
+    fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
+        RenderService::inj_ref(self).tab_index_at_position(x_px, y_px)
+    }
+
     fn set_window_title(&mut self, title: &str) {
         RenderService::inj_ref_mut(self).set_window_title(title)
     }

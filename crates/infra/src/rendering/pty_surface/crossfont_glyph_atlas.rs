@@ -1540,7 +1540,9 @@ fn glyph_rgba_pixels(
 
     match buffer {
         BitmapBuffer::Rgb(buffer) => buffer
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .take(pixel_count)
             .flat_map(|rgb| {
                 if is_color {
@@ -1552,7 +1554,9 @@ fn glyph_rgba_pixels(
             })
             .collect(),
         BitmapBuffer::Rgba(buffer) => buffer
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(pixel_count)
             .flat_map(|rgba| {
                 if is_color {

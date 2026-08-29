@@ -23,7 +23,7 @@ use germinal_ports::pty_host::{
     spawn_config::PtyShellCommand,
     terminal_clipboard::TerminalOsc52Mode,
 };
-use germinal_ports::rendering::tab_bar::TabBarPosition;
+use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarStyle};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::app::error::{AppError, AppResult};
@@ -489,12 +489,14 @@ pub struct BellCommand {
 #[serde(default)]
 pub struct TabsConfig {
     pub position: TabBarPosition,
+    pub style: TabBarStyle,
 }
 
 impl Default for TabsConfig {
     fn default() -> Self {
         Self {
             position: TabBarPosition::Bottom,
+            style: TabBarStyle::Fade,
         }
     }
 }
@@ -977,7 +979,7 @@ mod tests {
         font_family::TerminalFontFamily,
         terminal_clipboard::TerminalOsc52Mode,
     };
-    use germinal_ports::rendering::tab_bar::TabBarPosition;
+    use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarStyle};
 
     use super::{
         BackgroundConfig, GerminalConfig, GpuPowerPreference, KeyboardAction, ShellConfig,
@@ -1014,6 +1016,7 @@ mod tests {
         assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
         assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
         assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
+        assert_eq!(value["tabs"]["style"].as_str(), Some("fade"));
         assert_eq!(value["logging"]["console_level"].as_str(), Some("info"));
         assert_eq!(value["logging"]["file_level"].as_str(), Some("info"));
         assert_eq!(
@@ -1161,6 +1164,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.tabs.position, TabBarPosition::Top);
+    }
+
+    #[test]
+    fn parses_all_tab_bar_styles() {
+        for (value, expected) in [
+            ("fade", TabBarStyle::Fade),
+            ("powerline", TabBarStyle::Powerline),
+        ] {
+            let config: GerminalConfig = toml::from_str(&format!(
+                r#"
+                [tabs]
+                style = "{value}"
+                "#,
+            ))
+            .unwrap();
+
+            assert_eq!(config.tabs.style, expected);
+        }
     }
 
     #[test]

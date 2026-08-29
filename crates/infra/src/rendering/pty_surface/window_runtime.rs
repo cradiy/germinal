@@ -24,7 +24,7 @@ use germinal_ports::{
             RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
             RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, merge_surface_dirty_rows,
         },
-        tab_bar::{TabBarPosition, TabBarSnapshot},
+        tab_bar::{TabBarPosition, TabBarSnapshot, TabBarStyle},
         window_runtime::ITerminalWindowRuntime,
         workspace_layout::RenderSurfacePlacement,
     },
@@ -910,10 +910,21 @@ impl WgpuTerminalWindowRuntime {
         self.schedule_redraw();
     }
 
+    pub fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
+        self.tab_bar_surface
+            .as_ref()?
+            .tab_index_at_position(x_px, y_px)
+    }
+
     fn rebuild_tab_bar_surface(&mut self) {
         self.tab_bar_generation = self.tab_bar_generation.wrapping_add(1).max(1);
         self.tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
-            let mut surface = build_tab_bar_surface(tab_bar, self.size_info, self.color_theme)?;
+            let mut surface = build_tab_bar_surface(
+                tab_bar,
+                self.size_info,
+                self.color_theme,
+                self.background_shader_enabled && tab_bar.style == TabBarStyle::Fade,
+            )?;
             surface.snapshot.latest_seq = Seq::new(self.tab_bar_generation);
             Some(surface)
         });
@@ -1471,15 +1482,46 @@ fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool
 }
 
 const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
-const TAB_BAR_LEFT_EDGE: &str = "";
-const TAB_BAR_RIGHT_EDGE: &str = "";
-const TAB_BAR_OUTER_MARGIN: u32 = 1;
-const TAB_BAR_TAB_GAP: u32 = 1;
-const TAB_BAR_TITLE_PADDING: u32 = 2;
+const TAB_BAR_POWERLINE_EDGE: &str = "";
+const TAB_BAR_OUTER_MARGIN: u32 = 0;
+const TAB_BAR_MIN_WIDTH: u32 = 8;
 
 struct WgpuTabBarSurface {
     placement: RenderSurfacePlacement,
     snapshot: RenderSurfaceSnapshot,
+    cell_width_px: u32,
+    hit_regions: Vec<TabBarHitRegion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TabBarHitRegion {
+    tab_index: usize,
+    start_column: u32,
+    end_column: u32,
+}
+
+impl WgpuTabBarSurface {
+    fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
+        if !x_px.is_finite() || !y_px.is_finite() {
+            return None;
+        }
+
+        let local_x = x_px - f64::from(self.placement.x_px);
+        let local_y = y_px - f64::from(self.placement.y_px);
+        if local_x < 0.0
+            || local_y < 0.0
+            || local_x >= f64::from(self.placement.width_px)
+            || local_y >= f64::from(self.placement.height_px)
+        {
+            return None;
+        }
+
+        let column = (local_x / f64::from(self.cell_width_px.max(1))) as u32;
+        self.hit_regions
+            .iter()
+            .find(|region| region.start_column <= column && column < region.end_column)
+            .map(|region| region.tab_index)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1491,10 +1533,34 @@ struct TabBarPalette {
     active_foreground: RgbColorDto,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TabRenderData<'a> {
+    title: &'a str,
+    progress: Option<TerminalProgress>,
+    progress_label: &'a str,
+    active: bool,
+    palette: TabBarPalette,
+    color_theme: TerminalColorTheme,
+    next_powerline_background: RgbColorDto,
+    minimum_width: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabContentAppearance {
+    foreground: RgbColorDto,
+    background: RgbColorDto,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    left_padding: u32,
+    right_padding: u32,
+}
+
 fn build_tab_bar_surface(
     tab_bar: &TabBarSnapshot,
     window_size_info: TerminalSizeInfo,
     color_theme: TerminalColorTheme,
+    transparent_background: bool,
 ) -> Option<WgpuTabBarSurface> {
     if tab_bar.titles.len() < 2 || tab_bar.active_tab_index >= tab_bar.titles.len() {
         return None;
@@ -1515,14 +1581,20 @@ fn build_tab_bar_surface(
     let columns = (window_size.width_px() / window_size_info.cell_size().width_px().max(1)).max(1);
     let palette = tab_bar_palette(color_theme);
     let tab_count = tab_bar.titles.len() as u32;
-    let max_tab_width = columns
-        .saturating_sub(TAB_BAR_OUTER_MARGIN.saturating_mul(2))
-        .checked_div(tab_count)
-        .unwrap_or(0)
-        .max(1);
-    let mut x = TAB_BAR_OUTER_MARGIN.min(columns);
-    let mut runs = tab_bar_texture_runs(columns, palette);
-    runs.reserve(tab_bar.titles.len().saturating_mul(3));
+    let max_tab_width = columns.checked_div(tab_count).unwrap_or(0).max(1);
+    let mut x = TAB_BAR_OUTER_MARGIN;
+    let mut runs = match (tab_bar.style, transparent_background) {
+        (TabBarStyle::Fade, true) => Vec::new(),
+        (TabBarStyle::Fade, false) => tab_bar_texture_runs(columns, palette),
+        (_, _) => vec![RenderSurfaceRunSnapshot {
+            x: 0,
+            text: " ".repeat(columns as usize),
+            style: tab_bar_style(palette.background, palette.background, false),
+            decoration: Default::default(),
+        }],
+    };
+    runs.reserve(tab_bar.titles.len().saturating_mul(7));
+    let mut hit_regions = Vec::with_capacity(tab_bar.titles.len());
 
     for (index, title) in tab_bar.titles.iter().enumerate() {
         let active = index == tab_bar.active_tab_index;
@@ -1530,11 +1602,10 @@ fn build_tab_bar_surface(
         let progress_label = progress.map(tab_progress_label).unwrap_or_default();
         let progress_width =
             terminal_text_cell_width(&progress_label).saturating_add(u32::from(progress.is_some()));
-        let edge_width = u32::from(active).saturating_mul(2);
-        let reserved_width = edge_width
-            .saturating_add(TAB_BAR_TITLE_PADDING.saturating_mul(2))
+        let tab_gap = tab_bar_style_gap(tab_bar.style);
+        let reserved_width = tab_bar_style_chrome_width(tab_bar.style)
             .saturating_add(progress_width)
-            .saturating_add(TAB_BAR_TAB_GAP);
+            .saturating_add(tab_gap);
         let available_width = columns.saturating_sub(x);
         let title_budget = max_tab_width
             .min(available_width)
@@ -1544,83 +1615,42 @@ fn build_tab_bar_surface(
         }
 
         let title = truncate_title_to_cells(title, title_budget);
-        let content = format!("  {title}");
-        let content_width = terminal_text_cell_width(&content);
-        let tab_background = if active {
-            palette.active_background
+        let start_column = x;
+        let next_powerline_background = if index + 1 < tab_bar.titles.len() {
+            powerline_tab_background(palette, index + 1 == tab_bar.active_tab_index)
         } else {
-            palette.inactive_background
+            palette.background
         };
-
-        if active {
-            runs.push(RenderSurfaceRunSnapshot {
-                x,
-                text: TAB_BAR_LEFT_EDGE.to_string(),
-                style: tab_bar_style(palette.active_background, palette.background, false),
-                decoration: Default::default(),
-            });
-            x = x.saturating_add(1);
-        }
-
-        runs.push(RenderSurfaceRunSnapshot {
-            x,
-            text: content,
-            style: if active {
-                tab_bar_style(palette.active_foreground, palette.active_background, true)
-            } else {
-                tab_bar_style(
-                    palette.inactive_foreground,
-                    palette.inactive_background,
-                    false,
-                )
-            },
-            decoration: Default::default(),
-        });
-        x = x.saturating_add(content_width);
-
-        if let Some(progress) = progress {
-            let text = format!(" {progress_label}");
-            let text_width = terminal_text_cell_width(&text);
-            runs.push(RenderSurfaceRunSnapshot {
-                x,
-                text,
-                style: tab_bar_style(
-                    tab_progress_color(progress, color_theme),
-                    tab_background,
-                    true,
-                ),
-                decoration: Default::default(),
-            });
-            x = x.saturating_add(text_width);
-        }
-
-        runs.push(RenderSurfaceRunSnapshot {
-            x,
-            text: "  ".to_owned(),
-            style: tab_bar_style(
-                if active {
-                    palette.active_foreground
-                } else {
-                    palette.inactive_foreground
-                },
-                tab_background,
+        render_tab(
+            &mut runs,
+            &mut x,
+            tab_bar.style,
+            TabRenderData {
+                title: &title,
+                progress,
+                progress_label: &progress_label,
                 active,
-            ),
-            decoration: Default::default(),
+                palette,
+                color_theme,
+                next_powerline_background,
+                minimum_width: TAB_BAR_MIN_WIDTH.min(max_tab_width).min(available_width),
+            },
+        );
+        hit_regions.push(TabBarHitRegion {
+            tab_index: index,
+            start_column,
+            end_column: x,
         });
-        x = x.saturating_add(TAB_BAR_TITLE_PADDING);
-
-        if active {
-            runs.push(RenderSurfaceRunSnapshot {
-                x,
-                text: TAB_BAR_RIGHT_EDGE.to_string(),
-                style: tab_bar_style(palette.active_background, palette.background, false),
-                decoration: Default::default(),
-            });
-            x = x.saturating_add(1);
+        if tab_bar.style == TabBarStyle::Fade && !transparent_background {
+            push_tab_run(
+                &mut runs,
+                &mut x,
+                " ".repeat(tab_gap as usize),
+                tab_bar_style(palette.background, palette.background, false),
+            );
+        } else {
+            x = x.saturating_add(tab_gap);
         }
-
-        x = x.saturating_add(TAB_BAR_TAB_GAP);
     }
 
     Some(WgpuTabBarSurface {
@@ -1641,7 +1671,202 @@ fn build_tab_bar_surface(
             cursor: None,
             ime_preedit: None,
         },
+        cell_width_px: window_size_info.cell_size().width_px().max(1),
+        hit_regions,
     })
+}
+
+fn tab_bar_style_chrome_width(style: TabBarStyle) -> u32 {
+    match style {
+        TabBarStyle::Fade => 8,
+        TabBarStyle::Powerline => 4,
+    }
+}
+
+const fn tab_bar_style_gap(style: TabBarStyle) -> u32 {
+    match style {
+        TabBarStyle::Powerline => 0,
+        TabBarStyle::Fade => 1,
+    }
+}
+
+fn render_tab(
+    runs: &mut Vec<RenderSurfaceRunSnapshot>,
+    x: &mut u32,
+    style: TabBarStyle,
+    data: TabRenderData<'_>,
+) {
+    match style {
+        TabBarStyle::Fade => render_fade_tab(runs, x, data),
+        TabBarStyle::Powerline => render_powerline_tab(runs, x, data),
+    }
+}
+
+fn render_fade_tab(runs: &mut Vec<RenderSurfaceRunSnapshot>, x: &mut u32, data: TabRenderData<'_>) {
+    let (foreground, background) = if data.active {
+        (
+            data.palette.active_foreground,
+            data.palette.active_background,
+        )
+    } else {
+        (
+            data.palette.inactive_foreground,
+            data.palette.inactive_background,
+        )
+    };
+
+    for amount in [56, 112, 176] {
+        let edge_background = mix_rgb(data.palette.background, background, amount, 255);
+        push_tab_run(
+            runs,
+            x,
+            " ".to_owned(),
+            tab_bar_text_style(foreground, edge_background, false, false, false),
+        );
+    }
+    let (left_padding, right_padding) = centered_tab_padding(data, 6, 1);
+    push_tab_content(
+        runs,
+        x,
+        data,
+        TabContentAppearance {
+            foreground,
+            background,
+            bold: data.active,
+            italic: data.active,
+            underline: false,
+            left_padding,
+            right_padding,
+        },
+    );
+    for amount in [176, 112, 56] {
+        let edge_background = mix_rgb(data.palette.background, background, amount, 255);
+        push_tab_run(
+            runs,
+            x,
+            " ".to_owned(),
+            tab_bar_text_style(foreground, edge_background, false, false, false),
+        );
+    }
+}
+
+fn render_powerline_tab(
+    runs: &mut Vec<RenderSurfaceRunSnapshot>,
+    x: &mut u32,
+    data: TabRenderData<'_>,
+) {
+    let background = powerline_tab_background(data.palette, data.active);
+    let foreground = if data.active {
+        data.palette.active_foreground
+    } else {
+        data.palette.inactive_foreground
+    };
+    let (left_padding, right_padding) = centered_tab_padding(data, 1, 1);
+    push_tab_content(
+        runs,
+        x,
+        data,
+        TabContentAppearance {
+            foreground,
+            background,
+            bold: data.active,
+            italic: false,
+            underline: false,
+            left_padding,
+            right_padding,
+        },
+    );
+    push_tab_run(
+        runs,
+        x,
+        TAB_BAR_POWERLINE_EDGE.to_owned(),
+        tab_bar_style(background, data.next_powerline_background, false),
+    );
+}
+
+fn powerline_tab_background(palette: TabBarPalette, active: bool) -> RgbColorDto {
+    if active {
+        palette.active_background
+    } else {
+        palette.inactive_background
+    }
+}
+
+fn push_tab_content(
+    runs: &mut Vec<RenderSurfaceRunSnapshot>,
+    x: &mut u32,
+    data: TabRenderData<'_>,
+    appearance: TabContentAppearance,
+) {
+    let style = tab_bar_text_style(
+        appearance.foreground,
+        appearance.background,
+        appearance.bold,
+        appearance.italic,
+        appearance.underline,
+    );
+    if appearance.left_padding > 0 {
+        push_tab_run(runs, x, " ".repeat(appearance.left_padding as usize), style);
+    }
+    push_tab_run(runs, x, data.title.to_owned(), style);
+    if let Some(progress) = data.progress {
+        push_tab_run(
+            runs,
+            x,
+            format!(" {}", data.progress_label),
+            tab_bar_text_style(
+                tab_progress_color(progress, data.color_theme),
+                appearance.background,
+                true,
+                appearance.italic,
+                appearance.underline,
+            ),
+        );
+    }
+    if appearance.right_padding > 0 {
+        push_tab_run(
+            runs,
+            x,
+            " ".repeat(appearance.right_padding as usize),
+            style,
+        );
+    }
+}
+
+fn centered_tab_padding(
+    data: TabRenderData<'_>,
+    fixed_chrome_width: u32,
+    minimum_padding_each_side: u32,
+) -> (u32, u32) {
+    let content_width = terminal_text_cell_width(data.title).saturating_add(
+        data.progress
+            .map(|_| 1 + terminal_text_cell_width(data.progress_label))
+            .unwrap_or(0),
+    );
+    let natural_width = content_width
+        .saturating_add(fixed_chrome_width)
+        .saturating_add(minimum_padding_each_side.saturating_mul(2));
+    let total_width = data.minimum_width.max(natural_width);
+    let padding = total_width
+        .saturating_sub(content_width)
+        .saturating_sub(fixed_chrome_width);
+    (padding / 2, padding - padding / 2)
+}
+
+fn push_tab_run(
+    runs: &mut Vec<RenderSurfaceRunSnapshot>,
+    x: &mut u32,
+    text: String,
+    style: TextStyleDto,
+) {
+    let width = terminal_text_cell_width(&text);
+    runs.push(RenderSurfaceRunSnapshot {
+        x: *x,
+        text,
+        style,
+        decoration: Default::default(),
+    });
+    *x = x.saturating_add(width);
 }
 
 fn tab_progress_label(progress: TerminalProgress) -> String {
@@ -1663,18 +1888,28 @@ fn tab_progress_color(progress: TerminalProgress, color_theme: TerminalColorThem
 }
 
 fn tab_bar_style(foreground: RgbColorDto, background: RgbColorDto, bold: bool) -> TextStyleDto {
+    tab_bar_text_style(foreground, background, bold, false, false)
+}
+
+fn tab_bar_text_style(
+    foreground: RgbColorDto,
+    background: RgbColorDto,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+) -> TextStyleDto {
     TextStyleDto {
         foreground: Some(foreground),
         background: Some(background),
         bold,
-        italic: false,
-        underline: false,
+        italic,
+        underline,
     }
 }
 
 fn tab_bar_palette(color_theme: TerminalColorTheme) -> TabBarPalette {
     TabBarPalette {
-        background: color_theme.tab_bar_background,
+        background: color_theme.background,
         inactive_foreground: color_theme.inactive_tab_foreground,
         inactive_background: color_theme.inactive_tab_background,
         active_background: color_theme.active_tab_background,
@@ -2067,6 +2302,10 @@ impl ITerminalWindowRuntime for WgpuTerminalWindowRuntime {
         WgpuTerminalWindowRuntime::set_tab_bar(self, tab_bar);
     }
 
+    fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
+        WgpuTerminalWindowRuntime::tab_index_at_position(self, x_px, y_px)
+    }
+
     fn set_window_title(&mut self, title: &str) {
         WgpuTerminalWindowRuntime::set_window_title(self, title);
     }
@@ -2108,7 +2347,6 @@ mod tests {
             cell_size::TerminalCellSize,
             color_theme::TerminalColorTheme,
             size_info::{TerminalPadding, TerminalSizeInfo},
-            terminal_progress::TerminalProgress,
             window_size::TerminalWindowSize,
         },
         rendering::{
@@ -2118,7 +2356,7 @@ mod tests {
                 RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
                 RenderSurfaceImePreeditSnapshot, RenderSurfaceSnapshot,
             },
-            tab_bar::{TabBarPosition, TabBarSnapshot},
+            tab_bar::{TabBarPosition, TabBarSnapshot, TabBarStyle},
             workspace_layout::RenderSurfacePlacement,
         },
         seq::Seq,
@@ -2126,12 +2364,13 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        CursorMotion, SurfaceFrameRecovery, TAB_BAR_LEFT_EDGE, TAB_BAR_RIGHT_EDGE,
+        CursorMotion, SurfaceFrameRecovery, TAB_BAR_MIN_WIDTH, TAB_BAR_POWERLINE_EDGE,
         WgpuTerminalPowerPreference, accumulate_pending_surface_damage, advance_periodic_deadline,
         background_shader_frame_interval, background_shader_should_run, build_cursor_motion,
         build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
-        ime_cursor_area, is_enter_cursor_motion, normalized_opacity, render_target_is_visible,
-        surface_frame_recovery, terminal_power_preference_for_device_types, terminal_wgpu_backends,
+        ime_cursor_area, is_enter_cursor_motion, normalized_opacity, powerline_tab_background,
+        render_target_is_visible, surface_frame_recovery, tab_bar_palette,
+        terminal_power_preference_for_device_types, terminal_wgpu_backends,
         transparent_surface_alpha_mode,
     };
     use crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentError;
@@ -2503,52 +2742,68 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_renders_titles_without_numeric_prefixes() {
+    fn tab_bar_styles_render_their_distinct_active_treatment() {
         let size_info = TerminalSizeInfo::new(
             TerminalWindowSize::new(800, 100),
             TerminalCellSize::new(8, 16),
             TerminalPadding::ZERO,
         );
-        let surface = build_tab_bar_surface(
-            &TabBarSnapshot {
-                titles: vec!["shell".to_string(), "nvim".to_string()],
-                progresses: vec![None, None],
-                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
-                active_tab_index: 1,
-                position: TabBarPosition::Bottom,
-            },
-            size_info,
-            TerminalColorTheme::default(),
-        )
-        .expect("multiple tabs should produce a tab bar");
 
-        assert_eq!(surface.placement.y_px, 84);
-        assert_eq!(surface.placement.height_px, 16);
-        let runs = &surface.snapshot.rows[0].runs;
-        let rendered_text = runs.iter().map(|run| run.text.as_str()).collect::<String>();
-        assert!(rendered_text.contains("shell"));
-        assert!(rendered_text.contains("nvim"));
-        assert!(!rendered_text.contains("1:"));
-        assert!(!rendered_text.contains("2:"));
-        let left_edge = runs
-            .iter()
-            .find(|run| run.text == TAB_BAR_LEFT_EDGE)
-            .expect("active tab should have a left edge");
-        let active_title = runs
-            .iter()
-            .find(|run| run.text.trim() == "nvim")
-            .expect("active title should be rendered");
-        let right_edge = runs
-            .iter()
-            .find(|run| run.text == TAB_BAR_RIGHT_EDGE)
-            .expect("active tab should have a right edge");
-        assert_eq!(left_edge.x, 11);
-        assert!(active_title.style.bold);
-        assert!(right_edge.x < 30, "tabs should keep their natural width");
+        for style in [TabBarStyle::Fade, TabBarStyle::Powerline] {
+            let surface = build_tab_bar_surface(
+                &TabBarSnapshot {
+                    titles: vec!["shell".to_owned(), "nvim".to_owned()],
+                    progresses: vec![None, None],
+                    render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                    active_tab_index: 0,
+                    position: TabBarPosition::Bottom,
+                    style,
+                },
+                size_info,
+                TerminalColorTheme::default(),
+                false,
+            )
+            .expect("multiple tabs should produce a tab bar");
+            let runs = &surface.snapshot.rows[0].runs;
+            let active_title = runs
+                .iter()
+                .find(|run| run.text == "shell")
+                .expect("active title should be rendered");
+            assert!(surface.hit_regions.iter().all(|region| {
+                region.end_column.saturating_sub(region.start_column) >= TAB_BAR_MIN_WIDTH
+            }));
+
+            match style {
+                TabBarStyle::Fade => {
+                    assert!(active_title.style.italic);
+                    let inactive_title = runs
+                        .iter()
+                        .find(|run| run.text == "nvim")
+                        .expect("inactive fade title should be rendered");
+                    assert_ne!(
+                        inactive_title.style.background,
+                        Some(surface.snapshot.default_background)
+                    );
+                }
+                TabBarStyle::Powerline => {
+                    let first_edge = runs
+                        .iter()
+                        .find(|run| run.text == TAB_BAR_POWERLINE_EDGE)
+                        .expect("powerline tabs should render their connecting edge");
+                    assert_eq!(
+                        first_edge.style.background,
+                        Some(powerline_tab_background(
+                            tab_bar_palette(TerminalColorTheme::default()),
+                            false,
+                        ))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn top_tab_bar_starts_at_the_window_origin() {
+    fn tab_bar_hit_regions_follow_rendered_tabs() {
         let size_info = TerminalSizeInfo::new(
             TerminalWindowSize::new(800, 100),
             TerminalCellSize::new(8, 16),
@@ -2556,103 +2811,58 @@ mod tests {
         );
         let surface = build_tab_bar_surface(
             &TabBarSnapshot {
-                titles: vec!["shell".to_string(), "nvim".to_string()],
-                progresses: vec![None, None],
-                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
+                titles: vec!["shell".to_owned(), "nvim".to_owned(), "logs".to_owned()],
+                progresses: vec![None, None, None],
+                render_target_ids: vec![
+                    RenderTargetId::new(1),
+                    RenderTargetId::new(2),
+                    RenderTargetId::new(3),
+                ],
                 active_tab_index: 0,
-                position: TabBarPosition::Top,
+                position: TabBarPosition::Bottom,
+                style: TabBarStyle::Fade,
             },
             size_info,
             TerminalColorTheme::default(),
+            false,
         )
         .expect("multiple tabs should produce a tab bar");
 
-        assert_eq!(surface.placement.y_px, 0);
-    }
-
-    #[test]
-    fn tab_bar_uses_kitty_theme_colors() {
-        let size_info = TerminalSizeInfo::new(
-            TerminalWindowSize::new(800, 100),
-            TerminalCellSize::new(8, 16),
-            TerminalPadding::ZERO,
+        assert_eq!(surface.hit_regions.len(), 3);
+        assert!(
+            surface
+                .hit_regions
+                .windows(2)
+                .all(|pair| { pair[1].start_column.saturating_sub(pair[0].end_column) == 1 })
         );
-        let color_theme = TerminalColorTheme {
-            tab_bar_background: RgbColorDto::new(18, 30, 42),
-            active_tab_background: RgbColorDto::new(50, 60, 70),
-            active_tab_foreground: RgbColorDto::new(240, 241, 242),
-            inactive_tab_foreground: RgbColorDto::new(120, 130, 140),
-            ..TerminalColorTheme::default()
-        };
-        let surface = build_tab_bar_surface(
-            &TabBarSnapshot {
-                titles: vec!["~/one".to_string(), "nvim".to_string()],
-                progresses: vec![None, None],
-                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
-                active_tab_index: 1,
-                position: TabBarPosition::Bottom,
-            },
-            size_info,
-            color_theme,
-        )
-        .expect("multiple tabs should produce a themed tab bar");
-
-        assert_eq!(
-            surface.snapshot.default_background,
-            color_theme.tab_bar_background
-        );
-        let active_title = surface.snapshot.rows[0]
+        let first_gap_column = surface.hit_regions[0].end_column;
+        let gap_run = surface.snapshot.rows[0]
             .runs
             .iter()
-            .find(|run| run.text.trim() == "nvim")
-            .expect("active title should be rendered");
+            .rev()
+            .find(|run| run.x == first_gap_column && run.text == " ")
+            .expect("fade tabs should paint their gap explicitly");
         assert_eq!(
-            active_title.style.foreground,
-            Some(color_theme.active_tab_foreground)
+            gap_run.style.background,
+            Some(tab_bar_palette(TerminalColorTheme::default()).background)
         );
         assert_eq!(
-            active_title.style.background,
-            Some(color_theme.active_tab_background)
+            surface.tab_index_at_position(
+                f64::from(first_gap_column * surface.cell_width_px + 1),
+                f64::from(surface.placement.y_px + 1),
+            ),
+            None
         );
-        assert!(surface.snapshot.rows[0].runs.len() > 10);
-    }
-
-    #[test]
-    fn tab_bar_renders_themed_progress_states_separately_from_titles() {
-        let size_info = TerminalSizeInfo::new(
-            TerminalWindowSize::new(800, 100),
-            TerminalCellSize::new(8, 16),
-            TerminalPadding::ZERO,
-        );
-        let color_theme = TerminalColorTheme::default();
-        let surface = build_tab_bar_surface(
-            &TabBarSnapshot {
-                titles: vec!["cargo".to_string(), "download".to_string()],
-                progresses: vec![
-                    Some(TerminalProgress::Normal(42)),
-                    Some(TerminalProgress::Warning(7)),
-                ],
-                render_target_ids: vec![RenderTargetId::new(1), RenderTargetId::new(2)],
-                active_tab_index: 0,
-                position: TabBarPosition::Bottom,
-            },
-            size_info,
-            color_theme,
-        )
-        .expect("multiple tabs should produce a tab bar");
-
-        let runs = &surface.snapshot.rows[0].runs;
-        let normal = runs
-            .iter()
-            .find(|run| run.text.trim() == "42%")
-            .expect("normal progress should be rendered");
-        let warning = runs
-            .iter()
-            .find(|run| run.text.trim() == "!7%")
-            .expect("warning progress should be rendered");
-        assert_eq!(normal.style.foreground, Some(color_theme.palette[14]));
-        assert_eq!(warning.style.foreground, Some(color_theme.palette[11]));
-        assert!(runs.iter().any(|run| run.text.trim() == "cargo"));
-        assert!(runs.iter().any(|run| run.text.trim() == "download"));
+        for region in &surface.hit_regions {
+            let midpoint_column = (region.start_column + region.end_column - 1) / 2;
+            let x_px = f64::from(midpoint_column * surface.cell_width_px + 1);
+            let y_px = f64::from(surface.placement.y_px + 1);
+            assert_eq!(
+                surface.tab_index_at_position(x_px, y_px),
+                Some(region.tab_index)
+            );
+        }
+        assert_eq!(surface.tab_index_at_position(0.0, 0.0), None);
+        assert_eq!(surface.tab_index_at_position(f64::NAN, 90.0), None);
     }
 }
