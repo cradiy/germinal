@@ -339,6 +339,14 @@ fn advance_periodic_deadline(deadline: Instant, now: Instant, interval: Duration
     if next > now { next } else { now + interval }
 }
 
+fn take_due_redraw(needs_redraw: &mut bool, deadline: Instant, now: Instant) -> bool {
+    let redraw_due = *needs_redraw && deadline <= now;
+    if redraw_due {
+        *needs_redraw = false;
+    }
+    redraw_due
+}
+
 fn background_shader_should_run(
     animated: bool,
     occluded: bool,
@@ -642,6 +650,7 @@ impl WgpuTerminalWindowRuntime {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("germinal.terminal.device"),
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
                 ..Default::default()
             })
             .await
@@ -1381,7 +1390,7 @@ impl WgpuTerminalWindowRuntime {
             });
         }
 
-        let redraw_due = self.needs_redraw && self.next_present_at <= now;
+        let redraw_due = take_due_redraw(&mut self.needs_redraw, self.next_present_at, now);
         cursor_due || cursor_motion_due || background_due || redraw_due
     }
 
@@ -2413,8 +2422,9 @@ mod tests {
         build_cursor_motion, build_tab_bar_surface, cursor_blink_phase,
         frame_interval_for_refresh_rate, ime_cursor_area, is_enter_cursor_motion,
         normalized_opacity, powerline_tab_background, render_target_is_visible,
-        surface_frame_recovery, tab_bar_palette, terminal_power_preference_for_device_types,
-        terminal_wgpu_backends, transparent_surface_alpha_mode,
+        surface_frame_recovery, tab_bar_palette, take_due_redraw,
+        terminal_power_preference_for_device_types, terminal_wgpu_backends,
+        transparent_surface_alpha_mode,
     };
     use crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentError;
 
@@ -2705,6 +2715,23 @@ mod tests {
             advance_periodic_deadline(start, start + Duration::from_millis(30), interval),
             start + Duration::from_millis(36),
         );
+    }
+
+    #[test]
+    fn due_redraw_is_consumed_once() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(6);
+        let mut needs_redraw = true;
+
+        assert!(!take_due_redraw(&mut needs_redraw, deadline, now));
+        assert!(needs_redraw);
+        assert!(take_due_redraw(&mut needs_redraw, deadline, deadline));
+        assert!(!needs_redraw);
+        assert!(!take_due_redraw(
+            &mut needs_redraw,
+            deadline,
+            deadline + Duration::from_millis(6),
+        ));
     }
 
     #[test]
