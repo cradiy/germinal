@@ -1,12 +1,17 @@
+use std::{thread, time::Duration};
+
 use arboard::Clipboard;
 use germinal_domain::gshell::vo::gshell_id::GShellId;
 use germinal_ports::event::{
-    gshell_input::{GShellInput, GShellInputEvent},
+    runtime_event::{AppRuntimeEvent, ClipboardPasteOutcome, RuntimeEvent},
+    runtime_event_dispatcher::IRuntimeEventDispatcher,
     window_input_event::WindowInputElementState,
 };
 use germinal_ports::pty_host::terminal_clipboard::TerminalClipboard;
 use thiserror::Error;
 use winit::keyboard::{KeyCode, PhysicalKey};
+
+const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostPasteModifiers {
@@ -75,19 +80,17 @@ impl HostPasteController {
         self.pressed = HostPressedModifiers::default();
     }
 
-    pub fn clipboard_paste_input(
-        &mut self,
-        gshell_id: GShellId,
-    ) -> Result<Option<GShellInput>, PasteError> {
-        let text = self.read_clipboard_text()?;
-        if text.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(GShellInput {
-            gshell_id,
-            event: GShellInputEvent::Paste(text),
-        }))
+    pub fn request_clipboard_paste<D>(&self, gshell_id: GShellId, dispatcher: D)
+    where
+        D: IRuntimeEventDispatcher,
+    {
+        thread::spawn(move || {
+            let outcome = read_clipboard_text_with_retry(read_host_clipboard_text, thread::sleep);
+            let _ = dispatcher.dispatch(RuntimeEvent::App(AppRuntimeEvent::ClipboardPasteReady {
+                gshell_id,
+                outcome,
+            }));
+        });
     }
 
     pub fn write_clipboard_text(&mut self, text: String) -> Result<(), CopyError> {
@@ -117,11 +120,42 @@ impl HostPasteController {
             shift: self.modifiers.shift || self.pressed.shift_key(),
         }
     }
+}
 
-    fn read_clipboard_text(&mut self) -> Result<String, PasteError> {
-        let mut clipboard = Clipboard::new().map_err(PasteError::OpenClipboard)?;
-        clipboard.get_text().map_err(PasteError::ReadClipboard)
+fn read_host_clipboard_text() -> Result<String, PasteError> {
+    let mut clipboard = Clipboard::new().map_err(PasteError::OpenClipboard)?;
+    clipboard.get_text().map_err(PasteError::ReadClipboard)
+}
+
+fn read_clipboard_text_with_retry(
+    mut read: impl FnMut() -> Result<String, PasteError>,
+    mut wait: impl FnMut(Duration),
+) -> ClipboardPasteOutcome {
+    for attempt in 0..=1 {
+        match read() {
+            Ok(text) if text.is_empty() => return ClipboardPasteOutcome::Unavailable,
+            Ok(text) => return ClipboardPasteOutcome::Text(text),
+            Err(error) if attempt == 0 && clipboard_error_is_retryable(&error) => {
+                wait(CLIPBOARD_RETRY_DELAY);
+            }
+            Err(PasteError::ReadClipboard(arboard::Error::ContentNotAvailable)) => {
+                return ClipboardPasteOutcome::Unavailable;
+            }
+            Err(error) => return ClipboardPasteOutcome::Failed(error.to_string()),
+        }
     }
+
+    unreachable!("clipboard retry loop always returns")
+}
+
+fn clipboard_error_is_retryable(error: &PasteError) -> bool {
+    matches!(
+        error,
+        PasteError::OpenClipboard(arboard::Error::ClipboardOccupied)
+            | PasteError::ReadClipboard(
+                arboard::Error::ContentNotAvailable | arboard::Error::ClipboardOccupied
+            )
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -172,6 +206,8 @@ fn read_clipboard_text(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -217,5 +253,48 @@ mod tests {
             controller.effective_modifiers(),
             HostPasteModifiers::default()
         );
+    }
+
+    #[test]
+    fn clipboard_text_is_retried_once_when_temporarily_unavailable() {
+        let attempts = Cell::new(0);
+        let waited = Cell::new(None);
+
+        let outcome = read_clipboard_text_with_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(PasteError::ReadClipboard(
+                        arboard::Error::ContentNotAvailable,
+                    ))
+                } else {
+                    Ok("second attempt".to_owned())
+                }
+            },
+            |duration| waited.set(Some(duration)),
+        );
+
+        assert_eq!(
+            outcome,
+            ClipboardPasteOutcome::Text("second attempt".to_owned())
+        );
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(waited.get(), Some(CLIPBOARD_RETRY_DELAY));
+    }
+
+    #[test]
+    fn clipboard_failure_is_not_retried_when_it_is_not_transient() {
+        let attempts = Cell::new(0);
+
+        let outcome = read_clipboard_text_with_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(PasteError::ReadClipboard(arboard::Error::ConversionFailure))
+            },
+            |_| panic!("permanent clipboard errors must not wait for a retry"),
+        );
+
+        assert!(matches!(outcome, ClipboardPasteOutcome::Failed(_)));
+        assert_eq!(attempts.get(), 1);
     }
 }

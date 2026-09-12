@@ -43,7 +43,10 @@ use germinal_infra::{
 use germinal_ports::{
     event::{
         gshell_input::{GShellInput, GShellInputEvent},
-        runtime_event::{GShellRuntimeEvent, RuntimeEvent, WorkspaceRuntimeEvent},
+        runtime_event::{
+            AppRuntimeEvent, ClipboardPasteOutcome, GShellRuntimeEvent, RuntimeEvent,
+            WorkspaceRuntimeEvent,
+        },
         runtime_event_dispatcher::IRuntimeEventDispatcher,
         window_input_event::{
             WindowInputElementState, WindowInputEvent, WindowInputKey, WindowInputModifiers,
@@ -755,16 +758,10 @@ impl App {
                     });
                 }
                 KeyboardAction::Paste => {
-                    match self
-                        .paste_controller
-                        .clipboard_paste_input(self.focused_gshell())
-                    {
-                        Ok(Some(input)) => self.route_input_to_gshell(input),
-                        Ok(None) => {
-                            debug!("paste shortcut matched but clipboard text was empty");
-                        }
-                        Err(error) => warn!(error = %error, "failed to paste from clipboard"),
-                    }
+                    self.paste_controller.request_clipboard_paste(
+                        self.focused_gshell(),
+                        self.runtime_event_dispatcher.clone(),
+                    );
                 }
                 KeyboardAction::NewTab => self.create_workspace_tab(),
                 KeyboardAction::NextTab => self.activate_next_workspace_tab(),
@@ -862,8 +859,50 @@ impl App {
             return;
         };
 
+        let text_bytes = text.len();
         if let Err(error) = self.paste_controller.write_clipboard_text(text) {
             warn!(gshell_id = gshell_id.value(), error = %error, "failed to copy terminal selection");
+        } else {
+            debug!(
+                gshell_id = gshell_id.value(),
+                text_bytes, "copied terminal selection to clipboard"
+            );
+        }
+    }
+
+    fn finish_clipboard_paste(&mut self, gshell_id: GShellId, outcome: ClipboardPasteOutcome) {
+        match outcome {
+            ClipboardPasteOutcome::Text(text)
+                if self.window_focused && self.focused_gshell() == gshell_id =>
+            {
+                debug!(
+                    gshell_id = gshell_id.value(),
+                    text_bytes = text.len(),
+                    "read clipboard text for terminal paste"
+                );
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id,
+                    event: GShellInputEvent::Paste(text),
+                });
+            }
+            ClipboardPasteOutcome::Text(_) => {
+                debug!(
+                    gshell_id = gshell_id.value(),
+                    "discarded clipboard paste after terminal focus changed"
+                );
+            }
+            ClipboardPasteOutcome::Unavailable => {
+                debug!(
+                    gshell_id = gshell_id.value(),
+                    "clipboard did not contain readable text after retry"
+                );
+            }
+            ClipboardPasteOutcome::Failed(error) => {
+                warn!(
+                    gshell_id = gshell_id.value(),
+                    error, "failed to read clipboard text for terminal paste"
+                );
+            }
         }
     }
 
@@ -1369,8 +1408,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
             RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }) => {
                 self.close_workspace_gshell(event_loop, gshell_id);
             }
-            RuntimeEvent::App(_) => {
+            RuntimeEvent::App(AppRuntimeEvent::ShutdownRequested) => {
                 self.exit_and_persist(event_loop);
+            }
+            RuntimeEvent::App(AppRuntimeEvent::ClipboardPasteReady { gshell_id, outcome }) => {
+                self.finish_clipboard_paste(gshell_id, outcome)
             }
             RuntimeEvent::Workspace(WorkspaceRuntimeEvent::RedrawRequested) => {
                 self.request_redraw();

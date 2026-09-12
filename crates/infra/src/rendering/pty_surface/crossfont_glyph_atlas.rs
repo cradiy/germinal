@@ -492,7 +492,6 @@ struct WgpuCrossfontGlyphBackend {
     primary: LoadedFontFaces,
     primary_coverage: HashMap<String, Option<FontCoverage>>,
     fallbacks: Vec<LoadedFallbackFont>,
-    emoji_font_key: Option<FontKey>,
     size: Size,
     average_advance_px: u32,
     line_height_px: u32,
@@ -549,8 +548,6 @@ impl WgpuCrossfontGlyphBackend {
                 load_fallback_faces(&mut rasterizer, family, size, font_faces.bold_weight)
             })
             .collect();
-        let emoji_font_key = load_optional_font(&mut rasterizer, "Noto Color Emoji", size);
-
         // Match Alacritty's GlyphCache::load_font_metrics: load one glyph
         // from the face before asking crossfont for metrics.  Some backends
         // only finalize size/face metrics after the first glyph load; reading
@@ -607,7 +604,6 @@ impl WgpuCrossfontGlyphBackend {
             primary,
             primary_coverage,
             fallbacks,
-            emoji_font_key,
             size,
             average_advance_px,
             line_height_px,
@@ -665,7 +661,7 @@ impl WgpuCrossfontGlyphBackend {
             return glyph;
         }
 
-        if !segment.shaped {
+        if !segment.shaped && !is_emoji_text_cluster(&segment.text) {
             return self.rasterize_terminal_glyph(segment.glyph_key);
         }
 
@@ -689,13 +685,6 @@ impl WgpuCrossfontGlyphBackend {
             .character()
             .expect("character glyph required by the crossfont rasterizer");
         let primary = self.primary.for_glyph(glyph);
-        if is_emoji_presentation_candidate(character) {
-            return self
-                .fallback_key_for_glyph(glyph)
-                .or(self.emoji_font_key)
-                .unwrap_or(primary.key);
-        }
-
         let primary_has_glyph = self
             .primary_coverage
             .get(&primary.family)
@@ -945,6 +934,8 @@ struct CosmicTextClusterRasterizer {
     font_faces: WgpuCrossfontFontFaces,
     font_size_px: f32,
     baseline_y_px: i32,
+    #[cfg(target_os = "linux")]
+    color_emoji_family: Option<String>,
 }
 
 impl CosmicTextClusterRasterizer {
@@ -955,6 +946,8 @@ impl CosmicTextClusterRasterizer {
             font_faces,
             font_size_px,
             baseline_y_px,
+            #[cfg(target_os = "linux")]
+            color_emoji_family: system_color_emoji_family(),
         }
     }
 
@@ -964,6 +957,14 @@ impl CosmicTextClusterRasterizer {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> RasterizedTerminalGlyph {
+        #[cfg(target_os = "linux")]
+        if is_emoji_text_cluster(&segment.text)
+            && let Some(glyph) =
+                self.rasterize_color_emoji_with_cairo(segment, cell_width_px, cell_height_px)
+        {
+            return glyph;
+        }
+
         let face = self
             .font_faces
             .face_for_style(segment.glyph_key.bold(), segment.glyph_key.italic());
@@ -1048,6 +1049,24 @@ impl CosmicTextClusterRasterizer {
             cell_height_px,
             is_color,
             drawn_pixels,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rasterize_color_emoji_with_cairo(
+        &mut self,
+        segment: &TerminalTextSegment,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Option<RasterizedTerminalGlyph> {
+        let family = self.color_emoji_family.as_deref()?;
+        cairo_color_emoji_glyph(
+            &mut self.font_system,
+            family,
+            self.font_size_px,
+            segment,
+            cell_width_px,
+            cell_height_px,
         )
     }
 
@@ -1247,6 +1266,194 @@ fn alpha_blend_pixel(destination: &mut [u8], source: [u8; 4]) {
         destination[channel] = ((source_value + destination_value) / output_alpha) as u8;
     }
     destination[3] = output_alpha as u8;
+}
+
+#[cfg(target_os = "linux")]
+fn cairo_color_emoji_glyph(
+    font_system: &mut FontSystem,
+    family: &str,
+    font_size_px: f32,
+    segment: &TerminalTextSegment,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> Option<RasterizedTerminalGlyph> {
+    use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface};
+
+    let families = [fontdb_family(family)];
+    let query = fontdb::Query {
+        families: &families,
+        weight: CosmicWeight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: CosmicStyle::Normal,
+    };
+    let font_id = font_system.db().query(&query)?;
+    let font = font_system.get_font(font_id, CosmicWeight::NORMAL)?;
+    let shaper = font.shaper();
+    let mut unicode_buffer = harfrust::UnicodeBuffer::new();
+    unicode_buffer.push_str(&segment.text);
+    unicode_buffer.guess_segment_properties();
+    let glyph_buffer = shaper.shape(unicode_buffer, &[]);
+    if glyph_buffer.glyph_infos().is_empty()
+        || glyph_buffer
+            .glyph_infos()
+            .iter()
+            .any(|info| info.glyph_id == 0)
+    {
+        return None;
+    }
+
+    let canvas_width = segment.cell_width.max(1).saturating_mul(cell_width_px);
+    if canvas_width == 0 || cell_height_px == 0 {
+        return None;
+    }
+    let canvas_width_i32 = i32::try_from(canvas_width).ok()?;
+    let canvas_height_i32 = i32::try_from(cell_height_px).ok()?;
+    let surface = ImageSurface::create(Format::ARgb32, canvas_width_i32, canvas_height_i32).ok()?;
+    let context = Context::new(&surface).ok()?;
+    context.select_font_face(family, FontSlant::Normal, FontWeight::Normal);
+    context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+
+    let mut render_size_px = f64::from(font_size_px);
+    context.set_font_size(render_size_px);
+    let mut glyphs = cairo_glyph_positions(&glyph_buffer, render_size_px, shaper.units_per_em());
+    let mut extents = context.glyph_extents(&glyphs).ok()?;
+    let available_width = f64::from(canvas_width.saturating_sub(1).max(1));
+    let available_height = f64::from(cell_height_px.saturating_sub(1).max(1));
+    let fit = (available_width / extents.width().max(1.0))
+        .min(available_height / extents.height().max(1.0))
+        .min(1.0);
+    if fit < 1.0 {
+        render_size_px = (render_size_px * fit).max(1.0);
+        context.set_font_size(render_size_px);
+        glyphs = cairo_glyph_positions(&glyph_buffer, render_size_px, shaper.units_per_em());
+        extents = context.glyph_extents(&glyphs).ok()?;
+    }
+
+    let offset_x = (f64::from(canvas_width) - extents.width()) / 2.0 - extents.x_bearing();
+    let offset_y = (f64::from(cell_height_px) - extents.height()) / 2.0 - extents.y_bearing();
+    for glyph in &mut glyphs {
+        glyph.set_x(glyph.x() + offset_x);
+        glyph.set_y(glyph.y() + offset_y);
+    }
+    context.show_glyphs(&glyphs).ok()?;
+    drop(context);
+    surface.flush();
+
+    let stride = usize::try_from(surface.stride()).ok()?;
+    let mut cairo_pixels = Vec::new();
+    surface
+        .with_data(|data| cairo_pixels.extend_from_slice(data))
+        .ok()?;
+    let (left_px, top_px, width_px, height_px, pixels) =
+        crop_cairo_argb32_to_rgba(&cairo_pixels, stride, canvas_width, cell_height_px)?;
+
+    Some(RasterizedTerminalGlyph {
+        key: segment.glyph_key,
+        cell_width: segment.cell_width.max(1),
+        width_px,
+        height_px,
+        left_px: left_px as i32,
+        top_px: 0,
+        advance_px: canvas_width as i32,
+        pixels: Arc::new(pixels),
+        is_color: true,
+        direct_draw_offset: Some((left_px as i32, top_px as i32)),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn cairo_glyph_positions(
+    glyph_buffer: &harfrust::GlyphBuffer,
+    font_size_px: f64,
+    units_per_em: i32,
+) -> Vec<cairo::Glyph> {
+    let scale = font_size_px / f64::from(units_per_em.max(1));
+    let mut pen_x = 0_i32;
+    let mut pen_y = 0_i32;
+    glyph_buffer
+        .glyph_infos()
+        .iter()
+        .zip(glyph_buffer.glyph_positions())
+        .map(|(info, position)| {
+            let x = f64::from(pen_x + position.x_offset) * scale;
+            let y = -f64::from(pen_y + position.y_offset) * scale;
+            pen_x += position.x_advance;
+            pen_y += position.y_advance;
+            cairo::Glyph::new(info.glyph_id.into(), x, y)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn crop_cairo_argb32_to_rgba(
+    source: &[u8],
+    stride: usize,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32, Vec<u8>)> {
+    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4) as usize];
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let source_index = y as usize * stride + x as usize * 4;
+            let source_pixel = source.get(source_index..source_index + 4)?;
+            let pixel = cairo_argb32_pixel_to_rgba(source_pixel);
+            let destination_index = ((y * width + x) * 4) as usize;
+            rgba[destination_index..destination_index + 4].copy_from_slice(&pixel);
+            if pixel[3] != 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x == width || min_y == height {
+        return None;
+    }
+
+    let cropped_width = max_x - min_x + 1;
+    let cropped_height = max_y - min_y + 1;
+    let mut cropped = vec![0_u8; (cropped_width * cropped_height * 4) as usize];
+    for y in 0..cropped_height {
+        let source_start = (((min_y + y) * width + min_x) * 4) as usize;
+        let source_end = source_start + (cropped_width * 4) as usize;
+        let destination_start = (y * cropped_width * 4) as usize;
+        cropped[destination_start..destination_start + (cropped_width * 4) as usize]
+            .copy_from_slice(&rgba[source_start..source_end]);
+    }
+
+    Some((min_x, min_y, cropped_width, cropped_height, cropped))
+}
+
+#[cfg(all(target_os = "linux", target_endian = "little"))]
+fn cairo_argb32_pixel_to_rgba(pixel: &[u8]) -> [u8; 4] {
+    unpremultiply_rgba(pixel[2], pixel[1], pixel[0], pixel[3])
+}
+
+#[cfg(all(target_os = "linux", target_endian = "big"))]
+fn cairo_argb32_pixel_to_rgba(pixel: &[u8]) -> [u8; 4] {
+    unpremultiply_rgba(pixel[1], pixel[2], pixel[3], pixel[0])
+}
+
+#[cfg(target_os = "linux")]
+fn unpremultiply_rgba(red: u8, green: u8, blue: u8, alpha: u8) -> [u8; 4] {
+    if alpha == 0 {
+        return [0, 0, 0, 0];
+    }
+    let unpremultiply = |channel: u8| {
+        ((u16::from(channel) * 255 + u16::from(alpha) / 2) / u16::from(alpha)).min(255) as u8
+    };
+    [
+        unpremultiply(red),
+        unpremultiply(green),
+        unpremultiply(blue),
+        alpha,
+    ]
 }
 
 fn cosmic_weight(bold: bool, configured: WgpuTerminalFontWeight) -> CosmicWeight {
@@ -1827,6 +2034,22 @@ fn load_font_coverage(family: &str) -> Option<FontCoverage> {
         .map(FontCoverage::Fontconfig)
 }
 
+#[cfg(target_os = "linux")]
+fn system_color_emoji_family() -> Option<String> {
+    use crossfont::ft::fc::{Config, MatchKind, Pattern, font_match};
+
+    let config = Config::get_current();
+    let mut pattern = Pattern::new();
+    pattern.add_family("emoji");
+    pattern.config_substitute(config, MatchKind::Pattern);
+    pattern.default_substitute();
+    let matched = font_match(config, &pattern)?;
+    if !matched.color().next().unwrap_or(false) {
+        return None;
+    }
+    matched.family().next().map(str::to_owned)
+}
+
 #[cfg(any(target_os = "macos", windows))]
 fn load_font_coverage(_family: &str) -> Option<FontCoverage> {
     None
@@ -1846,10 +2069,6 @@ fn wgpu_font_weight_from_terminal(weight: TerminalFontWeight) -> WgpuTerminalFon
         TerminalFontWeight::Semibold => WgpuTerminalFontWeight::Semibold,
         TerminalFontWeight::Bold => WgpuTerminalFontWeight::Bold,
     }
-}
-
-fn load_optional_font(rasterizer: &mut Rasterizer, family: &str, size: Size) -> Option<FontKey> {
-    load_font_with_weight(rasterizer, family, size, Weight::Normal)
 }
 
 fn load_font_with_weight(
@@ -1995,6 +2214,23 @@ mod tests {
 
         assert!(cache.entries.is_empty());
         assert_eq!(cache.pixel_bytes, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cairo_argb32_pixels_are_cropped_and_unpremultiplied_for_the_atlas() {
+        let mut source = vec![0_u8; 12];
+        #[cfg(target_endian = "little")]
+        source[4..8].copy_from_slice(&[16, 32, 64, 128]);
+        #[cfg(target_endian = "big")]
+        source[4..8].copy_from_slice(&[128, 64, 32, 16]);
+
+        let (left, top, width, height, pixels) =
+            super::crop_cairo_argb32_to_rgba(&source, 12, 2, 1)
+                .expect("one visible Cairo pixel should be preserved");
+
+        assert_eq!((left, top, width, height), (1, 0, 1, 1));
+        assert_eq!(pixels, [128, 64, 32, 128]);
     }
 
     #[test]

@@ -65,6 +65,7 @@ wgpu = { version = "30.0", default-features = false, features = [
   "wgsl",
 ] }
 crossfont = "0.9"
+cairo-rs = { version = "0.22", default-features = false }
 winit = "0.30"
 pollster = "1"
 portable-pty = "0.9"

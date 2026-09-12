@@ -39,6 +39,7 @@ memmap2.workspace = true
 nix = { workspace = true, features = ["term", "process", "fs", "mman"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+cairo-rs.workspace = true
 compio = { workspace = true, features = ["io-uring"] }
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 compio = { workspace = true, features = ["polling"] }

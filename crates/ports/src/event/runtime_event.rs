@@ -18,6 +18,17 @@ pub enum RuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppRuntimeEvent {
     ShutdownRequested,
+    ClipboardPasteReady {
+        gshell_id: GShellId,
+        outcome: ClipboardPasteOutcome,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardPasteOutcome {
+    Text(String),
+    Unavailable,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
