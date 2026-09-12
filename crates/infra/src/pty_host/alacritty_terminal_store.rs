@@ -857,7 +857,6 @@ impl AlacrittyTerminalStore {
         let renderable = state.term.renderable_content();
         let default_background = renderable.colors[NamedColor::Background]
             .map(rgb_to_dto)
-            .or_else(|| dominant_background_of_term(&state.term, color_theme))
             .unwrap_or(color_theme.background);
 
         RenderSurfaceSnapshot {
@@ -2177,32 +2176,6 @@ fn surface_style_has_visible_content(
 
 fn style_has_visible_content(style: TextStyleDto) -> bool {
     style.background.is_some() || style.underline || style.bold || style.italic
-}
-
-fn dominant_background_of_term(
-    term: &Term<PtyWriteEventListener>,
-    color_theme: &TerminalColorTheme,
-) -> Option<RgbColorDto> {
-    let mut weights = Vec::<(RgbColorDto, u64)>::new();
-    let renderable = term.renderable_content();
-    for indexed in renderable.display_iter {
-        let cell = indexed.cell;
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.c == KITTY_IMAGE_PLACEHOLDER {
-            continue;
-        }
-        let style = style_of_cell(cell.fg, cell.bg, cell.flags, renderable.colors, color_theme);
-        let background = style.background.unwrap_or(color_theme.background);
-        let cell_width = u64::from(terminal_char_cell_width(cell.c).max(1));
-        if let Some((_, weight)) = weights.iter_mut().find(|(color, _)| *color == background) {
-            *weight += cell_width;
-        } else {
-            weights.push((background, cell_width));
-        }
-    }
-    weights
-        .into_iter()
-        .max_by_key(|(_, weight)| *weight)
-        .map(|(color, _)| color)
 }
 
 fn style_of_cell(
@@ -4038,40 +4011,28 @@ mod tests {
     }
 
     #[test]
-    fn uses_dominant_application_background_for_surface_padding() {
+    fn cell_backgrounds_do_not_replace_the_terminal_background() {
         let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(4, 2));
         let target_id = RenderTargetId::new(1);
 
         store.apply_bytes(target_id, Seq::new(1), b"\x1b[48;2;30;30;47m\x1b[2J");
         let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
 
-        assert_eq!(snapshot.default_background, RgbColorDto::new(30, 30, 47));
-
-        store.start_selection(
-            target_id,
-            Seq::new(2),
-            TerminalSelectionKind::Line,
-            TerminalSelectionPoint::new(0, 0, TerminalSelectionSide::Left),
-        );
-        let selected_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
-        assert_eq!(
-            selected_snapshot.default_background,
-            RgbColorDto::new(30, 30, 47)
-        );
-    }
-
-    #[test]
-    fn sparse_explicit_background_does_not_replace_the_terminal_background() {
-        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(8, 2));
-        let target_id = RenderTargetId::new(1);
-
-        store.apply_bytes(target_id, Seq::new(1), b"\x1b[48;2;122;162;247m \x1b[0m");
-        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
-
         assert_eq!(
             snapshot.default_background,
             TerminalColorTheme::default().background
         );
+    }
+
+    #[test]
+    fn osc_11_replaces_the_terminal_background() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(4, 2));
+        let target_id = RenderTargetId::new(1);
+
+        store.apply_bytes(target_id, Seq::new(1), b"\x1b]11;#1e1e2f\x1b\\");
+        let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+
+        assert_eq!(snapshot.default_background, RgbColorDto::new(30, 30, 47));
     }
 
     #[test]
