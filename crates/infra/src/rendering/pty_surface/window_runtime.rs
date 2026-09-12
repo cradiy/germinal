@@ -687,13 +687,12 @@ impl WgpuTerminalWindowRuntime {
         // and can prevent an otherwise cheap Shader frame from reaching the monitor cadence.
         surface_config.desired_maximum_frame_latency = LOW_LATENCY_SURFACE_FRAME_QUEUE;
         let surface_capabilities = surface.get_capabilities(&adapter);
-        let retain_terminal_frame = adapter_info.device_type == wgpu::DeviceType::Cpu
-            && surface_capabilities
-                .usages
-                .contains(wgpu::TextureUsages::COPY_DST);
+        let retain_terminal_frame = surface_capabilities
+            .usages
+            .contains(wgpu::TextureUsages::COPY_DST);
         if retain_terminal_frame {
             surface_config.usage |= wgpu::TextureUsages::COPY_DST;
-            info!("enabled retained terminal frames for CPU software rendering");
+            info!("enabled retained terminal frames");
         }
         if background_opacity < 1.0 {
             let alpha_modes = surface_capabilities.alpha_modes;

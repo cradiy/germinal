@@ -66,6 +66,41 @@ struct WgpuTextDecorationSpan {
     cell_width: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgpuRendererDamage {
+    vertical_bounds: (u32, u32),
+    scroll_up: Option<WgpuRendererScrollUp>,
+}
+
+impl WgpuRendererDamage {
+    pub const fn vertical(top_px: u32, bottom_px: u32) -> Self {
+        Self {
+            vertical_bounds: (top_px, bottom_px),
+            scroll_up: None,
+        }
+    }
+
+    pub const fn scrolled_up(top_px: u32, bottom_px: u32, rows: u32, preserved_rows: u32) -> Self {
+        Self {
+            vertical_bounds: (top_px, bottom_px),
+            scroll_up: Some(WgpuRendererScrollUp {
+                rows,
+                preserved_rows,
+            }),
+        }
+    }
+
+    pub const fn vertical_bounds(self) -> (u32, u32) {
+        self.vertical_bounds
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WgpuRendererScrollUp {
+    rows: u32,
+    preserved_rows: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
@@ -124,12 +159,15 @@ impl WgpuRendererBackend {
     pub fn state(&self) -> WgpuRendererState {
         self.inner.borrow().clone()
     }
-}
 
-impl RendererBackend for WgpuRendererBackend {
-    fn render_surface(&self, snapshot: &RenderSurfaceSnapshot) {
+    pub(crate) fn render_surface_with_damage(
+        &self,
+        snapshot: &RenderSurfaceSnapshot,
+        damage: Option<WgpuRendererDamage>,
+    ) {
         let mut inner = self.inner.borrow_mut();
         let config = inner.config;
+        let vertical_bounds = damage.map(|damage| damage.vertical_bounds);
         let full_rerender =
             snapshot.dirty_rows.is_empty() || inner.last_target_id != Some(snapshot.target_id);
         let mut pixel_quads = Vec::new();
@@ -144,8 +182,24 @@ impl RendererBackend for WgpuRendererBackend {
                 }
             })
             .collect();
+        let scroll_cache_shifted = !full_rerender
+            && damage
+                .and_then(|damage| damage.scroll_up)
+                .is_some_and(|scroll| shift_rendered_rows_up(&mut inner, config, scroll));
         let dirty_rows: BTreeSet<u32> = if full_rerender {
             snapshot_rows.keys().copied().collect()
+        } else if scroll_cache_shifted {
+            let vertical_bounds = vertical_bounds.expect("scroll damage has vertical bounds");
+            let mut dirty_rows = (0..config.grid_rows)
+                .filter(|row| row_intersects_vertical_bounds(config, *row, vertical_bounds))
+                .collect::<BTreeSet<_>>();
+            dirty_rows.extend(
+                snapshot_rows
+                    .keys()
+                    .filter(|row| !inner.rendered_rows.contains_key(row))
+                    .copied(),
+            );
+            dirty_rows
         } else {
             snapshot.dirty_rows.iter().copied().collect()
         };
@@ -221,44 +275,163 @@ impl RendererBackend for WgpuRendererBackend {
                 row.background_quads.len() + row.glyph_quads.len() + row.underline_quads.len()
             })
             .sum::<usize>();
-        let mut quads = Vec::with_capacity(
-            1 + pixel_quads.len()
-                + total_row_quads
-                + ime_quad_count
-                + cursor_quads.len()
-                + cursor_text_quads.len(),
+        let total_quad_count = 1
+            + pixel_quads.len()
+            + total_row_quads
+            + ime_quad_count
+            + cursor_quads.len()
+            + cursor_text_quads.len();
+        let mut quads = Vec::with_capacity(if vertical_bounds.is_some() {
+            total_quad_count.min(256)
+        } else {
+            total_quad_count
+        });
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            [WgpuQuadDrawItem::surface_background(
+                config,
+                snapshot.default_background,
+            )],
+            vertical_bounds,
         );
-        quads.push(WgpuQuadDrawItem::surface_background(
-            config,
-            snapshot.default_background,
-        ));
-        quads.extend(pixel_quads);
-        for row in inner.rendered_rows.values() {
-            quads.extend(row.background_quads.iter().copied());
-        }
-        for row in inner.rendered_rows.values() {
-            quads.extend(row.glyph_quads.iter().copied());
-        }
-        for row in inner.rendered_rows.values() {
-            quads.extend(row.underline_quads.iter().copied());
-        }
-        for row in &ime_rows {
-            quads.extend(row.background_quads.iter().copied());
-        }
-        for row in &ime_rows {
-            quads.extend(row.glyph_quads.iter().copied());
-        }
-        for row in &ime_rows {
-            quads.extend(row.underline_quads.iter().copied());
-        }
-        quads.extend(cursor_quads);
-        quads.extend(cursor_text_quads);
+        append_quads_within_vertical_bounds(&mut quads, pixel_quads, vertical_bounds);
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            inner
+                .rendered_rows
+                .values()
+                .flat_map(|row| row.background_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            inner
+                .rendered_rows
+                .values()
+                .flat_map(|row| row.glyph_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            inner
+                .rendered_rows
+                .values()
+                .flat_map(|row| row.underline_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            ime_rows
+                .iter()
+                .flat_map(|row| row.background_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            ime_rows
+                .iter()
+                .flat_map(|row| row.glyph_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(
+            &mut quads,
+            ime_rows
+                .iter()
+                .flat_map(|row| row.underline_quads.iter().copied()),
+            vertical_bounds,
+        );
+        append_quads_within_vertical_bounds(&mut quads, cursor_quads, vertical_bounds);
+        append_quads_within_vertical_bounds(&mut quads, cursor_text_quads, vertical_bounds);
 
         inner.render_count += 1;
         inner.last_target_id = Some(snapshot.target_id);
         inner.last_seq = Some(snapshot.latest_seq);
         inner.quads = quads;
     }
+}
+
+impl RendererBackend for WgpuRendererBackend {
+    fn render_surface(&self, snapshot: &RenderSurfaceSnapshot) {
+        self.render_surface_with_damage(snapshot, None);
+    }
+}
+
+fn append_quads_within_vertical_bounds(
+    output: &mut Vec<WgpuQuadDrawItem>,
+    quads: impl IntoIterator<Item = WgpuQuadDrawItem>,
+    vertical_bounds: Option<(u32, u32)>,
+) {
+    output.extend(quads.into_iter().filter(|quad| {
+        vertical_bounds.is_none_or(|(top_px, bottom_px)| {
+            quad.y_px < bottom_px && quad.y_px.saturating_add(quad.height_px) > top_px
+        })
+    }));
+}
+
+fn shift_rendered_rows_up(
+    state: &mut WgpuRendererState,
+    config: WgpuRendererConfig,
+    scroll: WgpuRendererScrollUp,
+) -> bool {
+    if scroll.rows == 0
+        || scroll.preserved_rows == 0
+        || scroll.rows.saturating_add(scroll.preserved_rows) > config.grid_rows
+    {
+        return false;
+    }
+
+    let mut previous_rows = std::mem::take(&mut state.rendered_rows);
+    state.draw_rows.clear();
+    let mut shifted_rows = BTreeMap::new();
+    for new_y in 0..scroll.preserved_rows {
+        let old_y = new_y + scroll.rows;
+        let Some(mut row) = previous_rows.remove(&old_y) else {
+            continue;
+        };
+        if config.row_height_px(old_y) != config.row_height_px(new_y) {
+            continue;
+        }
+        translate_rendered_row(&mut row, old_y, new_y, config);
+        state.draw_rows.insert(new_y, Arc::clone(&row.draw_row));
+        shifted_rows.insert(new_y, row);
+    }
+    state.rendered_rows = shifted_rows;
+    true
+}
+
+fn translate_rendered_row(
+    row: &mut WgpuRenderedRow,
+    old_y: u32,
+    new_y: u32,
+    config: WgpuRendererConfig,
+) {
+    let draw_row = Arc::make_mut(&mut row.draw_row);
+    draw_row.y = new_y;
+    for glyph in &mut draw_row.glyphs {
+        glyph.y = new_y;
+    }
+
+    for quad in row
+        .background_quads
+        .iter_mut()
+        .chain(&mut row.glyph_quads)
+        .chain(&mut row.underline_quads)
+    {
+        quad.y_px = quad.y_px.saturating_sub(
+            config
+                .row_top_px(old_y)
+                .saturating_sub(config.row_top_px(new_y)),
+        );
+    }
+}
+
+fn row_intersects_vertical_bounds(
+    config: WgpuRendererConfig,
+    row: u32,
+    (top_px, bottom_px): (u32, u32),
+) -> bool {
+    let row_top = config.row_top_px(row);
+    row_top < bottom_px && row_top.saturating_add(config.row_height_px(row)) > top_px
 }
 
 fn render_ime_preedit(
@@ -1502,8 +1675,8 @@ mod tests {
 
     use super::{
         CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
-        append_pixel_rect_quads_from_row, available_glyph_cell_span, occupied_text_cells,
-        should_shape_row,
+        WgpuRendererDamage, append_pixel_rect_quads_from_row, available_glyph_cell_span,
+        occupied_text_cells, should_shape_row,
     };
     use crate::rendering::pty_surface::{
         crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
@@ -1675,6 +1848,111 @@ mod tests {
         assert_eq!(backgrounds[0].height_px, 35);
         assert_eq!(backgrounds[0].style.background, Some(background));
         assert_eq!(backgrounds[0].alpha, 128);
+    }
+
+    #[test]
+    fn vertical_bounds_emit_only_quads_that_overlap_the_damage() {
+        let config = WgpuRendererConfig {
+            content_width_px: 80,
+            content_height_px: 64,
+            grid_columns: 10,
+            grid_rows: 4,
+            ..WgpuRendererConfig::default()
+        };
+        let backend = WgpuRendererBackend::new(config);
+        let rows = (0..4)
+            .map(|y| RenderSurfaceRowSnapshot {
+                y,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: char::from(b'a' + y as u8).to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            })
+            .collect();
+
+        backend.render_surface_with_damage(
+            &RenderSurfaceSnapshot {
+                target_id: RenderTargetId::new(1),
+                latest_seq: Seq::new(1),
+                default_background: RgbColorDto::new(0, 0, 0),
+                rows,
+                image_surfaces: vec![],
+                dirty_rows: vec![],
+                cursor: None,
+                ime_preedit: None,
+            },
+            Some(WgpuRendererDamage::vertical(16, 32)),
+        );
+
+        let state = backend.state();
+        assert_eq!(state.background_quads().len(), 1);
+        assert_eq!(state.glyph_quads().len(), 1);
+        assert_eq!(state.glyph_quads()[0].y_px, 16);
+    }
+
+    #[test]
+    fn scroll_damage_shifts_row_cache_without_changing_a_later_full_frame() {
+        let config = WgpuRendererConfig {
+            content_width_px: 80,
+            content_height_px: 65,
+            grid_columns: 10,
+            grid_rows: 4,
+            ..WgpuRendererConfig::default()
+        };
+        let make_snapshot = |seq, texts: [&str; 4], dirty_rows| RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(7),
+            latest_seq: Seq::new(seq),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: texts
+                .into_iter()
+                .enumerate()
+                .map(|(y, text)| RenderSurfaceRowSnapshot {
+                    y: y as u32,
+                    runs: vec![RenderSurfaceRunSnapshot {
+                        x: 0,
+                        text: text.to_string(),
+                        style: TextStyleDto {
+                            background: Some(RgbColorDto::new(text.as_bytes()[0], 20, 30)),
+                            ..TextStyleDto::plain()
+                        },
+                        decoration: RenderSurfaceTextDecoration {
+                            underline: RenderSurfaceUnderlineStyle::Single,
+                            ..Default::default()
+                        },
+                    }],
+                })
+                .collect(),
+            image_surfaces: vec![],
+            dirty_rows,
+            cursor: None,
+            ime_preedit: None,
+        };
+        let backend = WgpuRendererBackend::new(config);
+        backend.render_surface(&make_snapshot(1, ["a", "b", "c", "d"], vec![]));
+        let current = make_snapshot(2, ["b", "c", "d", "e"], vec![0, 1, 2, 3]);
+
+        backend.render_surface_with_damage(
+            &current,
+            Some(WgpuRendererDamage::scrolled_up(48, 65, 1, 3)),
+        );
+
+        assert_eq!(backend.state().line_texts(), vec!["b", "c", "d", "e"]);
+
+        let mut followup = current;
+        followup.latest_seq = Seq::new(3);
+        followup.dirty_rows = vec![3];
+        backend.render_surface(&followup);
+        let optimized = backend.state();
+
+        let fresh = WgpuRendererBackend::new(config);
+        followup.dirty_rows.clear();
+        fresh.render_surface(&followup);
+        let expected = fresh.state();
+
+        assert_eq!(optimized.line_texts(), expected.line_texts());
+        assert_eq!(optimized.quads(), expected.quads());
     }
 
     #[test]

@@ -7,10 +7,7 @@ use std::{
 
 use germinal_ports::{
     pty_host::width::terminal_text_cell_width,
-    rendering::{
-        render_target_id::RenderTargetId, renderer_backend::RendererBackend,
-        surface_snapshot::RenderSurfaceSnapshot,
-    },
+    rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
     seq::Seq,
 };
 
@@ -25,7 +22,7 @@ use crate::rendering::pty_surface::{
     glyph_uv_mapper::WgpuTerminalGlyphUvMapResult,
     quad_vertex_buffer_builder::{WgpuQuadVertexBufferBuilder, WgpuVertexBuffer},
     render_pass_plan::WgpuTerminalRenderPassPlan,
-    renderer_backend::{WgpuRendererBackend, WgpuRendererConfig},
+    renderer_backend::{WgpuRendererBackend, WgpuRendererConfig, WgpuRendererDamage},
     shader::WgpuViewportUniform,
     viewport_bind_group::{WgpuViewportBindGroupFactory, WgpuViewportUploadBytes},
 };
@@ -107,7 +104,12 @@ impl WgpuTerminalFrameBuilder {
         surface_snapshot: &RenderSurfaceSnapshot,
         viewport: WgpuViewportUniform,
     ) -> WgpuTerminalPreparedFrame {
-        self.build_with_renderer_config(surface_snapshot, viewport, self.renderer_config)
+        self.build_with_renderer_config_and_damage(
+            surface_snapshot,
+            viewport,
+            self.renderer_config,
+            None,
+        )
     }
 
     pub fn build_with_renderer_config(
@@ -115,6 +117,21 @@ impl WgpuTerminalFrameBuilder {
         surface_snapshot: &RenderSurfaceSnapshot,
         viewport: WgpuViewportUniform,
         renderer_config: WgpuRendererConfig,
+    ) -> WgpuTerminalPreparedFrame {
+        self.build_with_renderer_config_and_damage(
+            surface_snapshot,
+            viewport,
+            renderer_config,
+            None,
+        )
+    }
+
+    pub(crate) fn build_with_renderer_config_and_damage(
+        &self,
+        surface_snapshot: &RenderSurfaceSnapshot,
+        viewport: WgpuViewportUniform,
+        renderer_config: WgpuRendererConfig,
+        damage: Option<WgpuRendererDamage>,
     ) -> WgpuTerminalPreparedFrame {
         let total_started_at = Instant::now();
         let cache_key = WgpuTerminalPreparedFrameCacheKey {
@@ -124,6 +141,7 @@ impl WgpuTerminalFrameBuilder {
             default_background: surface_snapshot.default_background,
             cursor: surface_snapshot.cursor,
             ime_preedit: surface_snapshot.ime_preedit.clone(),
+            damage,
         };
         if surface_snapshot.latest_seq.value() != 0
             && let Some(entry) = self
@@ -160,7 +178,7 @@ impl WgpuTerminalFrameBuilder {
             renderer.set_underline_metrics(self.glyph_atlas_frame_builder.underline_metrics());
             renderer.set_strikeout_metrics(self.glyph_atlas_frame_builder.strikeout_metrics());
 
-            renderer.render_surface(surface_snapshot);
+            renderer.render_surface_with_damage(surface_snapshot, damage);
             let render_surface_time = render_surface_started_at.elapsed();
             let (vertex_buffer, glyph_uv_map_result, vertex_build_time) =
                 renderer.with_quads(|quads| {
@@ -256,6 +274,7 @@ struct WgpuTerminalPreparedFrameCacheKey {
     cursor: Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceCursorSnapshot>,
     ime_preedit:
         Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceImePreeditSnapshot>,
+    damage: Option<WgpuRendererDamage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,6 +449,43 @@ mod tests {
         );
         assert_eq!(second.timings.vertex_build, Duration::ZERO);
         assert_eq!(second.timings.atlas_build, Duration::ZERO);
+    }
+
+    #[test]
+    fn vertically_bounded_frame_does_not_poison_the_full_frame_cache() {
+        let config = WgpuRendererConfig {
+            content_width_px: 80,
+            content_height_px: 32,
+            grid_columns: 10,
+            grid_rows: 2,
+            ..WgpuRendererConfig::default()
+        };
+        let builder = WgpuTerminalFrameBuilder::new(config);
+        let mut snapshot = debug_snapshot(1);
+        snapshot.rows.push(RenderSurfaceRowSnapshot {
+            y: 1,
+            runs: vec![RenderSurfaceRunSnapshot {
+                x: 0,
+                text: "second row".to_string(),
+                style: TextStyleDto::plain(),
+                decoration: Default::default(),
+            }],
+        });
+        let viewport = WgpuViewportUniform::new(80.0, 32.0);
+
+        let bounded = builder.build_with_renderer_config_and_damage(
+            &snapshot,
+            viewport,
+            config,
+            Some(WgpuRendererDamage::vertical(16, 32)),
+        );
+        let full = builder.build_with_renderer_config(&snapshot, viewport, config);
+
+        assert!(bounded.quad_count() < full.quad_count());
+        assert!(!Arc::ptr_eq(
+            &bounded.vertex_buffer.vertices,
+            &full.vertex_buffer.vertices,
+        ));
     }
 
     #[test]

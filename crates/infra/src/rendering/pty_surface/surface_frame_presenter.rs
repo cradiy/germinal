@@ -16,7 +16,7 @@ use crate::rendering::pty_surface::{
     pipeline_factory::WgpuTerminalPipeline,
     render_plugin::{WgpuPaneRenderContext, WgpuPaneRenderPlugin},
     render_target_plan::{WgpuTerminalClearColor, WgpuTerminalRenderTargetPlan},
-    renderer_backend::WgpuRendererConfig,
+    renderer_backend::{WgpuRendererConfig, WgpuRendererDamage},
     visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
@@ -165,28 +165,22 @@ impl WgpuTerminalSurfaceFramePresenter {
                     1
                 });
         let render_to_view_started_at = Instant::now();
-        let render_surfaces = input
+        let damage = retained_action.and_then(WgpuRetainedFrameAction::renderer_damage);
+        let vertical_bounds = damage.map(WgpuRendererDamage::vertical_bounds);
+        let render_results = input
             .surfaces
-            .iter()
-            .map(|surface| WgpuTerminalWorkspaceSurface {
-                render_target_plan: retained_action
-                    .and_then(WgpuRetainedFrameAction::damage_bounds)
-                    .map_or(surface.render_target_plan, |(top, bottom)| {
-                        surface.render_target_plan.with_scissor(
-                            surface.render_target_plan.x_px,
-                            surface.render_target_plan.y_px.saturating_add(top),
-                            surface.render_target_plan.width_px,
-                            bottom.saturating_sub(top),
-                        )
-                    }),
-                surface_snapshot: surface.surface_snapshot,
-                renderer_config: surface.renderer_config,
-            })
-            .collect::<Vec<_>>();
-        let render_results = render_surfaces
             .iter()
             .filter(|_| retained_action != Some(WgpuRetainedFrameAction::Reuse))
             .map(|surface| {
+                let render_target_plan =
+                    vertical_bounds.map_or(surface.render_target_plan, |(top_px, bottom_px)| {
+                        surface.render_target_plan.with_scissor(
+                            surface.render_target_plan.x_px,
+                            surface.render_target_plan.y_px.saturating_add(top_px),
+                            surface.render_target_plan.width_px,
+                            bottom_px.saturating_sub(top_px),
+                        )
+                    });
                 self.frame_renderer.render_to_view(
                     WgpuTerminalGpuContext {
                         device: input.device,
@@ -195,10 +189,11 @@ impl WgpuTerminalSurfaceFramePresenter {
                     WgpuTerminalRenderView {
                         command_encoder: &mut command_encoder,
                         target_view: &target_view,
-                        render_target_plan: surface.render_target_plan,
+                        render_target_plan,
                         pipeline: input.pipeline,
                         surface_snapshot: surface.surface_snapshot,
                         renderer_config: surface.renderer_config,
+                        damage,
                     },
                 )
             })
@@ -398,12 +393,22 @@ enum WgpuRetainedFrameAction {
 }
 
 impl WgpuRetainedFrameAction {
-    fn damage_bounds(self) -> Option<(u32, u32)> {
+    fn renderer_damage(self) -> Option<WgpuRendererDamage> {
         match self {
-            Self::Damage { top_px, bottom_px }
-            | Self::ScrollUp {
-                top_px, bottom_px, ..
-            } => Some((top_px, bottom_px)),
+            Self::Damage { top_px, bottom_px } => {
+                Some(WgpuRendererDamage::vertical(top_px, bottom_px))
+            }
+            Self::ScrollUp {
+                rows,
+                preserved_rows,
+                top_px,
+                bottom_px,
+            } => Some(WgpuRendererDamage::scrolled_up(
+                top_px,
+                bottom_px,
+                rows,
+                preserved_rows,
+            )),
             Self::Full | Self::Reuse => None,
         }
     }
@@ -445,6 +450,7 @@ fn retained_frame_action(
     if previous.snapshot.default_background != snapshot.default_background
         || stable_renderer_config(previous.renderer_config) != stable_renderer_config(config)
         || snapshot.dirty_rows.is_empty()
+        || previous.snapshot.ime_preedit != snapshot.ime_preedit
     {
         return WgpuRetainedFrameAction::Full;
     }
@@ -551,11 +557,17 @@ fn scroll_up_rows(
     grid_rows: u32,
 ) -> Option<(u32, u32)> {
     (1..grid_rows)
-        .map(|shift| {
-            let preserved_rows = (0..grid_rows - shift)
-                .take_while(|row| row_runs(previous, *row + shift) == row_runs(current, *row))
-                .count() as u32;
-            (shift, preserved_rows)
+        .filter_map(|shift| {
+            let current_first = row_runs(current, 0)?;
+            let previous_first = row_runs(previous, shift)?;
+            if previous_first != current_first {
+                return None;
+            }
+            let preserved_rows = 1
+                + (1..grid_rows - shift)
+                    .take_while(|row| row_runs(previous, *row + shift) == row_runs(current, *row))
+                    .count() as u32;
+            Some((shift, preserved_rows))
         })
         .filter(|(_, preserved_rows)| *preserved_rows >= grid_rows / 2)
         .max_by_key(|(_, preserved_rows)| *preserved_rows)
@@ -765,7 +777,9 @@ mod tests {
             frame_plan_builder::{RgbColorDto, TextStyleDto},
             render_target_id::RenderTargetId,
             surface_snapshot::{
-                RenderSurfaceRowSnapshot, RenderSurfaceRunSnapshot, RenderSurfaceTextDecoration,
+                RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
+                RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot,
+                RenderSurfaceRunSnapshot, RenderSurfaceTextDecoration,
             },
         },
         seq::Seq,
@@ -877,6 +891,52 @@ mod tests {
             renderer_config: config(),
         };
         let current = snapshot(2, &["a", "b", "c", "d"], Vec::new());
+
+        assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Full);
+    }
+
+    #[test]
+    fn full_screen_clear_is_not_mistaken_for_scroll_through_absent_rows() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(10, 4));
+        let target_id = RenderTargetId::new(8);
+        store.apply_bytes(target_id, Seq::new(1), b"header\r\nGPU data");
+        let previous_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        store.clear_damage_up_to(target_id, Seq::new(1));
+
+        store.apply_bytes(target_id, Seq::new(2), b"\x1b[?25l\x1b[H\x1b[2J");
+        let current = store.render_surface_snapshot_of(target_id).unwrap();
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: previous_snapshot,
+            renderer_config: config(),
+        };
+
+        assert!(current.rows.is_empty());
+        assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Full);
+    }
+
+    #[test]
+    fn changing_ime_preedit_forces_a_full_retained_frame_rebuild() {
+        let mut current = snapshot(1, &["a", "b", "c", "d"], vec![1]);
+        current.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 2,
+            y: 1,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+        current.ime_preedit = Some(RenderSurfaceImePreeditSnapshot {
+            text: "拼音".to_string(),
+            cursor_range: Some((6, 6)),
+        });
+        let mut previous_snapshot = current.clone();
+        previous_snapshot.ime_preedit = Some(RenderSurfaceImePreeditSnapshot {
+            text: "拼".to_string(),
+            cursor_range: Some((3, 3)),
+        });
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: previous_snapshot,
+            renderer_config: config(),
+        };
 
         assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Full);
     }

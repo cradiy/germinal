@@ -20,7 +20,7 @@ use crate::rendering::pty_surface::{
     image_surface_renderer::{WgpuImageEncodeContext, WgpuImageLayer, WgpuImageSurfaceRenderer},
     pipeline_factory::WgpuTerminalPipeline,
     render_target_plan::WgpuTerminalRenderTargetPlan,
-    renderer_backend::WgpuRendererConfig,
+    renderer_backend::{WgpuRendererConfig, WgpuRendererDamage},
     shader::WgpuViewportUniform,
 };
 
@@ -82,13 +82,29 @@ impl WgpuTerminalFrameRenderer {
         render_target_plan: WgpuTerminalRenderTargetPlan,
         renderer_config: WgpuRendererConfig,
     ) -> WgpuTerminalPreparedFrame {
-        self.frame_builder.build_with_renderer_config(
+        self.prepare_with_renderer_config_and_damage(
+            surface_snapshot,
+            render_target_plan,
+            renderer_config,
+            None,
+        )
+    }
+
+    fn prepare_with_renderer_config_and_damage(
+        &self,
+        surface_snapshot: &RenderSurfaceSnapshot,
+        render_target_plan: WgpuTerminalRenderTargetPlan,
+        renderer_config: WgpuRendererConfig,
+        damage: Option<WgpuRendererDamage>,
+    ) -> WgpuTerminalPreparedFrame {
+        self.frame_builder.build_with_renderer_config_and_damage(
             surface_snapshot,
             WgpuViewportUniform::new(
                 render_target_plan.viewport_width_px(),
                 render_target_plan.viewport_height_px(),
             ),
             renderer_config,
+            damage,
         )
     }
 
@@ -168,10 +184,11 @@ impl WgpuTerminalFrameRenderer {
         }
 
         let prepare_started_at = Instant::now();
-        let prepared = self.prepare_with_renderer_config(
+        let prepared = self.prepare_with_renderer_config_and_damage(
             view.surface_snapshot,
             view.render_target_plan,
             view.renderer_config,
+            view.damage,
         );
         let prepare_time = prepare_started_at.elapsed();
         let prepared_frame_timings = prepared.timings;
@@ -413,6 +430,7 @@ pub struct WgpuTerminalRenderView<'a> {
     pub pipeline: &'a WgpuTerminalPipeline,
     pub surface_snapshot: &'a RenderSurfaceSnapshot,
     pub renderer_config: WgpuRendererConfig,
+    pub damage: Option<WgpuRendererDamage>,
 }
 
 impl Default for WgpuTerminalFrameRenderer {
