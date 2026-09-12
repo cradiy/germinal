@@ -154,6 +154,7 @@ pub struct WgpuTerminalWindowRuntime {
     background_shader_animated: bool,
     window_occluded: bool,
     window_focused: bool,
+    ime_cursor_area_cache: ImeCursorAreaCache,
     retain_terminal_frame: bool,
     next_background_frame_at: Option<Instant>,
     background_shader_max_fps: u32,
@@ -401,6 +402,31 @@ fn ime_cursor_area(
         PhysicalPosition::new(x, y),
         PhysicalSize::new(cell_size.width_px().max(1), row_height),
     ))
+}
+
+#[derive(Debug, Default)]
+struct ImeCursorAreaCache {
+    last: Option<(RenderTargetId, PhysicalPosition<u32>, PhysicalSize<u32>)>,
+}
+
+impl ImeCursorAreaCache {
+    fn record_if_changed(
+        &mut self,
+        target_id: RenderTargetId,
+        position: PhysicalPosition<u32>,
+        size: PhysicalSize<u32>,
+    ) -> bool {
+        let next = (target_id, position, size);
+        if self.last == Some(next) {
+            return false;
+        }
+        self.last = Some(next);
+        true
+    }
+
+    fn invalidate(&mut self) {
+        self.last = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -753,6 +779,7 @@ impl WgpuTerminalWindowRuntime {
             background_shader_animated,
             window_occluded: false,
             window_focused: true,
+            ime_cursor_area_cache: ImeCursorAreaCache::default(),
             retain_terminal_frame,
             next_background_frame_at: background_shader_animated.then_some(now),
             background_shader_max_fps,
@@ -808,7 +835,7 @@ impl WgpuTerminalWindowRuntime {
         }
     }
 
-    pub fn update_ime_cursor_area(&self, target_id: RenderTargetId) -> bool {
+    pub fn update_ime_cursor_area(&mut self, target_id: RenderTargetId) -> bool {
         let Some(placement) = self
             .workspace_layout
             .iter()
@@ -823,9 +850,24 @@ impl WgpuTerminalWindowRuntime {
         let Some((position, size)) = ime_cursor_area(*placement, size_info, snapshot) else {
             return false;
         };
+        if !self
+            .ime_cursor_area_cache
+            .record_if_changed(target_id, position, size)
+        {
+            return false;
+        }
 
         self.window.set_ime_cursor_area(position, size);
         true
+    }
+
+    pub fn set_ime_allowed(&mut self, allowed: bool) {
+        self.ime_cursor_area_cache.invalidate();
+        self.window.set_ime_allowed(allowed);
+    }
+
+    pub fn invalidate_ime_cursor_area(&mut self) {
+        self.ime_cursor_area_cache.invalidate();
     }
 
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
@@ -1007,6 +1049,7 @@ impl WgpuTerminalWindowRuntime {
         self.profile = profile;
         self.scale_factor = scale_factor;
         self.size_info = size_info;
+        self.ime_cursor_area_cache.invalidate();
         self.rebuild_tab_bar_surface();
 
         for plugin in &mut self.render_plugins {
@@ -2364,14 +2407,14 @@ mod tests {
     use winit::dpi::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        CursorMotion, SurfaceFrameRecovery, TAB_BAR_MIN_WIDTH, TAB_BAR_POWERLINE_EDGE,
-        WgpuTerminalPowerPreference, accumulate_pending_surface_damage, advance_periodic_deadline,
-        background_shader_frame_interval, background_shader_should_run, build_cursor_motion,
-        build_tab_bar_surface, cursor_blink_phase, frame_interval_for_refresh_rate,
-        ime_cursor_area, is_enter_cursor_motion, normalized_opacity, powerline_tab_background,
-        render_target_is_visible, surface_frame_recovery, tab_bar_palette,
-        terminal_power_preference_for_device_types, terminal_wgpu_backends,
-        transparent_surface_alpha_mode,
+        CursorMotion, ImeCursorAreaCache, SurfaceFrameRecovery, TAB_BAR_MIN_WIDTH,
+        TAB_BAR_POWERLINE_EDGE, WgpuTerminalPowerPreference, accumulate_pending_surface_damage,
+        advance_periodic_deadline, background_shader_frame_interval, background_shader_should_run,
+        build_cursor_motion, build_tab_bar_surface, cursor_blink_phase,
+        frame_interval_for_refresh_rate, ime_cursor_area, is_enter_cursor_motion,
+        normalized_opacity, powerline_tab_background, render_target_is_visible,
+        surface_frame_recovery, tab_bar_palette, terminal_power_preference_for_device_types,
+        terminal_wgpu_backends, transparent_surface_alpha_mode,
     };
     use crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentError;
 
@@ -2739,6 +2782,21 @@ mod tests {
             ime_cursor_area(placement, size_info, &snapshot),
             Some((PhysicalPosition::new(416, 37), PhysicalSize::new(8, 18)))
         );
+    }
+
+    #[test]
+    fn ime_cursor_area_cache_suppresses_duplicates_until_invalidated() {
+        let target_id = RenderTargetId::new(9);
+        let position = PhysicalPosition::new(416, 37);
+        let size = PhysicalSize::new(8, 18);
+        let mut cache = ImeCursorAreaCache::default();
+
+        assert!(cache.record_if_changed(target_id, position, size));
+        assert!(!cache.record_if_changed(target_id, position, size));
+
+        cache.invalidate();
+
+        assert!(cache.record_if_changed(target_id, position, size));
     }
 
     #[test]

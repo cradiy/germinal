@@ -80,7 +80,7 @@ use winit::{
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
-    window::WindowId,
+    window::{ImePurpose, WindowId},
 };
 
 #[cfg(target_os = "linux")]
@@ -294,6 +294,7 @@ impl App {
                 .map_err(AppError::CreateWindow)?,
         );
         let window_id = window.id();
+        window.set_ime_purpose(ImePurpose::Terminal);
         window.set_ime_allowed(true);
 
         let runtime = self
@@ -973,14 +974,15 @@ impl App {
         self.set_ime_preedit(RenderTargetId::new(gshell_id.value()), None);
     }
 
-    fn update_ime_cursor_area(&self) {
+    fn update_ime_cursor_area(&mut self) {
         if !self.ime_enabled {
             return;
         }
-        let Some(runtime) = self.render_runtime.as_ref() else {
+        let target_id = RenderTargetId::new(self.focused_gshell().value());
+        let Some(runtime) = self.render_runtime.as_mut() else {
             return;
         };
-        let _ = runtime.update_ime_cursor_area(RenderTargetId::new(self.focused_gshell().value()));
+        let _ = runtime.update_ime_cursor_area(target_id);
     }
 
     fn route_focus_changed(&mut self, gshell_id: GShellId, focused: bool) {
@@ -1426,6 +1428,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if self.window_focused != focused {
                     self.window_focused = focused;
                     if !focused {
+                        self.ime_enabled = false;
                         self.clear_ime_preedit(self.focused_gshell());
                         self.pointer_capture = None;
                         self.tab_pointer_consumed = false;
@@ -1440,6 +1443,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 }
                 if let Some(render_runtime) = self.render_runtime.as_mut() {
                     render_runtime.set_window_focused(focused);
+                    render_runtime.set_ime_allowed(focused);
                 }
                 self.set_window_focused(focused);
             }
@@ -1554,6 +1558,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::Ime(Ime::Enabled) => {
                 self.ime_enabled = true;
+                if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.invalidate_ime_cursor_area();
+                }
                 self.route_window_input(self.focused_gshell(), WindowInputEvent::ImeEnabled);
                 self.update_ime_cursor_area();
             }
@@ -1591,6 +1598,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::Ime(Ime::Disabled) => {
                 self.ime_enabled = false;
+                if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.invalidate_ime_cursor_area();
+                }
                 let focused_gshell = self.focused_gshell();
                 self.route_window_input(focused_gshell, WindowInputEvent::ImeDisabled);
                 self.clear_ime_preedit(focused_gshell);
