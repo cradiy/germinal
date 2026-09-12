@@ -23,6 +23,8 @@ use crate::rendering::pty_surface::{
     },
 };
 
+const CORE_ASCII_GLYPH_COUNT: usize = 95 * 4;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WgpuTerminalGlyphAtlasFrame {
     pub target_id: RenderTargetId,
@@ -146,6 +148,22 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             };
         }
 
+        // Every Crossfont atlas is prewarmed with all printable ASCII styles. With ligatures
+        // disabled, an ASCII-only update cannot introduce a glyph that is missing from that atlas.
+        if surface_snapshot.latest_seq.value() != 0
+            && self.source.kind() == WgpuTerminalGlyphAtlasSourceKind::Crossfont
+            && !self.ligatures()
+            && let Some((run_count, char_count)) = plain_ascii_content_stats(surface_snapshot)
+            && let Some(frame) = self.reuse_core_ascii_atlas(
+                surface_snapshot,
+                ime_preedit_text,
+                run_count,
+                char_count,
+            )
+        {
+            return frame;
+        }
+
         let texts: Vec<&str> = surface_snapshot
             .rows
             .iter()
@@ -196,6 +214,41 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             cache_hit,
             content_cache_hit: false,
         }
+    }
+
+    fn reuse_core_ascii_atlas(
+        &self,
+        surface_snapshot: &RenderSurfaceSnapshot,
+        ime_preedit_text: Option<&str>,
+        run_count: usize,
+        char_count: usize,
+    ) -> Option<WgpuTerminalGlyphAtlasFrame> {
+        let mut cache = self.cache.borrow_mut();
+        let entry = cache.get_mut(&surface_snapshot.target_id)?;
+        if entry.key.source != WgpuTerminalGlyphAtlasSourceKind::Crossfont
+            || entry.key.glyphs.len() != CORE_ASCII_GLYPH_COUNT
+        {
+            return None;
+        }
+
+        entry.content_key = WgpuTerminalGlyphAtlasContentKey {
+            seq: surface_snapshot.latest_seq,
+            ime_preedit_text: ime_preedit_text.map(str::to_owned),
+        };
+        entry.run_count = run_count;
+        entry.char_count = char_count;
+
+        Some(WgpuTerminalGlyphAtlasFrame {
+            target_id: surface_snapshot.target_id,
+            seq: surface_snapshot.latest_seq,
+            atlas: Arc::clone(&entry.atlas),
+            upload_bytes: entry.upload_bytes.clone(),
+            run_count,
+            char_count,
+            source: entry.key.source,
+            cache_hit: true,
+            content_cache_hit: false,
+        })
     }
 
     fn cached_or_build_atlas(
@@ -390,6 +443,36 @@ fn collect_glyphs(surface_snapshot: &RenderSurfaceSnapshot) -> BTreeSet<WgpuTerm
     }
 
     glyphs
+}
+
+fn plain_ascii_content_stats(surface_snapshot: &RenderSurfaceSnapshot) -> Option<(usize, usize)> {
+    let mut run_count = 0;
+    let mut char_count = 0;
+    for run in surface_snapshot.rows.iter().flat_map(|row| &row.runs) {
+        if !run
+            .text
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return None;
+        }
+        run_count += 1;
+        char_count += run.text.len();
+    }
+    if surface_snapshot
+        .ime_preedit
+        .as_ref()
+        .is_some_and(|preedit| {
+            !preedit
+                .text
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        })
+    {
+        return None;
+    }
+
+    Some((run_count, char_count))
 }
 
 fn collect_text_segments(
@@ -677,9 +760,40 @@ mod tests {
     fn crossfont_prewarming_includes_every_ascii_style() {
         let glyphs = core_ascii_glyphs().collect::<BTreeSet<_>>();
 
-        assert_eq!(glyphs.len(), 95 * 4);
+        assert_eq!(glyphs.len(), CORE_ASCII_GLYPH_COUNT);
         assert!(glyphs.contains(&WgpuTerminalGlyphKey::styled('A', true, false)));
         assert!(glyphs.contains(&WgpuTerminalGlyphKey::styled('z', false, true)));
+    }
+
+    #[test]
+    fn core_ascii_cache_reuse_rejects_text_that_needs_shaping() {
+        let mut snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "Germinal -> Kitty".to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            image_surfaces: vec![],
+            dirty_rows: vec![0],
+            cursor: None,
+            ime_preedit: None,
+        };
+
+        assert_eq!(
+            plain_ascii_content_stats(&snapshot),
+            Some((1, "Germinal -> Kitty".len()))
+        );
+
+        snapshot.rows[0].runs[0].text.push('中');
+
+        assert_eq!(plain_ascii_content_stats(&snapshot), None);
     }
 
     #[test]

@@ -853,7 +853,12 @@ impl AlacrittyTerminalStore {
         }
         let dirty_rows = dirty_rows_from_state(state);
 
-        let placeholder_cells = kitty_placeholder_cells(&state.term);
+        let image_surfaces = if state.graphics.has_any_placements() {
+            let placeholder_cells = kitty_placeholder_cells(&state.term);
+            state.graphics.snapshots(&placeholder_cells)
+        } else {
+            Vec::new()
+        };
         let renderable = state.term.renderable_content();
         let default_background = renderable.colors[NamedColor::Background]
             .map(rgb_to_dto)
@@ -864,7 +869,7 @@ impl AlacrittyTerminalStore {
             latest_seq: state.latest_seq,
             default_background,
             rows,
-            image_surfaces: state.graphics.snapshots(&placeholder_cells),
+            image_surfaces,
             dirty_rows,
             cursor: None,
             ime_preedit: None,

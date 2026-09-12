@@ -414,7 +414,7 @@ fn render_row(
     ligatures: bool,
     decoration_metrics: WgpuTextDecorationMetrics,
 ) -> WgpuRenderedRow {
-    if text_shaping {
+    if should_shape_row(row, text_shaping, ligatures) {
         return render_shaped_row(row, config, ligatures, decoration_metrics);
     }
 
@@ -630,6 +630,15 @@ fn occupied_text_cells(row: &RenderSurfaceRowSnapshot, columns: u32) -> Vec<bool
     let mut occupied = vec![false; columns as usize];
     for run in &row.runs {
         let mut x = run.x;
+        if is_plain_ascii_text(&run.text) {
+            for byte in run.text.bytes() {
+                if byte != b' ' && x < columns {
+                    occupied[x as usize] = true;
+                }
+                x = x.saturating_add(1);
+            }
+            continue;
+        }
         for grapheme in run.text.graphemes(true) {
             let cell_width = terminal_grapheme_cell_width(grapheme);
             if cell_width == 0 {
@@ -645,6 +654,15 @@ fn occupied_text_cells(row: &RenderSurfaceRowSnapshot, columns: u32) -> Vec<bool
         }
     }
     occupied
+}
+
+fn is_plain_ascii_text(text: &str) -> bool {
+    text.bytes()
+        .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+}
+
+fn should_shape_row(row: &RenderSurfaceRowSnapshot, text_shaping: bool, ligatures: bool) -> bool {
+    text_shaping && (ligatures || row.runs.iter().any(|run| !is_plain_ascii_text(&run.text)))
 }
 
 fn available_glyph_cell_span(occupied_cells: &[bool], x: u32, cell_width: u32) -> u32 {
@@ -1485,6 +1503,7 @@ mod tests {
     use super::{
         CURSOR_COLOR, WgpuQuadDrawItem, WgpuQuadKind, WgpuRendererBackend, WgpuRendererConfig,
         append_pixel_rect_quads_from_row, available_glyph_cell_span, occupied_text_cells,
+        should_shape_row,
     };
     use crate::rendering::pty_surface::{
         crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
@@ -2078,6 +2097,38 @@ mod tests {
         assert_eq!(glyph_quads[0].width_px, 16);
         assert_eq!(glyph_quads[1].x_px, 16);
         assert_eq!(glyph_quads[1].width_px, 32);
+    }
+
+    #[test]
+    fn ascii_without_ligatures_skips_shaping_with_equivalent_output() {
+        let snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: vec![RenderSurfaceRowSnapshot {
+                y: 0,
+                runs: vec![RenderSurfaceRunSnapshot {
+                    x: 0,
+                    text: "Germinal -> Kitty".to_string(),
+                    style: TextStyleDto::plain(),
+                    decoration: Default::default(),
+                }],
+            }],
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            cursor: None,
+            ime_preedit: None,
+        };
+        let unshaped = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        let crossfont = WgpuRendererBackend::new(WgpuRendererConfig::default());
+        crossfont.set_text_shaping(true);
+        crossfont.set_ligatures(false);
+
+        assert!(!should_shape_row(&snapshot.rows[0], true, false));
+        unshaped.render_surface(&snapshot);
+        crossfont.render_surface(&snapshot);
+
+        assert_eq!(crossfont.state(), unshaped.state());
     }
 
     #[test]
