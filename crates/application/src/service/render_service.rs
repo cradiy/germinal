@@ -421,6 +421,7 @@ mod tests {
             rows: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows: Vec::new(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         }

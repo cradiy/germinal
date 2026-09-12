@@ -30,6 +30,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::rendering::pty_surface::{
     crossfont_glyph_atlas::{WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics},
     glyph_atlas::WgpuTerminalGlyphKey,
+    terminal_scrollbar::WgpuTerminalScrollbarGeometry,
     text_shaping::{terminal_grapheme_cell_width, terminal_text_segments_with_ligatures},
 };
 
@@ -261,6 +262,7 @@ impl WgpuRendererBackend {
             append_cursor_quads(&mut cursor_quads, cursor_row, cursor, config);
             append_cursor_text_quads(&mut cursor_text_quads, cursor_row, cursor, config);
         }
+        let scrollbar_quads = terminal_scrollbar_quads(snapshot, config);
 
         let total_row_quads: usize = inner
             .rendered_rows
@@ -280,7 +282,8 @@ impl WgpuRendererBackend {
             + total_row_quads
             + ime_quad_count
             + cursor_quads.len()
-            + cursor_text_quads.len();
+            + cursor_text_quads.len()
+            + scrollbar_quads.len();
         let mut quads = Vec::with_capacity(if vertical_bounds.is_some() {
             total_quad_count.min(256)
         } else {
@@ -342,12 +345,57 @@ impl WgpuRendererBackend {
         );
         append_quads_within_vertical_bounds(&mut quads, cursor_quads, vertical_bounds);
         append_quads_within_vertical_bounds(&mut quads, cursor_text_quads, vertical_bounds);
+        append_quads_within_vertical_bounds(&mut quads, scrollbar_quads, vertical_bounds);
 
         inner.render_count += 1;
         inner.last_target_id = Some(snapshot.target_id);
         inner.last_seq = Some(snapshot.latest_seq);
         inner.quads = quads;
     }
+}
+
+fn terminal_scrollbar_quads(
+    snapshot: &RenderSurfaceSnapshot,
+    config: WgpuRendererConfig,
+) -> Vec<WgpuQuadDrawItem> {
+    let Some(geometry) = snapshot.scrollback.and_then(|scrollback| {
+        WgpuTerminalScrollbarGeometry::new(
+            scrollback,
+            config.content_width_px,
+            config.content_height_px,
+            config.grid_rows,
+        )
+    }) else {
+        return Vec::new();
+    };
+    if !geometry.visible() {
+        return Vec::new();
+    }
+
+    rounded_scrollbar_thumb_quads(geometry, config)
+}
+
+fn rounded_scrollbar_thumb_quads(
+    geometry: WgpuTerminalScrollbarGeometry,
+    config: WgpuRendererConfig,
+) -> Vec<WgpuQuadDrawItem> {
+    let color = config.cursor_color;
+    let color = RgbaColorDto::new(color.red, color.green, color.blue, 184);
+    let x = config.content_origin_x.saturating_add(geometry.track_x_px);
+    let y = config.content_origin_y.saturating_add(geometry.thumb_y_px);
+    let width = geometry.track_width_px;
+    let height = geometry.thumb_height_px;
+    if width < 5 || height < 5 {
+        return vec![WgpuQuadDrawItem::pixel_rect(x, y, width, height, color)];
+    }
+
+    vec![
+        WgpuQuadDrawItem::pixel_rect(x + 2, y, width - 4, 1, color),
+        WgpuQuadDrawItem::pixel_rect(x + 1, y + 1, width - 2, 1, color),
+        WgpuQuadDrawItem::pixel_rect(x, y + 2, width, height - 4, color),
+        WgpuQuadDrawItem::pixel_rect(x + 1, y + height - 2, width - 2, 1, color),
+        WgpuQuadDrawItem::pixel_rect(x + 2, y + height - 1, width - 4, 1, color),
+    ]
 }
 
 impl RendererBackend for WgpuRendererBackend {
@@ -1666,8 +1714,8 @@ mod tests {
             surface_snapshot::{
                 RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
                 RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot,
-                RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, RenderSurfaceTextDecoration,
-                RenderSurfaceUnderlineStyle,
+                RenderSurfaceRunSnapshot, RenderSurfaceScrollbackSnapshot, RenderSurfaceSnapshot,
+                RenderSurfaceTextDecoration, RenderSurfaceUnderlineStyle,
             },
         },
         seq::Seq,
@@ -1716,6 +1764,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -1836,6 +1885,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -1880,6 +1930,7 @@ mod tests {
                 rows,
                 image_surfaces: vec![],
                 dirty_rows: vec![],
+                scrollback: None,
                 cursor: None,
                 ime_preedit: None,
             },
@@ -1890,6 +1941,50 @@ mod tests {
         assert_eq!(state.background_quads().len(), 1);
         assert_eq!(state.glyph_quads().len(), 1);
         assert_eq!(state.glyph_quads()[0].y_px, 16);
+    }
+
+    #[test]
+    fn scrollbar_is_drawn_over_scrollback_and_hidden_on_the_live_display() {
+        let config = WgpuRendererConfig {
+            content_origin_x: 5,
+            content_origin_y: 7,
+            content_width_px: 800,
+            content_height_px: 600,
+            grid_columns: 100,
+            grid_rows: 100,
+            ..WgpuRendererConfig::default()
+        };
+        let backend = WgpuRendererBackend::new(config);
+        let mut snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(3),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: Vec::new(),
+            image_surfaces: Vec::new(),
+            dirty_rows: Vec::new(),
+            scrollback: Some(RenderSurfaceScrollbackSnapshot {
+                display_offset: 450,
+                history_size: 900,
+            }),
+            cursor: None,
+            ime_preedit: None,
+        };
+
+        backend.render_surface(&snapshot);
+
+        let scrollbar = backend.state().pixel_rect_quads();
+        assert_eq!(scrollbar.len(), 5);
+        assert_eq!(scrollbar[0].x_px, 795);
+        assert!(scrollbar[0].y_px > 11);
+        assert_eq!(scrollbar[0].width_px, 5);
+        assert_eq!(scrollbar[2].x_px, 793);
+        assert_eq!(scrollbar[2].width_px, 9);
+        assert!(scrollbar[2].height_px >= 20);
+
+        snapshot.latest_seq = Seq::new(2);
+        snapshot.scrollback.as_mut().unwrap().display_offset = 0;
+        backend.render_surface(&snapshot);
+        assert!(backend.state().pixel_rect_quads().is_empty());
     }
 
     #[test]
@@ -1926,6 +2021,7 @@ mod tests {
                 .collect(),
             image_surfaces: vec![],
             dirty_rows,
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         };
@@ -1977,6 +2073,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -2124,6 +2221,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 2,
                 y: 3,
@@ -2155,6 +2253,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 4,
                 y: 5,
@@ -2217,6 +2316,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 0,
                 y: 0,
@@ -2263,6 +2363,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 0,
                 y: 0,
@@ -2302,6 +2403,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -2347,6 +2449,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -2394,6 +2497,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         };
@@ -2420,6 +2524,7 @@ mod tests {
                 rows: vec![],
                 image_surfaces: vec![],
                 dirty_rows: vec![],
+                scrollback: None,
                 cursor: Some(RenderSurfaceCursorSnapshot {
                     x: 2,
                     y: 3,
@@ -2458,6 +2563,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 2,
                 y: 3,
@@ -2493,6 +2599,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 0,
                 y: 0,
@@ -2529,6 +2636,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 3,
                 y: 0,
@@ -2608,6 +2716,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 0,
                 y: 0,
@@ -2688,6 +2797,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -2733,6 +2843,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });
@@ -2777,6 +2888,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: Vec::new(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         });

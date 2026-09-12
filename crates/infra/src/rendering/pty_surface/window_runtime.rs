@@ -6,6 +6,7 @@ use std::{
 };
 
 use germinal_ports::{
+    event::window_input_event::WindowPointerPosition,
     pty_host::{
         cell_size::TerminalCellSize,
         color_theme::TerminalColorTheme,
@@ -16,6 +17,7 @@ use germinal_ports::{
         width::{terminal_char_cell_width, terminal_text_cell_width},
         window_metrics::TerminalWindowMetrics,
         window_size::TerminalWindowSize,
+        worker_input::TerminalDisplayScroll,
     },
     rendering::{
         frame_plan_builder::{RgbColorDto, TextStyleDto},
@@ -55,6 +57,7 @@ use crate::rendering::pty_surface::{
         WgpuTerminalSurfaceFramePresentError, WgpuTerminalSurfaceFramePresenter,
         WgpuTerminalWorkspacePresentInput, WgpuTerminalWorkspaceSurface,
     },
+    terminal_scrollbar::{WgpuTerminalScrollbarDrag, WgpuTerminalScrollbarGeometry},
     visual_bell_renderer::{WgpuVisualBellFrame, WgpuVisualBellRenderer},
     workspace_divider_renderer::WgpuWorkspaceDividerRenderer,
 };
@@ -100,6 +103,11 @@ impl WgpuTerminalPowerPreference {
             Self::Low => wgpu::PowerPreference::LowPower,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgpuTerminalScrollbarPress {
+    pub scroll: Option<TerminalDisplayScroll>,
 }
 
 pub fn detect_terminal_power_preference() -> WgpuTerminalPowerPreference {
@@ -177,6 +185,7 @@ pub struct WgpuTerminalWindowRuntime {
     next_cursor_motion_frame_at: Option<Instant>,
     perf: WgpuTerminalRenderPerf,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
+    scrollbar_drag: Option<(RenderTargetId, WgpuTerminalScrollbarDrag)>,
     started_at: Instant,
 }
 
@@ -810,6 +819,7 @@ impl WgpuTerminalWindowRuntime {
             next_cursor_motion_frame_at: None,
             perf: WgpuTerminalRenderPerf::new(),
             render_plugins,
+            scrollbar_drag: None,
             started_at: now,
         })
     }
@@ -879,6 +889,9 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
+        if self.terminal_scrollbar_drag_target() == Some(target_id) {
+            self.scrollbar_drag = None;
+        }
         self.surface_snapshots.remove(&target_id);
         self.cursor_motions.remove(&target_id);
         self.pending_surface_dirty_rows.remove(&target_id);
@@ -901,6 +914,12 @@ impl WgpuTerminalWindowRuntime {
             .iter()
             .map(|placement| placement.target_id)
             .collect::<HashSet<_>>();
+        if self
+            .terminal_scrollbar_drag_target()
+            .is_some_and(|target_id| !visible_targets.contains(&target_id))
+        {
+            self.scrollbar_drag = None;
+        }
         let hidden_targets = self
             .surface_snapshots
             .keys()
@@ -952,6 +971,65 @@ impl WgpuTerminalWindowRuntime {
             self.schedule_redraw();
         }
         true
+    }
+
+    pub fn begin_terminal_scrollbar_drag(
+        &mut self,
+        target_id: RenderTargetId,
+        position: WindowPointerPosition,
+    ) -> Option<WgpuTerminalScrollbarPress> {
+        self.scrollbar_drag = None;
+        let (geometry, content_width_px) = self.terminal_scrollbar_geometry(target_id)?;
+        if !geometry.visible() || !geometry.hit_test(position.x_px, position.y_px, content_width_px)
+        {
+            return None;
+        }
+
+        let (drag, delta) = WgpuTerminalScrollbarDrag::begin(geometry, position.y_px);
+        self.scrollbar_drag = Some((target_id, drag));
+        Some(WgpuTerminalScrollbarPress {
+            scroll: delta.map(TerminalDisplayScroll::Delta),
+        })
+    }
+
+    pub fn terminal_scrollbar_drag_target(&self) -> Option<RenderTargetId> {
+        self.scrollbar_drag.map(|(target_id, _)| target_id)
+    }
+
+    pub fn update_terminal_scrollbar_drag(
+        &mut self,
+        target_id: RenderTargetId,
+        position: WindowPointerPosition,
+    ) -> Option<TerminalDisplayScroll> {
+        let (drag_target, drag) = self.scrollbar_drag.as_mut()?;
+        if *drag_target != target_id {
+            return None;
+        }
+        drag.update(position.y_px).map(TerminalDisplayScroll::Delta)
+    }
+
+    pub fn end_terminal_scrollbar_drag(&mut self) -> bool {
+        self.scrollbar_drag.take().is_some()
+    }
+
+    fn terminal_scrollbar_geometry(
+        &self,
+        target_id: RenderTargetId,
+    ) -> Option<(WgpuTerminalScrollbarGeometry, u32)> {
+        let placement = self
+            .workspace_layout
+            .iter()
+            .find(|placement| placement.target_id == target_id)?;
+        let snapshot = self.surface_snapshots.get(&target_id)?;
+        let scrollback = snapshot.scrollback?;
+        let size_info = self.terminal_size_info_for_window_size(placement.window_size());
+        let geometry = WgpuTerminalScrollbarGeometry::new(
+            scrollback,
+            size_info.content_width_px(),
+            size_info.content_height_px(),
+            size_info.grid_size().rows() as u32,
+        )?;
+        Some((geometry, size_info.content_width_px()))
     }
 
     pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
@@ -1719,6 +1797,7 @@ fn build_tab_bar_surface(
             rows: vec![RenderSurfaceRowSnapshot { y: 0, runs }],
             image_surfaces: Vec::new(),
             dirty_rows: Vec::new(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         },
@@ -2619,6 +2698,7 @@ mod tests {
             rows: Vec::new(),
             image_surfaces: Vec::new(),
             dirty_rows,
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         };
@@ -2791,6 +2871,7 @@ mod tests {
             rows: vec![],
             image_surfaces: vec![],
             dirty_rows: vec![],
+            scrollback: None,
             cursor: Some(RenderSurfaceCursorSnapshot {
                 x: 3,
                 y: 0,

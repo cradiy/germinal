@@ -17,8 +17,15 @@ pub struct RenderSurfaceSnapshot {
     pub rows: Vec<RenderSurfaceRowSnapshot>,
     pub image_surfaces: Vec<RenderSurfaceImageSnapshot>,
     pub dirty_rows: Vec<u32>,
+    pub scrollback: Option<RenderSurfaceScrollbackSnapshot>,
     pub cursor: Option<RenderSurfaceCursorSnapshot>,
     pub ime_preedit: Option<RenderSurfaceImePreeditSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderSurfaceScrollbackSnapshot {
+    pub display_offset: u32,
+    pub history_size: u32,
 }
 
 /// Merges damage carried by an earlier snapshot into a newer full-state snapshot.

@@ -2,6 +2,7 @@ use germinal_domain::gshell::vo::gshell_id::GShellId;
 
 use crate::event::window_input_event::WindowInputEvent;
 use crate::pty_host::terminal_clipboard::TerminalClipboard;
+use crate::pty_host::worker_input::TerminalDisplayScroll;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GShellInput {
@@ -21,5 +22,6 @@ pub enum GShellInputEvent {
     },
     ToggleViMode,
     ToggleSearch,
+    ScrollDisplay(TerminalDisplayScroll),
     Window(WindowInputEvent),
 }

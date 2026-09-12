@@ -49,8 +49,8 @@ use germinal_ports::{
         render_target_id::RenderTargetId,
         surface_snapshot::{
             RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
-            RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, RenderSurfaceTextDecoration,
-            RenderSurfaceUnderlineStyle,
+            RenderSurfaceRunSnapshot, RenderSurfaceScrollbackSnapshot, RenderSurfaceSnapshot,
+            RenderSurfaceTextDecoration, RenderSurfaceUnderlineStyle,
         },
     },
     seq::Seq,
@@ -871,6 +871,18 @@ impl AlacrittyTerminalStore {
             rows,
             image_surfaces,
             dirty_rows,
+            scrollback: Some(RenderSurfaceScrollbackSnapshot {
+                display_offset: u32::try_from(state.term.grid().display_offset())
+                    .unwrap_or(u32::MAX),
+                history_size: u32::try_from(
+                    state
+                        .term
+                        .grid()
+                        .total_lines()
+                        .saturating_sub(state.term.grid().screen_lines()),
+                )
+                .unwrap_or(u32::MAX),
+            }),
             cursor: None,
             ime_preedit: None,
         }
@@ -3442,9 +3454,8 @@ mod tests {
         let target_id = RenderTargetId::new(47);
         store.apply_bytes(target_id, Seq::new(1), b"one\r\ntwo\r\nthree");
 
-        let live_text: String = store
-            .render_surface_snapshot_of(target_id)
-            .unwrap()
+        let live_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+        let live_text: String = live_snapshot
             .rows
             .iter()
             .flat_map(|row| &row.runs)
@@ -3452,6 +3463,13 @@ mod tests {
             .collect();
         assert!(!live_text.contains("one"));
         assert!(live_text.contains("three"));
+        assert_eq!(
+            live_snapshot.scrollback,
+            Some(RenderSurfaceScrollbackSnapshot {
+                display_offset: 0,
+                history_size: 1,
+            })
+        );
 
         assert!(store.scroll_display(target_id, Seq::new(2), Scroll::Delta(1)));
         let history_snapshot = store.render_surface_snapshot_of(target_id).unwrap();
@@ -3464,9 +3482,25 @@ mod tests {
         assert!(history_text.contains("one"));
         assert!(!history_text.contains("three"));
         assert_eq!(history_snapshot.latest_seq, Seq::new(2));
+        assert_eq!(
+            history_snapshot.scrollback,
+            Some(RenderSurfaceScrollbackSnapshot {
+                display_offset: 1,
+                history_size: 1,
+            })
+        );
         assert!(store.cursor_snapshot(target_id).is_none());
 
         assert!(store.scroll_display(target_id, Seq::new(3), Scroll::Bottom));
+        assert_eq!(
+            store
+                .render_surface_snapshot_of(target_id)
+                .unwrap()
+                .scrollback
+                .unwrap()
+                .display_offset,
+            0
+        );
         assert!(store.cursor_snapshot(target_id).is_some());
         assert!(!store.scroll_display(target_id, Seq::new(4), Scroll::Bottom));
     }

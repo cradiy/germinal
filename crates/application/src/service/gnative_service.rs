@@ -166,6 +166,7 @@ fn gnative_input_event_from(
         GShellInputEvent::Osc52ClipboardLoadResponse { .. } => None,
         GShellInputEvent::ToggleViMode => None,
         GShellInputEvent::ToggleSearch => None,
+        GShellInputEvent::ScrollDisplay(_) => None,
         GShellInputEvent::Window(window_event) => match window_event {
             WindowInputEvent::ModifiersChanged(modifiers) => Some(
                 GNativeInputEvent::ModifiersChanged(gnative_input_modifiers_from(modifiers)),

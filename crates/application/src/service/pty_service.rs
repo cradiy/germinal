@@ -275,6 +275,9 @@ where
             }
             GShellInputEvent::ToggleViMode => toggle_pty_host_vi_mode(state, pty_host_id),
             GShellInputEvent::ToggleSearch => toggle_pty_host_search(state, pty_host_id),
+            GShellInputEvent::ScrollDisplay(scroll) => {
+                send_pty_host_display_scroll(state, pty_host_id, scroll)
+            }
             GShellInputEvent::Window(window_input) => match window_input {
                 WindowInputEvent::ModifiersChanged(modifiers) => {
                     *state.modifiers.borrow_mut() = modifiers;
@@ -408,6 +411,28 @@ where
         let _ = runtime
             .terminal_worker_sender
             .send(TerminalWorkerInput::Resize(pty_size));
+    }
+}
+
+fn send_pty_host_display_scroll(
+    state: &PtyServiceState,
+    pty_host_id: PtyHostId,
+    scroll: TerminalDisplayScroll,
+) {
+    let mut runtimes = state.pty_host_runtimes.borrow_mut();
+    let Some(runtime) = runtimes.get_mut(&pty_host_id) else {
+        return;
+    };
+    let _ = runtime
+        .terminal_worker_sender
+        .send(TerminalWorkerInput::ScrollDisplay(scroll));
+    match scroll {
+        TerminalDisplayScroll::Delta(lines) if lines > 0 => runtime.display_scrolled = true,
+        TerminalDisplayScroll::PageUp | TerminalDisplayScroll::Top => {
+            runtime.display_scrolled = true;
+        }
+        TerminalDisplayScroll::Bottom => runtime.display_scrolled = false,
+        TerminalDisplayScroll::Delta(_) | TerminalDisplayScroll::PageDown => {}
     }
 }
 
@@ -1163,9 +1188,10 @@ mod tests {
 
     use super::{
         PtyClickTracker, PtyMouseEncoder, PtyPaneRuntime, PtyServiceState,
-        request_pty_host_selection, return_to_live_display, send_pty_host_focus, send_pty_host_key,
-        send_pty_host_pointer_button, send_pty_host_pointer_moved, send_vi_mode_key,
-        toggle_pty_host_search, toggle_pty_host_vi_mode,
+        request_pty_host_selection, return_to_live_display, send_pty_host_display_scroll,
+        send_pty_host_focus, send_pty_host_key, send_pty_host_pointer_button,
+        send_pty_host_pointer_moved, send_vi_mode_key, toggle_pty_host_search,
+        toggle_pty_host_vi_mode,
     };
 
     #[test]
@@ -1233,6 +1259,49 @@ mod tests {
 
         return_to_live_display(&mut runtime);
         assert!(terminal_worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn scrollbar_scroll_routes_directly_to_the_terminal_worker() {
+        let state = PtyServiceState::new();
+        let pty_host_id = PtyHostId::new(9);
+        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(1);
+        state.pty_host_runtimes.borrow_mut().insert(
+            pty_host_id,
+            PtyPaneRuntime {
+                pty_input_sender,
+                terminal_worker_sender,
+                input_modes: TerminalInputModeState::default(),
+                mouse: PtyMouseEncoder::new(TerminalPtySize::new(80, 24, 800, 480)),
+                click_tracker: PtyClickTracker::default(),
+                selection_dragging: false,
+                selection_end: None,
+                display_scrolled: false,
+                vi_mode: false,
+                vi_pending_g: false,
+                vi_selection_kind: None,
+                vi_pending_text_object: None,
+                vi_search_input: None,
+                vi_last_search: None,
+            },
+        );
+
+        send_pty_host_display_scroll(&state, pty_host_id, TerminalDisplayScroll::Delta(37));
+
+        assert!(matches!(
+            terminal_worker_rx.try_recv(),
+            Ok(TerminalWorkerInput::ScrollDisplay(
+                TerminalDisplayScroll::Delta(37)
+            ))
+        ));
+        assert!(
+            state
+                .pty_host_runtimes
+                .borrow()
+                .get(&pty_host_id)
+                .is_some_and(|runtime| runtime.display_scrolled)
+        );
     }
 
     #[test]

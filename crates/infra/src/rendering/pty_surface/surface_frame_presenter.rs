@@ -451,6 +451,8 @@ fn retained_frame_action(
         || stable_renderer_config(previous.renderer_config) != stable_renderer_config(config)
         || snapshot.dirty_rows.is_empty()
         || previous.snapshot.ime_preedit != snapshot.ime_preedit
+        || visible_scrollback(previous.snapshot.scrollback)
+            != visible_scrollback(snapshot.scrollback)
     {
         return WgpuRetainedFrameAction::Full;
     }
@@ -485,6 +487,14 @@ fn retained_frame_action(
     }
 
     damage_action_for_rows(config, snapshot.dirty_rows.iter().copied())
+}
+
+fn visible_scrollback(
+    scrollback: Option<
+        germinal_ports::rendering::surface_snapshot::RenderSurfaceScrollbackSnapshot,
+    >,
+) -> Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceScrollbackSnapshot> {
+    scrollback.filter(|scrollback| scrollback.display_offset > 0)
 }
 
 fn stable_renderer_config(mut config: WgpuRendererConfig) -> WgpuRendererConfig {
@@ -779,7 +789,8 @@ mod tests {
             surface_snapshot::{
                 RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot,
                 RenderSurfaceImePreeditSnapshot, RenderSurfaceRowSnapshot,
-                RenderSurfaceRunSnapshot, RenderSurfaceTextDecoration,
+                RenderSurfaceRunSnapshot, RenderSurfaceScrollbackSnapshot,
+                RenderSurfaceTextDecoration,
             },
         },
         seq::Seq,
@@ -818,6 +829,7 @@ mod tests {
                 .collect(),
             image_surfaces: Vec::new(),
             dirty_rows,
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         }
@@ -882,6 +894,52 @@ mod tests {
         };
 
         assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Reuse);
+    }
+
+    #[test]
+    fn hidden_live_scrollbar_does_not_turn_output_into_a_full_frame() {
+        let mut previous_snapshot = snapshot(1, &["a", "b", "c", "d"], vec![2]);
+        previous_snapshot.scrollback = Some(RenderSurfaceScrollbackSnapshot {
+            display_offset: 0,
+            history_size: 10,
+        });
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: previous_snapshot,
+            renderer_config: config(),
+        };
+        let mut current = snapshot(2, &["a", "b", "changed", "d"], vec![2]);
+        current.scrollback = Some(RenderSurfaceScrollbackSnapshot {
+            display_offset: 0,
+            history_size: 11,
+        });
+
+        assert_eq!(
+            action(&previous, &current),
+            WgpuRetainedFrameAction::Damage {
+                top_px: 32,
+                bottom_px: 48,
+            }
+        );
+    }
+
+    #[test]
+    fn moving_a_visible_scrollbar_rebuilds_the_retained_frame() {
+        let mut previous_snapshot = snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
+        previous_snapshot.scrollback = Some(RenderSurfaceScrollbackSnapshot {
+            display_offset: 8,
+            history_size: 10,
+        });
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: previous_snapshot,
+            renderer_config: config(),
+        };
+        let mut current = snapshot(2, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
+        current.scrollback = Some(RenderSurfaceScrollbackSnapshot {
+            display_offset: 7,
+            history_size: 10,
+        });
+
+        assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Full);
     }
 
     #[test]

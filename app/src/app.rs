@@ -1044,6 +1044,72 @@ impl App {
         });
     }
 
+    fn try_begin_terminal_scrollbar_drag(&mut self) -> bool {
+        let Some(position) = self.cursor_position else {
+            return false;
+        };
+        let Some((gshell_id, local_position)) = self.pointer_input_at(position) else {
+            return false;
+        };
+        let target_id = RenderTargetId::new(gshell_id.value());
+        let press = {
+            let Some(runtime) = self.render_runtime.as_mut() else {
+                return false;
+            };
+            runtime.begin_terminal_scrollbar_drag(target_id, local_position)
+        };
+        let Some(press) = press else {
+            return false;
+        };
+
+        self.pointer_capture = Some(PointerCapture {
+            gshell_id,
+            position: local_position,
+        });
+        if let Some(scroll) = press.scroll {
+            self.route_input_to_gshell(GShellInput {
+                gshell_id,
+                event: GShellInputEvent::ScrollDisplay(scroll),
+            });
+        }
+        true
+    }
+
+    fn try_update_terminal_scrollbar_drag(&mut self, position: PhysicalPosition<f64>) -> bool {
+        let Some(target_id) = self
+            .render_runtime
+            .as_ref()
+            .and_then(WgpuTerminalWindowRuntime::terminal_scrollbar_drag_target)
+        else {
+            return false;
+        };
+        let gshell_id = GShellId::new(target_id.value());
+        let Some(local_position) = self.captured_pointer_input_at(gshell_id, position) else {
+            return true;
+        };
+        self.pointer_capture = Some(PointerCapture {
+            gshell_id,
+            position: local_position,
+        });
+        let scroll = self
+            .render_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.update_terminal_scrollbar_drag(target_id, local_position));
+        if let Some(scroll) = scroll {
+            self.route_input_to_gshell(GShellInput {
+                gshell_id,
+                event: GShellInputEvent::ScrollDisplay(scroll),
+            });
+        }
+        true
+    }
+
+    fn try_end_terminal_scrollbar_drag(&mut self) -> bool {
+        self.render_runtime
+            .as_mut()
+            .is_some_and(WgpuTerminalWindowRuntime::end_terminal_scrollbar_drag)
+    }
+
     fn pointer_input_at(
         &self,
         position: PhysicalPosition<f64>,
@@ -1473,6 +1539,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         self.ime_enabled = false;
                         self.clear_ime_preedit(self.focused_gshell());
                         self.pointer_capture = None;
+                        if let Some(runtime) = self.render_runtime.as_mut() {
+                            runtime.end_terminal_scrollbar_drag();
+                        }
                         self.tab_pointer_consumed = false;
                         self.route_pointer_left();
                         // Some compositors do not deliver modifier key releases after
@@ -1512,7 +1581,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
-                self.route_pointer_moved(position);
+                if !self.try_update_terminal_scrollbar_drag(position) {
+                    self.route_pointer_moved(position);
+                }
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_position = None;
@@ -1544,6 +1615,16 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 }
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     self.try_focus_pane_at_cursor();
+                    if self.try_begin_terminal_scrollbar_drag() {
+                        return;
+                    }
+                }
+                if state == ElementState::Released
+                    && button == MouseButton::Left
+                    && self.try_end_terminal_scrollbar_drag()
+                {
+                    self.pointer_capture = None;
+                    return;
                 }
                 self.route_pointer_button(state, button);
             }

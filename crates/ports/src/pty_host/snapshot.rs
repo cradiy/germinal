@@ -115,6 +115,7 @@ pub fn render_surface_snapshot_from_terminal_snapshot(
         rows,
         image_surfaces: Vec::new(),
         dirty_rows: snapshot.dirty_rows,
+        scrollback: None,
         cursor: None,
         ime_preedit: None,
     }

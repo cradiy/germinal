@@ -264,6 +264,7 @@ impl RenderSurfaceSnapshotProvider for TextSurfaceFramePlanPresenter {
             rows,
             image_surfaces: surface.image_surfaces.clone(),
             dirty_rows: surface.latest_dirty_rows.clone(),
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         })

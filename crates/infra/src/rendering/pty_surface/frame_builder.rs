@@ -415,6 +415,7 @@ mod tests {
             }],
             image_surfaces: vec![],
             dirty_rows: vec![0],
+            scrollback: None,
             cursor: None,
             ime_preedit: None,
         }

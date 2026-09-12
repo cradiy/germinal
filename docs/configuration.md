@@ -176,6 +176,10 @@ history = 10000
 
 `history` is the maximum scrollback line count.
 
+When the viewport is above the live display, Germinal shows a scrollbar at the right edge of the
+terminal. The thumb can be clicked or dragged to move through scrollback and hides again at the
+live bottom.
+
 ## Bell
 
 ```toml
