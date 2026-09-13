@@ -54,7 +54,7 @@ use germinal_ports::{
         },
     },
     pty_host::{
-        hyperlink::TerminalHyperlink,
+        hyperlink::{TerminalHyperlink, is_supported_terminal_hyperlink_uri},
         size_info::TerminalSizeInfo,
         spawn_config::PtySpawnConfig,
         terminal_notification::{TerminalNotification, TerminalNotificationOccasion},
@@ -122,7 +122,7 @@ pub struct App {
     pointer_capture: Option<PointerCapture>,
     pending_working_directories: RefCell<HashMap<GShellId, PathBuf>>,
     terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
-    hyperlink_pointer_consumed: bool,
+    pending_hyperlink_activation: Option<PendingHyperlinkActivation>,
     tab_pointer_consumed: bool,
     pane_navigation_enabled: bool,
     config: GerminalConfig,
@@ -140,6 +140,12 @@ enum PaneDirection {
 struct PointerCapture {
     gshell_id: GShellId,
     position: WindowPointerPosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingHyperlinkActivation {
+    gshell_id: GShellId,
+    uri: String,
 }
 
 impl App {
@@ -243,7 +249,7 @@ impl App {
             pointer_capture: None,
             pending_working_directories: RefCell::new(HashMap::new()),
             terminal_hyperlinks: HashMap::new(),
-            hyperlink_pointer_consumed: false,
+            pending_hyperlink_activation: None,
             tab_pointer_consumed: false,
             pane_navigation_enabled,
             config,
@@ -651,6 +657,13 @@ impl App {
                 .borrow_mut()
                 .remove(&closed_gshell);
             self.terminal_hyperlinks.remove(&closed_gshell);
+            if self
+                .pending_hyperlink_activation
+                .as_ref()
+                .is_some_and(|pending| pending.gshell_id == closed_gshell)
+            {
+                self.pending_hyperlink_activation = None;
+            }
             self.remove_gshell(closed_gshell);
             self.remove_render_target(RenderTargetId::new(closed_gshell.value()));
         }
@@ -1155,37 +1168,59 @@ impl App {
         )
     }
 
-    fn try_open_hyperlink_at_cursor(&self) -> bool {
-        let Some(position) = self.cursor_position else {
-            return false;
-        };
-        let Some((gshell_id, local_position)) = self.pointer_input_at(position) else {
-            return false;
-        };
-        if local_position.x_px < 0.0 || local_position.y_px < 0.0 {
+    fn hyperlink_at_cursor(&self) -> Option<(GShellId, String)> {
+        let position = self.cursor_position?;
+        let (gshell_id, local_position) = self.pointer_input_at(position)?;
+        let size_info = self.current_gshell_size_info(gshell_id)?;
+        let hyperlink = terminal_hyperlink_at_pointer(
+            self.terminal_hyperlinks.get(&gshell_id)?,
+            size_info,
+            local_position,
+        )?;
+        is_supported_terminal_hyperlink_uri(&hyperlink.uri)
+            .then(|| (gshell_id, hyperlink.uri.clone()))
+    }
+
+    fn try_begin_hyperlink_activation(&mut self) -> bool {
+        if !self.window_input_modifiers.control_key() && !self.window_input_modifiers.super_key() {
             return false;
         }
-        let Some(size_info) = self.current_gshell_size_info(gshell_id) else {
-            return false;
-        };
-        let cell_size = size_info.cell_size();
-        let x = (local_position.x_px / f64::from(cell_size.width_px().max(1))) as u32;
-        let y = (local_position.y_px / f64::from(cell_size.height_px().max(1))) as u32;
-        let Some(uri) = self
-            .terminal_hyperlinks
-            .get(&gshell_id)
-            .and_then(|hyperlinks| hyperlinks.iter().find(|link| link.contains(x, y)))
-            .map(|link| link.uri.clone())
-        else {
+        let Some((gshell_id, uri)) = self.hyperlink_at_cursor() else {
             return false;
         };
 
-        match open_terminal_hyperlink(&uri) {
-            Ok(()) => true,
-            Err(error) => {
-                warn!(%uri, %error, "failed to open terminal hyperlink");
-                false
-            }
+        self.pending_hyperlink_activation = Some(PendingHyperlinkActivation { gshell_id, uri });
+        true
+    }
+
+    fn try_finish_hyperlink_activation(&mut self) -> bool {
+        let Some(pending) = self.pending_hyperlink_activation.take() else {
+            return false;
+        };
+        let hovered = self.hyperlink_at_cursor();
+        if hovered
+            .as_ref()
+            .is_some_and(|(gshell_id, uri)| *gshell_id == pending.gshell_id && *uri == pending.uri)
+            && let Err(error) = open_terminal_hyperlink(&pending.uri)
+        {
+            warn!(uri = %pending.uri, %error, "failed to open terminal hyperlink");
+        }
+        true
+    }
+
+    fn sync_terminal_hyperlink_cursor(&mut self) {
+        let hovered = self.hyperlink_at_cursor().and_then(|(gshell_id, uri)| {
+            let hyperlinks = self
+                .terminal_hyperlinks
+                .get(&gshell_id)?
+                .iter()
+                .filter(|hyperlink| hyperlink.uri == uri)
+                .cloned()
+                .collect::<Vec<_>>();
+            Some((RenderTargetId::new(gshell_id.value()), hyperlinks))
+        });
+        if let Some(runtime) = self.render_runtime.as_mut() {
+            runtime.set_hovered_terminal_hyperlinks(hovered);
         }
     }
 
@@ -1467,6 +1502,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 } else {
                     self.terminal_hyperlinks.insert(gshell_id, hyperlinks);
                 }
+                self.sync_terminal_hyperlink_cursor();
             }
             RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
                 self.write_selection_to_clipboard(gshell_id, text);
@@ -1541,7 +1577,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         self.pointer_capture = None;
                         if let Some(runtime) = self.render_runtime.as_mut() {
                             runtime.end_terminal_scrollbar_drag();
+                            runtime.set_hovered_terminal_hyperlinks(None);
                         }
+                        self.pending_hyperlink_activation = None;
                         self.tab_pointer_consumed = false;
                         self.route_pointer_left();
                         // Some compositors do not deliver modifier key releases after
@@ -1584,15 +1622,22 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if !self.try_update_terminal_scrollbar_drag(position) {
                     self.route_pointer_moved(position);
                 }
+                self.sync_terminal_hyperlink_cursor();
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_position = None;
+                if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.set_hovered_terminal_hyperlinks(None);
+                }
                 if self.pointer_capture.is_none() {
                     self.route_pointer_left();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
+                    if state == ElementState::Pressed {
+                        self.pending_hyperlink_activation = None;
+                    }
                     if state == ElementState::Pressed && self.try_activate_tab_at_cursor() {
                         self.tab_pointer_consumed = true;
                         return;
@@ -1601,15 +1646,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         self.tab_pointer_consumed = false;
                         return;
                     }
-                    if state == ElementState::Pressed
-                        && self.window_input_modifiers.control_key()
-                        && self.try_open_hyperlink_at_cursor()
-                    {
-                        self.hyperlink_pointer_consumed = true;
+                    if state == ElementState::Pressed && self.try_begin_hyperlink_activation() {
                         return;
                     }
-                    if state == ElementState::Released && self.hyperlink_pointer_consumed {
-                        self.hyperlink_pointer_consumed = false;
+                    if state == ElementState::Released && self.try_finish_hyperlink_activation() {
                         return;
                     }
                 }
@@ -2073,8 +2113,40 @@ fn clamp_pointer_position_to_content(
     ))
 }
 
+fn terminal_hyperlink_at_pointer(
+    hyperlinks: &[TerminalHyperlink],
+    size_info: TerminalSizeInfo,
+    position: WindowPointerPosition,
+) -> Option<&TerminalHyperlink> {
+    if !position.x_px.is_finite()
+        || !position.y_px.is_finite()
+        || position.x_px < 0.0
+        || position.y_px < 0.0
+        || position.x_px >= f64::from(size_info.content_width_px())
+        || position.y_px >= f64::from(size_info.content_height_px())
+    {
+        return None;
+    }
+
+    let grid_size = size_info.grid_size();
+    let x = (position.x_px / f64::from(size_info.cell_size().width_px().max(1))) as u32;
+    let pointer_y_px = position.y_px.floor() as u64;
+    let rows = grid_size.rows() as u64;
+    let content_height_px = u64::from(size_info.content_height_px().max(1));
+    let y = pointer_y_px
+        .saturating_add(1)
+        .saturating_mul(rows)
+        .div_ceil(content_height_px)
+        .saturating_sub(1) as u32;
+    if x >= grid_size.columns() as u32 || y >= grid_size.rows() as u32 {
+        return None;
+    }
+
+    hyperlinks.iter().find(|hyperlink| hyperlink.contains(x, y))
+}
+
 fn open_terminal_hyperlink(uri: &str) -> Result<(), String> {
-    if !is_supported_terminal_hyperlink(uri) {
+    if !is_supported_terminal_hyperlink_uri(uri) {
         return Err("unsupported or unsafe URI scheme".to_string());
     }
 
@@ -2094,19 +2166,6 @@ fn open_terminal_hyperlink(uri: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-fn is_supported_terminal_hyperlink(uri: &str) -> bool {
-    if uri.is_empty() || uri.chars().any(char::is_control) {
-        return false;
-    }
-    let Some((scheme, _)) = uri.split_once(':') else {
-        return false;
-    };
-    matches!(
-        scheme.to_ascii_lowercase().as_str(),
-        "http" | "https" | "mailto" | "file"
-    )
 }
 
 fn winit_mouse_button_to_port(button: MouseButton) -> WindowPointerButton {
@@ -2516,14 +2575,52 @@ mod tests {
     }
 
     #[test]
-    fn terminal_hyperlink_activation_allows_only_explicit_safe_schemes() {
-        assert!(is_supported_terminal_hyperlink("https://example.com/docs"));
-        assert!(is_supported_terminal_hyperlink("mailto:user@example.com"));
-        assert!(is_supported_terminal_hyperlink("file:///tmp/readme.txt"));
-        assert!(!is_supported_terminal_hyperlink("javascript:alert(1)"));
-        assert!(!is_supported_terminal_hyperlink(
-            "https://example.com\ncommand"
-        ));
-        assert!(!is_supported_terminal_hyperlink("example.com"));
+    fn terminal_hyperlink_hit_testing_matches_distributed_render_rows() {
+        let size_info = TerminalSizeInfo::new(
+            TerminalWindowSize::new(100, 53),
+            germinal_ports::pty_host::cell_size::TerminalCellSize::new(10, 10),
+            germinal_ports::pty_host::size_info::TerminalPadding::ZERO,
+        );
+        let hyperlinks = [
+            TerminalHyperlink {
+                uri: "https://example.com/row-3".to_string(),
+                x: 2,
+                y: 3,
+                columns: 1,
+            },
+            TerminalHyperlink {
+                uri: "https://example.com/row-4".to_string(),
+                x: 2,
+                y: 4,
+                columns: 1,
+            },
+        ];
+
+        assert_eq!(
+            terminal_hyperlink_at_pointer(
+                &hyperlinks,
+                size_info,
+                WindowPointerPosition::new(25.0, 41.5),
+            )
+            .map(|hyperlink| hyperlink.y),
+            Some(3)
+        );
+        assert_eq!(
+            terminal_hyperlink_at_pointer(
+                &hyperlinks,
+                size_info,
+                WindowPointerPosition::new(25.0, 42.5),
+            )
+            .map(|hyperlink| hyperlink.y),
+            Some(4)
+        );
+        assert!(
+            terminal_hyperlink_at_pointer(
+                &hyperlinks,
+                size_info,
+                WindowPointerPosition::new(100.0, 42.5),
+            )
+            .is_none()
+        );
     }
 }

@@ -10,6 +10,7 @@ use germinal_ports::{
     pty_host::{
         cell_size::TerminalCellSize,
         color_theme::TerminalColorTheme,
+        hyperlink::TerminalHyperlink,
         profile::TerminalProfile,
         scale_factor::TerminalScaleFactor,
         size_info::TerminalSizeInfo,
@@ -36,7 +37,7 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
-    window::{UserAttentionType, Window, WindowId},
+    window::{CursorIcon, UserAttentionType, Window, WindowId},
 };
 
 use crate::rendering::pty_surface::{
@@ -186,6 +187,7 @@ pub struct WgpuTerminalWindowRuntime {
     perf: WgpuTerminalRenderPerf,
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     scrollbar_drag: Option<(RenderTargetId, WgpuTerminalScrollbarDrag)>,
+    hovered_terminal_hyperlinks: Option<(RenderTargetId, Vec<TerminalHyperlink>)>,
     started_at: Instant,
 }
 
@@ -820,6 +822,7 @@ impl WgpuTerminalWindowRuntime {
             perf: WgpuTerminalRenderPerf::new(),
             render_plugins,
             scrollbar_drag: None,
+            hovered_terminal_hyperlinks: None,
             started_at: now,
         })
     }
@@ -834,6 +837,26 @@ impl WgpuTerminalWindowRuntime {
 
     pub fn request_window_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    pub fn set_pointer_over_hyperlink(&self, pointer_over_hyperlink: bool) {
+        self.window.set_cursor(if pointer_over_hyperlink {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        });
+    }
+
+    pub fn set_hovered_terminal_hyperlinks(
+        &mut self,
+        hovered: Option<(RenderTargetId, Vec<TerminalHyperlink>)>,
+    ) {
+        self.set_pointer_over_hyperlink(hovered.is_some());
+        if self.hovered_terminal_hyperlinks == hovered {
+            return;
+        }
+        self.hovered_terminal_hyperlinks = hovered;
+        self.schedule_redraw();
     }
 
     pub fn set_surface_snapshot(&mut self, mut snapshot: RenderSurfaceSnapshot) {
@@ -891,6 +914,14 @@ impl WgpuTerminalWindowRuntime {
     pub fn remove_render_target(&mut self, target_id: RenderTargetId) {
         if self.terminal_scrollbar_drag_target() == Some(target_id) {
             self.scrollbar_drag = None;
+        }
+        if self
+            .hovered_terminal_hyperlinks
+            .as_ref()
+            .is_some_and(|(hovered_target, _)| *hovered_target == target_id)
+        {
+            self.hovered_terminal_hyperlinks = None;
+            self.set_pointer_over_hyperlink(false);
         }
         self.surface_snapshots.remove(&target_id);
         self.cursor_motions.remove(&target_id);
@@ -1314,6 +1345,7 @@ impl WgpuTerminalWindowRuntime {
             .collect::<Vec<_>>();
         let profile = &self.profile;
         let scale_factor = self.scale_factor;
+        let hovered_terminal_hyperlinks = self.hovered_terminal_hyperlinks.as_ref();
         let mut surfaces =
             self.workspace_layout
                 .iter()
@@ -1341,6 +1373,9 @@ impl WgpuTerminalWindowRuntime {
                         .with_load_op(WgpuTerminalLoadOp::Load),
                         surface_snapshot,
                         renderer_config,
+                        hyperlink_highlights: hovered_terminal_hyperlinks
+                            .filter(|(target_id, _)| *target_id == placement.target_id)
+                            .map_or(&[], |(_, hyperlinks)| hyperlinks.as_slice()),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1362,6 +1397,7 @@ impl WgpuTerminalWindowRuntime {
                     .with_color_theme(self.color_theme)
                     .with_background_opacity(terminal_background_opacity)
                     .with_blinking_cursor_visible(blinking_cursor_visible),
+                hyperlink_highlights: &[],
             });
         }
         let row_count = surfaces

@@ -6,9 +6,13 @@ use std::{
 
 use germinal_ports::{
     pty_host::{
-        cell_size::TerminalCellSize, color_theme::TerminalColorTheme,
-        render_viewport::TerminalRenderViewport, size_info::TerminalSizeInfo,
-        terminal_geometric_glyph::TerminalGeometricGlyph, width::terminal_char_cell_width,
+        cell_size::TerminalCellSize,
+        color_theme::TerminalColorTheme,
+        hyperlink::TerminalHyperlink,
+        render_viewport::TerminalRenderViewport,
+        size_info::TerminalSizeInfo,
+        terminal_geometric_glyph::TerminalGeometricGlyph,
+        width::{terminal_char_cell_width, terminal_text_cell_width},
     },
     rendering::{
         frame_plan_builder::{
@@ -19,7 +23,8 @@ use germinal_ports::{
         renderer_backend::RendererBackend,
         surface_snapshot::{
             RenderSurfaceCursorShape, RenderSurfaceCursorSnapshot, RenderSurfaceRowSnapshot,
-            RenderSurfaceSnapshot, RenderSurfaceTextDecoration, RenderSurfaceUnderlineStyle,
+            RenderSurfaceRunSnapshot, RenderSurfaceSnapshot, RenderSurfaceTextDecoration,
+            RenderSurfaceUnderlineStyle,
         },
     },
     seq::Seq,
@@ -36,6 +41,7 @@ use crate::rendering::pty_surface::{
 
 const CURSOR_COLOR: RgbColorDto = RgbColorDto::new(235, 235, 235);
 const CURSOR_TEXT_COLOR: RgbColorDto = RgbColorDto::new(0, 0, 0);
+const DEFAULT_URL_COLOR: RgbColorDto = RgbColorDto::new(0, 135, 189);
 const PIXEL_RECT_VIRTUAL_CELL_WIDTH_PX: u32 = 8;
 const PIXEL_RECT_VIRTUAL_CELL_HEIGHT_PX: u32 = 16;
 
@@ -105,6 +111,7 @@ struct WgpuRendererScrollUp {
 #[derive(Debug, Clone)]
 pub struct WgpuRendererBackend {
     inner: RefCell<WgpuRendererState>,
+    hyperlink_highlights: RefCell<Vec<TerminalHyperlink>>,
     text_shaping: Cell<bool>,
     ligatures: Cell<bool>,
     underline_metrics: Cell<Option<WgpuCrossfontUnderlineMetrics>>,
@@ -118,6 +125,7 @@ impl WgpuRendererBackend {
                 config,
                 ..WgpuRendererState::default()
             }),
+            hyperlink_highlights: RefCell::new(Vec::new()),
             text_shaping: Cell::new(false),
             ligatures: Cell::new(true),
             underline_metrics: Cell::new(None),
@@ -165,8 +173,11 @@ impl WgpuRendererBackend {
         &self,
         snapshot: &RenderSurfaceSnapshot,
         damage: Option<WgpuRendererDamage>,
+        hyperlink_highlights: &[TerminalHyperlink],
     ) {
         let mut inner = self.inner.borrow_mut();
+        let previous_hyperlink_highlights = self.hyperlink_highlights.borrow().clone();
+        let hyperlink_highlights_changed = previous_hyperlink_highlights != hyperlink_highlights;
         let config = inner.config;
         let vertical_bounds = damage.map(|damage| damage.vertical_bounds);
         let full_rerender =
@@ -187,7 +198,7 @@ impl WgpuRendererBackend {
             && damage
                 .and_then(|damage| damage.scroll_up)
                 .is_some_and(|scroll| shift_rendered_rows_up(&mut inner, config, scroll));
-        let dirty_rows: BTreeSet<u32> = if full_rerender {
+        let mut dirty_rows: BTreeSet<u32> = if full_rerender {
             snapshot_rows.keys().copied().collect()
         } else if scroll_cache_shifted {
             let vertical_bounds = vertical_bounds.expect("scroll damage has vertical bounds");
@@ -204,6 +215,14 @@ impl WgpuRendererBackend {
         } else {
             snapshot.dirty_rows.iter().copied().collect()
         };
+        if hyperlink_highlights_changed {
+            dirty_rows.extend(
+                previous_hyperlink_highlights
+                    .iter()
+                    .chain(hyperlink_highlights)
+                    .map(|hyperlink| hyperlink.y),
+            );
+        }
 
         if full_rerender {
             inner.rendered_rows.clear();
@@ -218,6 +237,7 @@ impl WgpuRendererBackend {
                     self.text_shaping.get(),
                     self.ligatures.get(),
                     self.text_decoration_metrics(),
+                    hyperlink_highlights,
                 );
                 inner
                     .draw_rows
@@ -351,6 +371,7 @@ impl WgpuRendererBackend {
         inner.last_target_id = Some(snapshot.target_id);
         inner.last_seq = Some(snapshot.latest_seq);
         inner.quads = quads;
+        *self.hyperlink_highlights.borrow_mut() = hyperlink_highlights.to_vec();
     }
 }
 
@@ -400,7 +421,7 @@ fn rounded_scrollbar_thumb_quads(
 
 impl RendererBackend for WgpuRendererBackend {
     fn render_surface(&self, snapshot: &RenderSurfaceSnapshot) {
-        self.render_surface_with_damage(snapshot, None);
+        self.render_surface_with_damage(snapshot, None, &[]);
     }
 }
 
@@ -571,7 +592,16 @@ fn render_ime_preedit(
     }
 
     rows.values()
-        .map(|row| render_row(row, config, text_shaping, ligatures, decoration_metrics))
+        .map(|row| {
+            render_row(
+                row,
+                config,
+                text_shaping,
+                ligatures,
+                decoration_metrics,
+                &[],
+            )
+        })
         .collect()
 }
 
@@ -634,7 +664,10 @@ fn render_row(
     text_shaping: bool,
     ligatures: bool,
     decoration_metrics: WgpuTextDecorationMetrics,
+    hyperlink_highlights: &[TerminalHyperlink],
 ) -> WgpuRenderedRow {
+    let highlighted_row = hyperlink_highlighted_row(row, hyperlink_highlights, config.url_color);
+    let row = highlighted_row.as_ref().unwrap_or(row);
     if should_shape_row(row, text_shaping, ligatures) {
         return render_shaped_row(row, config, ligatures, decoration_metrics);
     }
@@ -723,6 +756,63 @@ fn render_row(
         glyph_quads,
         underline_quads,
     }
+}
+
+fn hyperlink_highlighted_row(
+    row: &RenderSurfaceRowSnapshot,
+    hyperlink_highlights: &[TerminalHyperlink],
+    url_color: RgbColorDto,
+) -> Option<RenderSurfaceRowSnapshot> {
+    let row_highlights = hyperlink_highlights
+        .iter()
+        .filter(|hyperlink| hyperlink.y == row.y && hyperlink.columns > 0)
+        .collect::<Vec<_>>();
+    if row_highlights.is_empty() {
+        return None;
+    }
+
+    let mut runs = Vec::<RenderSurfaceRunSnapshot>::new();
+    for run in &row.runs {
+        let mut x = run.x;
+        for grapheme in run.text.graphemes(true) {
+            let cell_width = terminal_grapheme_cell_width(grapheme);
+            let highlighted = cell_width > 0
+                && row_highlights.iter().any(|hyperlink| {
+                    let glyph_end = x.saturating_add(cell_width);
+                    let hyperlink_end = hyperlink.x.saturating_add(hyperlink.columns);
+                    x < hyperlink_end && glyph_end > hyperlink.x
+                });
+            let mut style = run.style;
+            let mut decoration = run.decoration;
+            if highlighted {
+                style.foreground = Some(url_color);
+                decoration.underline = RenderSurfaceUnderlineStyle::Curly;
+                decoration.underline_color = Some(url_color);
+                decoration.dim = false;
+            }
+
+            if let Some(previous) = runs.last_mut()
+                && previous.style == style
+                && previous.decoration == decoration
+                && previous
+                    .x
+                    .saturating_add(terminal_text_cell_width(&previous.text))
+                    == x
+            {
+                previous.text.push_str(grapheme);
+            } else {
+                runs.push(RenderSurfaceRunSnapshot {
+                    x,
+                    text: grapheme.to_string(),
+                    style,
+                    decoration,
+                });
+            }
+            x = x.saturating_add(cell_width);
+        }
+    }
+
+    Some(RenderSurfaceRowSnapshot { y: row.y, runs })
 }
 
 fn render_shaped_row(
@@ -1182,6 +1272,7 @@ pub struct WgpuRendererConfig {
     pub blinking_cursor_visible: bool,
     pub cursor_color: RgbColorDto,
     pub cursor_text_color: RgbColorDto,
+    pub url_color: RgbColorDto,
     pub cursor_position_px: Option<(u32, u32)>,
     pub background_alpha: u8,
 }
@@ -1194,6 +1285,7 @@ impl WgpuRendererConfig {
     pub fn with_color_theme(mut self, theme: TerminalColorTheme) -> Self {
         self.cursor_color = theme.cursor;
         self.cursor_text_color = theme.cursor_text;
+        self.url_color = theme.url;
         self
     }
 
@@ -1222,6 +1314,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            url_color: DEFAULT_URL_COLOR,
             cursor_position_px: None,
             background_alpha: u8::MAX,
         }
@@ -1242,6 +1335,7 @@ impl WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            url_color: DEFAULT_URL_COLOR,
             cursor_position_px: None,
             background_alpha: u8::MAX,
         }
@@ -1339,6 +1433,7 @@ impl Default for WgpuRendererConfig {
             blinking_cursor_visible: true,
             cursor_color: CURSOR_COLOR,
             cursor_text_color: CURSOR_TEXT_COLOR,
+            url_color: DEFAULT_URL_COLOR,
             cursor_position_px: None,
             background_alpha: u8::MAX,
         }
@@ -1701,6 +1796,7 @@ mod tests {
         pty_host::{
             cell_size::TerminalCellSize,
             color_theme::TerminalColorTheme,
+            hyperlink::TerminalHyperlink,
             size_info::{TerminalPadding, TerminalSizeInfo},
             window_size::TerminalWindowSize,
         },
@@ -1935,6 +2031,7 @@ mod tests {
                 ime_preedit: None,
             },
             Some(WgpuRendererDamage::vertical(16, 32)),
+            &[],
         );
 
         let state = backend.state();
@@ -2032,6 +2129,7 @@ mod tests {
         backend.render_surface_with_damage(
             &current,
             Some(WgpuRendererDamage::scrolled_up(48, 65, 1, 3)),
+            &[],
         );
 
         assert_eq!(backend.state().line_texts(), vec!["b", "c", "d", "e"]);
@@ -2082,6 +2180,87 @@ mod tests {
         assert_eq!(underlines.len(), 1);
         assert_eq!(underlines[0].y_px, 11);
         assert_eq!(underlines[0].height_px, 3);
+    }
+
+    #[test]
+    fn hyperlink_hover_temporarily_recolors_and_undercurls_every_segment() {
+        let original_color = RgbColorDto::new(210, 210, 210);
+        let url_color = RgbColorDto::new(12, 140, 220);
+        let mut snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: (0..2)
+                .map(|y| RenderSurfaceRowSnapshot {
+                    y,
+                    runs: vec![RenderSurfaceRunSnapshot {
+                        x: 0,
+                        text: if y == 0 { "https://" } else { "example" }.to_string(),
+                        style: TextStyleDto {
+                            foreground: Some(original_color),
+                            ..TextStyleDto::plain()
+                        },
+                        decoration: Default::default(),
+                    }],
+                })
+                .collect(),
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            scrollback: None,
+            cursor: None,
+            ime_preedit: None,
+        };
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+            grid_columns: 8,
+            grid_rows: 2,
+            content_width_px: 64,
+            content_height_px: 32,
+            url_color,
+            ..WgpuRendererConfig::default()
+        });
+        let highlights = [
+            TerminalHyperlink {
+                uri: "https://example".to_string(),
+                x: 0,
+                y: 0,
+                columns: 8,
+            },
+            TerminalHyperlink {
+                uri: "https://example".to_string(),
+                x: 0,
+                y: 1,
+                columns: 7,
+            },
+        ];
+
+        backend.render_surface_with_damage(&snapshot, None, &highlights);
+
+        let hovered = backend.state();
+        assert!(
+            hovered
+                .glyph_quads()
+                .iter()
+                .all(|quad| quad.style.foreground == Some(url_color))
+        );
+        assert!(!hovered.underline_quads().is_empty());
+        assert!(
+            hovered
+                .underline_quads()
+                .iter()
+                .all(|quad| quad.style.foreground == Some(url_color))
+        );
+
+        snapshot.dirty_rows = vec![0];
+        backend.render_surface_with_damage(&snapshot, None, &[]);
+
+        let restored = backend.state();
+        assert!(
+            restored
+                .glyph_quads()
+                .iter()
+                .all(|quad| quad.style.foreground == Some(original_color))
+        );
+        assert!(restored.underline_quads().is_empty());
     }
 
     #[test]

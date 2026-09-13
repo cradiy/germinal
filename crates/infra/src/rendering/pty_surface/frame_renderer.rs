@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use germinal_ports::{
+    pty_host::hyperlink::TerminalHyperlink,
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
     seq::Seq,
 };
@@ -87,6 +88,7 @@ impl WgpuTerminalFrameRenderer {
             render_target_plan,
             renderer_config,
             None,
+            &[],
         )
     }
 
@@ -96,6 +98,7 @@ impl WgpuTerminalFrameRenderer {
         render_target_plan: WgpuTerminalRenderTargetPlan,
         renderer_config: WgpuRendererConfig,
         damage: Option<WgpuRendererDamage>,
+        hyperlink_highlights: &[TerminalHyperlink],
     ) -> WgpuTerminalPreparedFrame {
         self.frame_builder.build_with_renderer_config_and_damage(
             surface_snapshot,
@@ -105,6 +108,7 @@ impl WgpuTerminalFrameRenderer {
             ),
             renderer_config,
             damage,
+            hyperlink_highlights,
         )
     }
 
@@ -189,6 +193,7 @@ impl WgpuTerminalFrameRenderer {
             view.render_target_plan,
             view.renderer_config,
             view.damage,
+            view.hyperlink_highlights,
         );
         let prepare_time = prepare_started_at.elapsed();
         let prepared_frame_timings = prepared.timings;
@@ -431,6 +436,7 @@ pub struct WgpuTerminalRenderView<'a> {
     pub surface_snapshot: &'a RenderSurfaceSnapshot,
     pub renderer_config: WgpuRendererConfig,
     pub damage: Option<WgpuRendererDamage>,
+    pub hyperlink_highlights: &'a [TerminalHyperlink],
 }
 
 impl Default for WgpuTerminalFrameRenderer {

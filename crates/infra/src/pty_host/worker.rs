@@ -1583,6 +1583,47 @@ mod tests {
     }
 
     #[test]
+    fn terminal_worker_publishes_plain_urls_as_hyperlinks() {
+        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
+        let backend = PlatformTerminalWorkerBackend::with_worker_count(
+            TestDispatcher { tx: event_tx },
+            1,
+            TEST_SCROLLBACK_HISTORY,
+        );
+        let (snapshot_tx, snapshot_rx) = surface_snapshot_mailbox();
+        let input = backend.spawn_terminal_worker(
+            GShellId::new(6),
+            TerminalPtySize::new(24, 80, 960, 576),
+            snapshot_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        input
+            .send(TerminalWorkerInput::Bytes(
+                b"visit https://example.com/docs.".to_vec(),
+            ))
+            .expect("plain terminal URL output should send");
+        snapshot_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("surface snapshot should arrive");
+
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("detected URL event should arrive"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::HyperlinksChanged {
+                gshell_id: GShellId::new(6),
+                hyperlinks: vec![TerminalHyperlink {
+                    uri: "https://example.com/docs".to_string(),
+                    x: 6,
+                    y: 0,
+                    columns: 24,
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn terminal_worker_dispatches_bell_event() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
         let backend = PlatformTerminalWorkerBackend::with_worker_count(

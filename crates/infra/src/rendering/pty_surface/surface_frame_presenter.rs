@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use germinal_ports::pty_host::hyperlink::TerminalHyperlink;
 use germinal_ports::rendering::surface_snapshot::{
     RenderSurfaceRowSnapshot, RenderSurfaceSnapshot,
 };
@@ -194,6 +195,7 @@ impl WgpuTerminalSurfaceFramePresenter {
                         surface_snapshot: surface.surface_snapshot,
                         renderer_config: surface.renderer_config,
                         damage,
+                        hyperlink_highlights: surface.hyperlink_highlights,
                     },
                 )
             })
@@ -254,6 +256,7 @@ impl WgpuTerminalSurfaceFramePresenter {
             cache.previous = Some(WgpuRetainedWorkspaceSnapshot {
                 snapshot: input.surfaces[0].surface_snapshot.clone(),
                 renderer_config: input.surfaces[0].renderer_config,
+                hyperlink_highlights: input.surfaces[0].hyperlink_highlights.to_vec(),
             });
         }
 
@@ -374,6 +377,7 @@ impl WgpuRetainedWorkspaceFrame {
 struct WgpuRetainedWorkspaceSnapshot {
     snapshot: RenderSurfaceSnapshot,
     renderer_config: WgpuRendererConfig,
+    hyperlink_highlights: Vec<TerminalHyperlink>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +459,19 @@ fn retained_frame_action(
             != visible_scrollback(snapshot.scrollback)
     {
         return WgpuRetainedFrameAction::Full;
+    }
+
+    if previous.hyperlink_highlights != current.hyperlink_highlights {
+        return damage_action_for_rows(
+            config,
+            snapshot.dirty_rows.iter().copied().chain(
+                previous
+                    .hyperlink_highlights
+                    .iter()
+                    .chain(current.hyperlink_highlights)
+                    .map(|hyperlink| hyperlink.y),
+            ),
+        );
     }
 
     if previous.snapshot.latest_seq == snapshot.latest_seq {
@@ -704,6 +721,7 @@ pub struct WgpuTerminalWorkspaceSurface<'a> {
     pub render_target_plan: WgpuTerminalRenderTargetPlan,
     pub surface_snapshot: &'a RenderSurfaceSnapshot,
     pub renderer_config: WgpuRendererConfig,
+    pub hyperlink_highlights: &'a [TerminalHyperlink],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -845,6 +863,7 @@ mod tests {
                 render_target_plan: WgpuTerminalRenderTargetPlan::new(80, 64),
                 surface_snapshot: current,
                 renderer_config: config(),
+                hyperlink_highlights: &[],
             },
         )
     }
@@ -854,6 +873,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]),
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
         let current = snapshot(2, &["b", "c", "d", "e"], vec![0, 1, 2, 3]);
 
@@ -873,6 +893,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: snapshot(1, &["a", "b", "c", "d"], vec![1, 2, 3]),
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
         let current = snapshot(2, &["a", "b", "changed", "d"], vec![1, 2, 3]);
 
@@ -891,9 +912,47 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: current.clone(),
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
 
         assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Reuse);
+    }
+
+    #[test]
+    fn hyperlink_hover_damages_all_old_and_new_segment_rows() {
+        let current = snapshot(3, &["a", "link", "link", "d"], vec![2]);
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: current.clone(),
+            renderer_config: config(),
+            hyperlink_highlights: vec![TerminalHyperlink {
+                uri: "https://example.com".to_string(),
+                x: 0,
+                y: 1,
+                columns: 4,
+            }],
+        };
+        let new_highlights = [TerminalHyperlink {
+            uri: "https://example.com".to_string(),
+            x: 0,
+            y: 2,
+            columns: 4,
+        }];
+
+        assert_eq!(
+            retained_frame_action(
+                Some(&previous),
+                &WgpuTerminalWorkspaceSurface {
+                    render_target_plan: WgpuTerminalRenderTargetPlan::new(80, 64),
+                    surface_snapshot: &current,
+                    renderer_config: config(),
+                    hyperlink_highlights: &new_highlights,
+                },
+            ),
+            WgpuRetainedFrameAction::Damage {
+                top_px: 16,
+                bottom_px: 48,
+            }
+        );
     }
 
     #[test]
@@ -906,6 +965,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: previous_snapshot,
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
         let mut current = snapshot(2, &["a", "b", "changed", "d"], vec![2]);
         current.scrollback = Some(RenderSurfaceScrollbackSnapshot {
@@ -932,6 +992,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: previous_snapshot,
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
         let mut current = snapshot(2, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
         current.scrollback = Some(RenderSurfaceScrollbackSnapshot {
@@ -947,6 +1008,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: snapshot(1, &["a", "b", "c", "d"], vec![2]),
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
         let current = snapshot(2, &["a", "b", "c", "d"], Vec::new());
 
@@ -966,6 +1028,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: previous_snapshot,
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
 
         assert!(current.rows.is_empty());
@@ -994,6 +1057,7 @@ mod tests {
         let previous = WgpuRetainedWorkspaceSnapshot {
             snapshot: previous_snapshot,
             renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
         };
 
         assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Full);
@@ -1023,6 +1087,7 @@ mod tests {
                 grid_rows: 35,
                 ..WgpuRendererConfig::default()
             },
+            hyperlink_highlights: Vec::new(),
         };
         let current_config = previous.renderer_config;
 
@@ -1033,6 +1098,7 @@ mod tests {
                 render_target_plan: WgpuTerminalRenderTargetPlan::new(1271, 1523),
                 surface_snapshot: &current,
                 renderer_config: current_config,
+                hyperlink_highlights: &[],
             },
         );
         assert!(

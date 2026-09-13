@@ -6,7 +6,7 @@ use std::{
 };
 
 use germinal_ports::{
-    pty_host::width::terminal_text_cell_width,
+    pty_host::{hyperlink::TerminalHyperlink, width::terminal_text_cell_width},
     rendering::{render_target_id::RenderTargetId, surface_snapshot::RenderSurfaceSnapshot},
     seq::Seq,
 };
@@ -109,6 +109,7 @@ impl WgpuTerminalFrameBuilder {
             viewport,
             self.renderer_config,
             None,
+            &[],
         )
     }
 
@@ -123,6 +124,7 @@ impl WgpuTerminalFrameBuilder {
             viewport,
             renderer_config,
             None,
+            &[],
         )
     }
 
@@ -132,6 +134,7 @@ impl WgpuTerminalFrameBuilder {
         viewport: WgpuViewportUniform,
         renderer_config: WgpuRendererConfig,
         damage: Option<WgpuRendererDamage>,
+        hyperlink_highlights: &[TerminalHyperlink],
     ) -> WgpuTerminalPreparedFrame {
         let total_started_at = Instant::now();
         let cache_key = WgpuTerminalPreparedFrameCacheKey {
@@ -142,6 +145,7 @@ impl WgpuTerminalFrameBuilder {
             cursor: surface_snapshot.cursor,
             ime_preedit: surface_snapshot.ime_preedit.clone(),
             damage,
+            hyperlink_highlights: hyperlink_highlights.to_vec(),
         };
         if surface_snapshot.latest_seq.value() != 0
             && let Some(entry) = self
@@ -178,7 +182,7 @@ impl WgpuTerminalFrameBuilder {
             renderer.set_underline_metrics(self.glyph_atlas_frame_builder.underline_metrics());
             renderer.set_strikeout_metrics(self.glyph_atlas_frame_builder.strikeout_metrics());
 
-            renderer.render_surface_with_damage(surface_snapshot, damage);
+            renderer.render_surface_with_damage(surface_snapshot, damage, hyperlink_highlights);
             let render_surface_time = render_surface_started_at.elapsed();
             let (vertex_buffer, glyph_uv_map_result, vertex_build_time) =
                 renderer.with_quads(|quads| {
@@ -275,6 +279,7 @@ struct WgpuTerminalPreparedFrameCacheKey {
     ime_preedit:
         Option<germinal_ports::rendering::surface_snapshot::RenderSurfaceImePreeditSnapshot>,
     damage: Option<WgpuRendererDamage>,
+    hyperlink_highlights: Vec<TerminalHyperlink>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -479,6 +484,7 @@ mod tests {
             viewport,
             config,
             Some(WgpuRendererDamage::vertical(16, 32)),
+            &[],
         );
         let full = builder.build_with_renderer_config(&snapshot, viewport, config);
 

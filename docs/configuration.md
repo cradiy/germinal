@@ -180,6 +180,15 @@ When the viewport is above the live display, Germinal shows a scrollbar at the r
 terminal. The thumb can be clicked or dragged to move through scrollback and hides again at the
 live bottom.
 
+## Hyperlinks
+
+Germinal recognizes both OSC 8 terminal hyperlinks and common URI schemes printed as plain text,
+including links that soft-wrap onto another terminal row. Hovering a supported link changes every
+wrapped segment to the configured `url_color` with a curly underline and changes the pointer to a
+hand.
+Hold Control (or Command) and left-click to open it with the operating system's default handler;
+Kitty's Control+Shift+left-click gesture works as well.
+
 ## Bell
 
 ```toml

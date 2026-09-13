@@ -30,7 +30,7 @@ use germinal_ports::{
     pty_host::{
         color_theme::TerminalColorTheme,
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
-        hyperlink::TerminalHyperlink,
+        hyperlink::{TerminalHyperlink, is_supported_terminal_hyperlink_uri},
         snapshot::{
             TerminalLineSnapshot, TerminalSnapshot, TerminalSnapshotProvider,
             TerminalTextRunSnapshot,
@@ -1989,10 +1989,21 @@ fn visible_surface_rows(
     rows
 }
 
+#[derive(Debug, Clone, Copy)]
+struct VisibleUrlCharacter {
+    character: char,
+    x: u32,
+    y: u32,
+    columns: u32,
+}
+
 fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperlink> {
     let renderable = term.renderable_content();
     let display_offset = renderable.display_offset;
-    let mut hyperlinks = Vec::<TerminalHyperlink>::new();
+    let mut explicit_hyperlinks = Vec::<TerminalHyperlink>::new();
+    let mut visible_characters = Vec::<Option<VisibleUrlCharacter>>::new();
+    let mut current_row = None;
+    let mut current_row_wrapped = false;
 
     for indexed in renderable.display_iter {
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
@@ -2002,31 +2013,221 @@ fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperli
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue;
         }
-        let Some(hyperlink) = cell.hyperlink() else {
-            continue;
-        };
 
         let x = point.column.0 as u32;
         let y = point.line as u32;
-        let columns = terminal_char_cell_width(cell.c).max(1);
-        if let Some(previous) = hyperlinks.last_mut()
-            && previous.uri == hyperlink.uri()
-            && previous.y == y
-            && previous.x.saturating_add(previous.columns) == x
-        {
-            previous.columns = previous.columns.saturating_add(columns);
-            continue;
+        if current_row != Some(y) {
+            if let Some(previous_y) = current_row
+                && (y != previous_y + 1 || !current_row_wrapped)
+            {
+                visible_characters.push(None);
+            }
+            current_row = Some(y);
+            current_row_wrapped = false;
         }
-
-        hyperlinks.push(TerminalHyperlink {
-            uri: hyperlink.uri().to_string(),
+        let character = if cell.c == KITTY_IMAGE_PLACEHOLDER {
+            ' '
+        } else {
+            display_cell_character(cell.c)
+        };
+        let columns = terminal_char_cell_width(character).max(1);
+        visible_characters.push(Some(VisibleUrlCharacter {
+            character,
             x,
             y,
             columns,
-        });
+        }));
+        if cell.flags.contains(Flags::WRAPLINE) {
+            current_row_wrapped = true;
+        }
+
+        if let Some(hyperlink) = cell.hyperlink() {
+            push_hyperlink_cell(&mut explicit_hyperlinks, hyperlink.uri(), x, y, columns);
+        }
     }
 
+    let mut hyperlinks = explicit_hyperlinks.clone();
+    let mut index = 0;
+    while index < visible_characters.len() {
+        let Some(end) = detected_url_end(&visible_characters, index) else {
+            index += 1;
+            continue;
+        };
+        let uri = visible_characters[index..end]
+            .iter()
+            .filter_map(|character| character.map(|character| character.character))
+            .collect::<String>();
+        let detected = hyperlink_segments(&visible_characters[index..end], &uri);
+        let overlaps_explicit = detected.iter().any(|detected| {
+            explicit_hyperlinks
+                .iter()
+                .any(|explicit| hyperlinks_overlap(detected, explicit))
+        });
+        if !overlaps_explicit {
+            hyperlinks.extend(detected);
+        }
+        index = end;
+    }
+
+    hyperlinks.sort_by_key(|hyperlink| (hyperlink.y, hyperlink.x));
     hyperlinks
+}
+
+fn push_hyperlink_cell(
+    hyperlinks: &mut Vec<TerminalHyperlink>,
+    uri: &str,
+    x: u32,
+    y: u32,
+    columns: u32,
+) {
+    if let Some(previous) = hyperlinks.last_mut()
+        && previous.uri == uri
+        && previous.y == y
+        && previous.x.saturating_add(previous.columns) == x
+    {
+        previous.columns = previous.columns.saturating_add(columns);
+        return;
+    }
+
+    hyperlinks.push(TerminalHyperlink {
+        uri: uri.to_string(),
+        x,
+        y,
+        columns,
+    });
+}
+
+fn detected_url_end(characters: &[Option<VisibleUrlCharacter>], start: usize) -> Option<usize> {
+    let first = characters.get(start)?.as_ref()?.character;
+    if !first.is_ascii_alphabetic()
+        || start
+            .checked_sub(1)
+            .and_then(|index| characters[index])
+            .is_some_and(|character| is_uri_scheme_character(character.character))
+    {
+        return None;
+    }
+
+    let mut colon = start + 1;
+    while colon < characters.len()
+        && colon.saturating_sub(start) <= 32
+        && characters[colon].is_some_and(|character| is_uri_scheme_character(character.character))
+    {
+        colon += 1;
+    }
+    if characters
+        .get(colon)
+        .and_then(Option::as_ref)
+        .map(|character| character.character)
+        != Some(':')
+    {
+        return None;
+    }
+
+    let mut end = colon + 1;
+    while end < characters.len()
+        && characters[end].is_some_and(|character| is_terminal_url_character(character.character))
+    {
+        end += 1;
+    }
+    end = trim_url_end(characters, colon + 1, end);
+    if end <= colon + 1 {
+        return None;
+    }
+
+    let uri = characters[start..end]
+        .iter()
+        .filter_map(|character| character.map(|character| character.character))
+        .collect::<String>();
+    if !is_supported_terminal_hyperlink_uri(&uri) || !terminal_uri_has_target(&uri) {
+        return None;
+    }
+
+    Some(end)
+}
+
+fn is_uri_scheme_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
+}
+
+fn is_terminal_url_character(character: char) -> bool {
+    !character.is_control()
+        && !character.is_whitespace()
+        && !matches!(character, '<' | '>' | '"' | '\'' | '`' | '\\')
+}
+
+fn trim_url_end(
+    characters: &[Option<VisibleUrlCharacter>],
+    payload_start: usize,
+    mut end: usize,
+) -> usize {
+    while end > payload_start {
+        let Some(last) = characters[end - 1] else {
+            break;
+        };
+        if matches!(last.character, '.' | ',' | ';' | ':' | '!' | '?') {
+            end -= 1;
+            continue;
+        }
+
+        let matching_open = match last.character {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        };
+        let Some(open) = matching_open else {
+            break;
+        };
+        let (opens, closes) = characters[payload_start..end].iter().flatten().fold(
+            (0_u32, 0_u32),
+            |(opens, closes), character| {
+                if character.character == open {
+                    (opens + 1, closes)
+                } else if character.character == last.character {
+                    (opens, closes + 1)
+                } else {
+                    (opens, closes)
+                }
+            },
+        );
+        if closes > opens {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn terminal_uri_has_target(uri: &str) -> bool {
+    let Some((scheme, remainder)) = uri.split_once(':') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("file") || !remainder.trim_start_matches('/').is_empty()
+}
+
+fn hyperlink_segments(
+    characters: &[Option<VisibleUrlCharacter>],
+    uri: &str,
+) -> Vec<TerminalHyperlink> {
+    let mut hyperlinks = Vec::new();
+    for character in characters.iter().flatten() {
+        push_hyperlink_cell(
+            &mut hyperlinks,
+            uri,
+            character.x,
+            character.y,
+            character.columns,
+        );
+    }
+    hyperlinks
+}
+
+fn hyperlinks_overlap(left: &TerminalHyperlink, right: &TerminalHyperlink) -> bool {
+    left.y == right.y
+        && left.x < right.x.saturating_add(right.columns)
+        && right.x < left.x.saturating_add(left.columns)
 }
 
 fn kitty_placeholder_cells(term: &Term<PtyWriteEventListener>) -> Vec<KittyPlaceholderCell> {
@@ -2606,6 +2807,77 @@ mod tests {
         let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
         assert_eq!(snapshot.rows[0].runs[0].text, "docs");
         assert!(snapshot.rows[0].runs[0].style.underline);
+    }
+
+    #[test]
+    fn detects_plain_terminal_urls_and_trims_sentence_punctuation() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(89);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"See (https://example.com/a_(b)). Then FTP://host/file, done.",
+        );
+
+        let hyperlinks = store.visible_hyperlinks(target_id);
+        assert!(hyperlinks.contains(&TerminalHyperlink {
+            uri: "https://example.com/a_(b)".to_string(),
+            x: 5,
+            y: 0,
+            columns: 25,
+        }));
+        assert!(hyperlinks.contains(&TerminalHyperlink {
+            uri: "FTP://host/file".to_string(),
+            x: 38,
+            y: 0,
+            columns: 15,
+        }));
+    }
+
+    #[test]
+    fn detects_plain_urls_across_soft_wrapped_rows() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(12, 4));
+        let target_id = RenderTargetId::new(90);
+        store.apply_bytes(target_id, Seq::new(1), b"https://example.com/path");
+
+        assert_eq!(
+            store.visible_hyperlinks(target_id),
+            vec![
+                TerminalHyperlink {
+                    uri: "https://example.com/path".to_string(),
+                    x: 0,
+                    y: 0,
+                    columns: 12,
+                },
+                TerminalHyperlink {
+                    uri: "https://example.com/path".to_string(),
+                    x: 0,
+                    y: 1,
+                    columns: 12,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_osc_8_link_wins_over_detected_visible_url() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(91);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b]8;;file:///tmp/source.rs#12\x1b\\https://example.com\x1b]8;;\x1b\\",
+        );
+
+        assert_eq!(
+            store.visible_hyperlinks(target_id),
+            vec![TerminalHyperlink {
+                uri: "file:///tmp/source.rs#12".to_string(),
+                x: 0,
+                y: 0,
+                columns: 19,
+            }]
+        );
     }
 
     #[test]
