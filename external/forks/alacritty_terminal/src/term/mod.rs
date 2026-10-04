@@ -1273,12 +1273,25 @@ impl<T: EventListener> Handler for Term<T> {
 
     /// A sequence of printable characters to be displayed.
     fn input_str(&mut self, text: &str) {
-        if self.mode.contains(TermMode::INSERT)
-            || !text.is_ascii()
-            || text.as_bytes().contains(&0x7f)
-        {
+        if self.mode.contains(TermMode::INSERT) || text.as_bytes().contains(&0x7f) {
             for c in text.chars() {
                 self.input(c);
+            }
+            return;
+        }
+
+        if !text.is_ascii() {
+            let mut remaining = text;
+            while !remaining.is_empty() {
+                let ascii_len = remaining.bytes().take_while(u8::is_ascii).count();
+                if ascii_len != 0 {
+                    self.input_str(&remaining[..ascii_len]);
+                    remaining = &remaining[ascii_len..];
+                } else {
+                    let character = remaining.chars().next().unwrap();
+                    self.input(character);
+                    remaining = &remaining[character.len_utf8()..];
+                }
             }
             return;
         }
@@ -2845,6 +2858,37 @@ mod tests {
 
         assert_eq!(batched.grid, scalar.grid);
         assert_eq!(batched.grid.cursor, scalar.grid.cursor);
+    }
+
+    #[test]
+    fn mixed_text_batch_matches_scalar_input_across_wide_cells_and_modes() {
+        let text = "ab界cd你好ef e\u{301} 👩\u{200d}💻xyz αβγ ─┼ end";
+        for columns in 2..12 {
+            for mode in [
+                TermMode::LINE_WRAP,
+                TermMode::empty(),
+                TermMode::LINE_WRAP | TermMode::INSERT,
+            ] {
+                let size = TermSize::new(3, columns);
+                let mut scalar = Term::new(Config::default(), &size, VoidListener);
+                let mut batched = Term::new(Config::default(), &size, VoidListener);
+                for term in [&mut scalar, &mut batched] {
+                    for character in "界界ab\u{301}".chars() {
+                        term.input(character);
+                    }
+                    term.goto(0, 1);
+                    term.mode = mode;
+                }
+                for character in text.chars() {
+                    scalar.input(character);
+                }
+                batched.input_str(text);
+                scalar.grid.truncate();
+                batched.grid.truncate();
+                assert_eq!(batched.grid, scalar.grid, "columns={columns} mode={mode:?}");
+                assert_eq!(batched.grid.cursor, scalar.grid.cursor);
+            }
+        }
     }
 
     #[test]

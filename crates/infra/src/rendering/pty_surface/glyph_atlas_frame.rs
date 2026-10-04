@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -480,8 +480,12 @@ fn collect_text_segments(
     ligatures: bool,
 ) -> BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment> {
     let mut segments = BTreeMap::new();
+    let mut seen_texts = HashSet::new();
     for row in &surface_snapshot.rows {
         for run in &row.runs {
+            if !seen_texts.insert((run.text.as_str(), run.style.bold, run.style.italic)) {
+                continue;
+            }
             for segment in terminal_text_segments_with_ligatures(&run.text, run.style, ligatures) {
                 insert_text_segment(&mut segments, segment);
             }
@@ -546,6 +550,48 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn repeated_unicode_runs_preserve_font_variants_and_preedit() {
+        let snapshot = RenderSurfaceSnapshot {
+            target_id: RenderTargetId::new(1),
+            latest_seq: Seq::new(1),
+            default_background: RgbColorDto::new(0, 0, 0),
+            rows: (0..8)
+                .map(|y| RenderSurfaceRowSnapshot {
+                    y,
+                    runs: vec![RenderSurfaceRunSnapshot {
+                        x: 0,
+                        text: "界e\u{301}".to_string(),
+                        style: TextStyleDto {
+                            bold: y % 2 != 0,
+                            italic: y % 4 >= 2,
+                            ..TextStyleDto::plain()
+                        },
+                        decoration: Default::default(),
+                    }],
+                })
+                .collect(),
+            image_surfaces: vec![],
+            dirty_rows: vec![],
+            scrollback: None,
+            cursor: None,
+            ime_preedit: Some(RenderSurfaceImePreeditSnapshot {
+                text: "拼".to_string(),
+                cursor_range: Some((3, 3)),
+            }),
+        };
+
+        let segments = collect_text_segments(&snapshot, false);
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            for character in ['界', 'é'] {
+                assert!(
+                    segments.contains_key(&WgpuTerminalGlyphKey::styled(character, bold, italic))
+                );
+            }
+        }
+        assert!(segments.contains_key(&WgpuTerminalGlyphKey::new('拼', false)));
+    }
 
     #[test]
     fn preedit_characters_are_collected_for_the_glyph_atlas() {
