@@ -1898,8 +1898,8 @@ fn render_fade_tab(runs: &mut Vec<RenderSurfaceRunSnapshot>, x: &mut u32, data: 
         TabContentAppearance {
             foreground,
             background,
-            bold: data.active,
-            italic: data.active,
+            bold: true,
+            italic: false,
             underline: false,
             left_padding,
             right_padding,
@@ -1935,7 +1935,7 @@ fn render_powerline_tab(
         TabContentAppearance {
             foreground,
             background,
-            bold: data.active,
+            bold: true,
             italic: false,
             underline: false,
             left_padding,
@@ -2966,17 +2966,12 @@ mod tests {
             )
             .expect("multiple tabs should produce a tab bar");
             let runs = &surface.snapshot.rows[0].runs;
-            let active_title = runs
-                .iter()
-                .find(|run| run.text == "shell")
-                .expect("active title should be rendered");
             assert!(surface.hit_regions.iter().all(|region| {
                 region.end_column.saturating_sub(region.start_column) >= TAB_BAR_MIN_WIDTH
             }));
 
             match style {
                 TabBarStyle::Fade => {
-                    assert!(active_title.style.italic);
                     let inactive_title = runs
                         .iter()
                         .find(|run| run.text == "nvim")
