@@ -462,15 +462,21 @@ fn retained_frame_action(
     }
 
     if previous.hyperlink_highlights != current.hyperlink_highlights {
+        let cursor_rows = cursor_damage_rows(previous, snapshot, config);
         return damage_action_for_rows(
             config,
-            snapshot.dirty_rows.iter().copied().chain(
-                previous
-                    .hyperlink_highlights
-                    .iter()
-                    .chain(current.hyperlink_highlights)
-                    .map(|hyperlink| hyperlink.y),
-            ),
+            snapshot
+                .dirty_rows
+                .iter()
+                .copied()
+                .chain(
+                    previous
+                        .hyperlink_highlights
+                        .iter()
+                        .chain(current.hyperlink_highlights)
+                        .map(|hyperlink| hyperlink.y),
+                )
+                .chain(cursor_rows),
         );
     }
 
@@ -503,7 +509,11 @@ fn retained_frame_action(
         };
     }
 
-    damage_action_for_rows(config, snapshot.dirty_rows.iter().copied())
+    let cursor_rows = cursor_damage_rows(previous, snapshot, config);
+    damage_action_for_rows(
+        config,
+        snapshot.dirty_rows.iter().copied().chain(cursor_rows),
+    )
 }
 
 fn visible_scrollback(
@@ -525,19 +535,7 @@ fn cursor_damage_action(
     snapshot: &RenderSurfaceSnapshot,
     config: WgpuRendererConfig,
 ) -> WgpuRetainedFrameAction {
-    let mut rows = Vec::with_capacity(2);
-    if let Some(cursor) = previous.snapshot.cursor {
-        rows.push(cursor.y);
-    }
-    if let Some(cursor) = snapshot.cursor {
-        rows.push(cursor.y);
-    }
-    if let Some((_, y_px)) = previous.renderer_config.cursor_position_px {
-        rows.push(pixel_row(config, y_px));
-    }
-    if let Some((_, y_px)) = config.cursor_position_px {
-        rows.push(pixel_row(config, y_px));
-    }
+    let rows = cursor_damage_rows(previous, snapshot, config);
     if rows.is_empty() {
         WgpuRetainedFrameAction::Full
     } else {
@@ -545,10 +543,45 @@ fn cursor_damage_action(
     }
 }
 
+fn cursor_damage_rows(
+    previous: &WgpuRetainedWorkspaceSnapshot,
+    snapshot: &RenderSurfaceSnapshot,
+    config: WgpuRendererConfig,
+) -> Vec<u32> {
+    let mut rows = Vec::with_capacity(6);
+    if let Some(cursor) = previous.snapshot.cursor {
+        rows.push(cursor.y);
+    }
+    if let Some(cursor) = snapshot.cursor {
+        rows.push(cursor.y);
+    }
+    if let (Some(cursor), Some((_, y_px))) = (
+        previous.snapshot.cursor,
+        previous.renderer_config.cursor_position_px,
+    ) {
+        rows.extend(cursor_pixel_rows(previous.renderer_config, cursor.y, y_px));
+    }
+    if let (Some(cursor), Some((_, y_px))) = (snapshot.cursor, config.cursor_position_px) {
+        rows.extend(cursor_pixel_rows(config, cursor.y, y_px));
+    }
+    rows
+}
+
+fn cursor_pixel_rows(config: WgpuRendererConfig, cursor_row: u32, y_px: u32) -> [u32; 2] {
+    let bottom_px = y_px.saturating_add(config.row_height_px(cursor_row).saturating_sub(1));
+    [pixel_row(config, y_px), pixel_row(config, bottom_px)]
+}
+
 fn pixel_row(config: WgpuRendererConfig, y_px: u32) -> u32 {
-    let relative = y_px.saturating_sub(config.content_origin_y);
-    ((u64::from(relative) * u64::from(config.grid_rows.max(1)))
-        / u64::from(config.content_height_px.max(1))) as u32
+    let relative = u64::from(y_px.saturating_sub(config.content_origin_y));
+    let rows = u64::from(config.grid_rows.max(1));
+    let height = u64::from(config.content_height_px.max(1));
+    relative
+        .saturating_add(1)
+        .saturating_mul(rows)
+        .saturating_sub(1)
+        .div_euclid(height)
+        .min(u64::from(u32::MAX)) as u32
 }
 
 fn damage_action_for_rows(
@@ -907,6 +940,39 @@ mod tests {
     }
 
     #[test]
+    fn terminal_output_damage_clears_the_previous_cursor_row() {
+        let mut previous_snapshot = snapshot(1, &["a", "b", "c", "d"], vec![1]);
+        previous_snapshot.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 2,
+            y: 1,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: previous_snapshot,
+            renderer_config: config(),
+            hyperlink_highlights: Vec::new(),
+        };
+        let mut current = snapshot(2, &["a", "b", "c", "changed"], vec![3]);
+        current.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 0,
+            y: 3,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+
+        assert_eq!(
+            action(&previous, &current),
+            WgpuRetainedFrameAction::Damage {
+                top_px: 16,
+                bottom_px: 64,
+            }
+        );
+    }
+
+    #[test]
     fn reuses_retained_texture_when_frame_and_dynamic_config_are_unchanged() {
         let current = snapshot(3, &["a", "b", "c", "d"], vec![2]);
         let previous = WgpuRetainedWorkspaceSnapshot {
@@ -916,6 +982,48 @@ mod tests {
         };
 
         assert_eq!(action(&previous, &current), WgpuRetainedFrameAction::Reuse);
+    }
+
+    #[test]
+    fn upward_cursor_motion_clears_the_full_previous_cursor_height() {
+        let mut current = snapshot(3, &["a", "b", "c"], vec![0]);
+        current.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 0,
+            y: 0,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+        let motion_config = WgpuRendererConfig {
+            content_height_px: 10,
+            grid_rows: 3,
+            ..config()
+        };
+        let mut previous_config = motion_config;
+        previous_config.cursor_position_px = Some((0, 1));
+        let previous = WgpuRetainedWorkspaceSnapshot {
+            snapshot: current.clone(),
+            renderer_config: previous_config,
+            hyperlink_highlights: Vec::new(),
+        };
+        let mut current_config = motion_config;
+        current_config.cursor_position_px = Some((0, 0));
+
+        assert_eq!(
+            retained_frame_action(
+                Some(&previous),
+                &WgpuTerminalWorkspaceSurface {
+                    render_target_plan: WgpuTerminalRenderTargetPlan::new(80, 10),
+                    surface_snapshot: &current,
+                    renderer_config: current_config,
+                    hyperlink_highlights: &[],
+                },
+            ),
+            WgpuRetainedFrameAction::Damage {
+                top_px: 0,
+                bottom_px: 6,
+            }
+        );
     }
 
     #[test]
