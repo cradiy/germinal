@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -69,6 +69,7 @@ pub struct WgpuTerminalGlyphAtlasFrameBuilder {
     source: WgpuTerminalGlyphAtlasSource,
     texture_factory: WgpuTerminalGlyphAtlasTextureFactory,
     cache: RefCell<HashMap<RenderTargetId, WgpuTerminalGlyphAtlasCacheEntry>>,
+    text_cache: RefCell<HashMap<RenderTargetId, TextSegmentCache>>,
 }
 
 impl WgpuTerminalGlyphAtlasFrameBuilder {
@@ -81,6 +82,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             source: WgpuTerminalGlyphAtlasSource::Debug5x7(WgpuDebugGlyphAtlasBuilder::new()),
             texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
             cache: RefCell::new(HashMap::new()),
+            text_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -94,6 +96,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             )),
             texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
             cache: RefCell::new(HashMap::new()),
+            text_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -102,6 +105,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
             source: WgpuTerminalGlyphAtlasSource::Crossfont(Box::new(crossfont_builder)),
             texture_factory: WgpuTerminalGlyphAtlasTextureFactory::new(),
             cache: RefCell::new(HashMap::new()),
+            text_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -122,6 +126,7 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
     }
 
     pub fn remove_render_target(&self, target_id: RenderTargetId) -> bool {
+        self.text_cache.borrow_mut().remove(&target_id);
         self.cache.borrow_mut().remove(&target_id).is_some()
     }
 
@@ -161,6 +166,9 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                 char_count,
             )
         {
+            self.text_cache
+                .borrow_mut()
+                .remove(&surface_snapshot.target_id);
             return frame;
         }
 
@@ -179,7 +187,14 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                 (BTreeMap::new(), collect_glyphs(surface_snapshot))
             }
             WgpuTerminalGlyphAtlasSourceKind::Crossfont => {
-                let segments = collect_text_segments(surface_snapshot, self.ligatures());
+                let segments = collect_text_segments(
+                    surface_snapshot,
+                    self.ligatures(),
+                    self.text_cache
+                        .borrow_mut()
+                        .entry(surface_snapshot.target_id)
+                        .or_default(),
+                );
                 let mut glyphs: BTreeSet<_> = segments.keys().copied().collect();
                 glyphs.extend(core_ascii_glyphs());
                 (segments, glyphs)
@@ -475,20 +490,34 @@ fn plain_ascii_content_stats(surface_snapshot: &RenderSurfaceSnapshot) -> Option
     Some((run_count, char_count))
 }
 
+type TextSegmentCache = [HashMap<String, Vec<TerminalTextSegment>>; 4];
+
 fn collect_text_segments(
     surface_snapshot: &RenderSurfaceSnapshot,
     ligatures: bool,
+    cache: &mut TextSegmentCache,
 ) -> BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment> {
     let mut segments = BTreeMap::new();
-    let mut seen_texts = HashSet::new();
+    let mut previous = std::mem::take(cache);
     for row in &surface_snapshot.rows {
         for run in &row.runs {
-            if !seen_texts.insert((run.text.as_str(), run.style.bold, run.style.italic)) {
+            let style_index = usize::from(run.style.bold) | (usize::from(run.style.italic) << 1);
+            let current = &mut cache[style_index];
+            if current.contains_key(run.text.as_str()) {
                 continue;
             }
-            for segment in terminal_text_segments_with_ligatures(&run.text, run.style, ligatures) {
-                insert_text_segment(&mut segments, segment);
+            let (text, collected) = previous[style_index]
+                .remove_entry(run.text.as_str())
+                .unwrap_or_else(|| {
+                    (
+                        run.text.clone(),
+                        terminal_text_segments_with_ligatures(&run.text, run.style, ligatures),
+                    )
+                });
+            for segment in &collected {
+                insert_text_segment(&mut segments, segment.clone());
             }
+            current.insert(text, collected);
         }
     }
     if let Some(preedit) = surface_snapshot.ime_preedit.as_ref() {
@@ -553,7 +582,7 @@ mod tests {
 
     #[test]
     fn repeated_unicode_runs_preserve_font_variants_and_preedit() {
-        let snapshot = RenderSurfaceSnapshot {
+        let mut snapshot = RenderSurfaceSnapshot {
             target_id: RenderTargetId::new(1),
             latest_seq: Seq::new(1),
             default_background: RgbColorDto::new(0, 0, 0),
@@ -582,7 +611,7 @@ mod tests {
             }),
         };
 
-        let segments = collect_text_segments(&snapshot, false);
+        let segments = collect_text_segments(&snapshot, false, &mut TextSegmentCache::default());
         for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
             for character in ['界', 'é'] {
                 assert!(
@@ -591,6 +620,25 @@ mod tests {
             }
         }
         assert!(segments.contains_key(&WgpuTerminalGlyphKey::new('拼', false)));
+
+        let initial_rows = snapshot.rows.clone();
+        for ligatures in [false, true] {
+            snapshot.rows = initial_rows.clone();
+            let mut cache = TextSegmentCache::default();
+            for text in ["界e\u{301}", "👩\u{200d}💻 office !=", "مرحبا", "结束"] {
+                snapshot.rows.rotate_left(1);
+                snapshot.rows[0].runs[0].text = text.to_owned();
+                snapshot.rows[0].runs[0].style.bold = !snapshot.rows[0].runs[0].style.bold;
+                let cached = collect_text_segments(&snapshot, ligatures, &mut cache);
+                let fresh =
+                    collect_text_segments(&snapshot, ligatures, &mut TextSegmentCache::default());
+                assert_eq!(cached, fresh);
+            }
+            snapshot.rows.clear();
+            let preedit_only = collect_text_segments(&snapshot, ligatures, &mut cache);
+            assert!(cache.iter().all(HashMap::is_empty));
+            assert!(preedit_only.contains_key(&WgpuTerminalGlyphKey::new('拼', false)));
+        }
     }
 
     #[test]
