@@ -57,6 +57,8 @@ pub enum CopyError {
 pub struct HostPasteController {
     modifiers: HostPasteModifiers,
     pressed: HostPressedModifiers,
+    // X11 serves copied data while this handle is alive, even after focus changes.
+    clipboard: Option<Clipboard>,
 }
 
 impl HostPasteController {
@@ -102,8 +104,11 @@ impl HostPasteController {
         target: TerminalClipboard,
         text: String,
     ) -> Result<(), CopyError> {
-        let mut clipboard = Clipboard::new().map_err(CopyError::OpenClipboard)?;
-        write_clipboard_text(&mut clipboard, target, text).map_err(CopyError::WriteClipboard)
+        if self.clipboard.is_none() {
+            self.clipboard = Some(Clipboard::new().map_err(CopyError::OpenClipboard)?);
+        }
+        let clipboard = self.clipboard.as_mut().expect("clipboard initialized");
+        write_clipboard_text(clipboard, target, text).map_err(CopyError::WriteClipboard)
     }
 
     pub fn read_terminal_clipboard_text(
@@ -209,6 +214,61 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "writes clipboard and primary selection; requires an isolated X11 server without a clipboard manager"]
+    fn x11_copy_survives_return_focus_reset_and_replacement() {
+        let display = std::env::var("GERMINAL_TEST_X11_DISPLAY")
+            .expect("explicit isolated X11 display required; never use the desktop display");
+        assert_eq!(std::env::var("DISPLAY").as_deref(), Ok(display.as_str()));
+        assert!(std::env::var_os("WAYLAND_DISPLAY").is_none());
+
+        if let Ok(expected) = std::env::var("GERMINAL_TEST_CLIPBOARD_READER") {
+            let mut reader = HostPasteController::default();
+            assert_eq!(
+                reader
+                    .read_terminal_clipboard_text(TerminalClipboard::Clipboard)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                reader
+                    .read_terminal_clipboard_text(TerminalClipboard::Selection)
+                    .unwrap(),
+                format!("primary {expected}")
+            );
+            return;
+        }
+
+        let mut owner = HostPasteController::default();
+        for text in ["first 中文 😈", "replacement"] {
+            owner.write_clipboard_text(text.to_owned()).unwrap();
+            owner
+                .write_terminal_clipboard_text(
+                    TerminalClipboard::Selection,
+                    format!("primary {text}"),
+                )
+                .unwrap();
+            owner.reset_modifiers();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::paste::tests::x11_copy_survives_return_focus_reset_and_replacement",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("GERMINAL_TEST_CLIPBOARD_READER", text)
+                .output()
+                .expect("independent clipboard reader");
+            assert!(
+                output.status.success(),
+                "reader failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn tracked_physical_modifiers_fill_missing_modifiers_changed_events() {
