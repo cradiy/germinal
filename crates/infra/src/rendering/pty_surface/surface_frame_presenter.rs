@@ -497,6 +497,14 @@ fn retained_frame_action(
         {
             return WgpuRetainedFrameAction::Full;
         }
+        // A single texture translation must preserve every copied row boundary.
+        // Fractional cell heights can distribute rounding differently after scrolling.
+        let source_top = config.row_offset_px(rows);
+        if (0..=preserved_rows).any(|row| {
+            config.row_offset_px(row + rows).saturating_sub(source_top) != config.row_offset_px(row)
+        }) {
+            return WgpuRetainedFrameAction::Full;
+        }
         let mut top_row = preserved_rows;
         if let Some(cursor) = previous.snapshot.cursor
             && cursor.y >= rows
@@ -846,6 +854,8 @@ impl Default for WgpuTerminalSurfaceFramePresenterSpec {
 
 #[cfg(test)]
 mod tests {
+    mod gpu_replay;
+
     use germinal_ports::{
         pty_host::snapshot::TerminalSnapshotProvider,
         rendering::{
@@ -936,6 +946,49 @@ mod tests {
     }
 
     #[test]
+    fn scroll_copy_requires_matching_source_and_destination_row_geometry() {
+        for (height, lines, can_copy) in [
+            (63, ["b", "c", "d", "e"], false),
+            (64, ["b", "c", "d", "e"], true),
+            (65, ["b", "c", "d", "e"], false),
+            (66, ["b", "c", "d", "e"], false),
+            (66, ["c", "d", "e", "f"], true),
+        ] {
+            let config = WgpuRendererConfig {
+                content_height_px: height,
+                ..config()
+            };
+            let previous = WgpuRetainedWorkspaceSnapshot {
+                snapshot: snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]),
+                renderer_config: config,
+                hyperlink_highlights: Vec::new(),
+            };
+            let current = snapshot(2, &lines, vec![0, 1, 2, 3]);
+            let action = retained_frame_action(
+                Some(&previous),
+                &WgpuTerminalWorkspaceSurface {
+                    render_target_plan: WgpuTerminalRenderTargetPlan::new(80, height),
+                    surface_snapshot: &current,
+                    renderer_config: config,
+                    hyperlink_highlights: &[],
+                },
+            );
+            if can_copy {
+                assert!(
+                    matches!(action, WgpuRetainedFrameAction::ScrollUp { .. }),
+                    "height={height}, lines={lines:?}: {action:?}"
+                );
+            } else {
+                assert_eq!(
+                    action,
+                    WgpuRetainedFrameAction::Full,
+                    "height={height}, lines={lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scrolling_during_cursor_animation_redraws_instead_of_copying_cursor_pixels() {
         let mut old = snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
         old.cursor = Some(RenderSurfaceCursorSnapshot {
@@ -989,6 +1042,101 @@ mod tests {
                 bottom_px: 64,
             }
         );
+    }
+
+    #[test]
+    fn retained_cursor_mask_matches_full_redraw_over_scroll_and_animation_sequences() {
+        // A CPU model of one cursor column: texture copies and scissored repainting.
+        // This checks pixel coverage, not GPU rasterization or text rendering.
+        for height in [10, 63, 64, 65] {
+            for origin in [0, 3] {
+                let base = WgpuRendererConfig {
+                    content_height_px: height,
+                    content_origin_y: origin,
+                    ..config()
+                };
+                let mut current = snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
+                current.cursor = Some(RenderSurfaceCursorSnapshot {
+                    x: 0,
+                    y: 3,
+                    focused: true,
+                    shape: RenderSurfaceCursorShape::Block,
+                    blinking: true,
+                });
+                let mut previous = None;
+                let mut retained = vec![false; (origin + height) as usize];
+                for frame in 0..180 {
+                    if frame % 3 == 0 {
+                        current.latest_seq = Seq::new(current.latest_seq.value() + 1);
+                        current.rows.rotate_left(1);
+                        for (y, row) in current.rows.iter_mut().enumerate() {
+                            row.y = y as u32;
+                        }
+                        current.rows[3].runs[0].text = format!("Compiling crate {frame}");
+                    }
+                    let logical_y = base.row_top_px(3);
+                    let animated_y = match frame % 6 {
+                        0 => origin,
+                        1 => origin + height / 3,
+                        2 => origin + height / 2,
+                        _ => logical_y,
+                    };
+                    let renderer_config = WgpuRendererConfig {
+                        cursor_position_px: Some((0, animated_y)),
+                        blinking_cursor_visible: frame % 11 != 0,
+                        ..base
+                    };
+                    let action = retained_frame_action(
+                        previous.as_ref(),
+                        &WgpuTerminalWorkspaceSurface {
+                            render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                                80,
+                                origin + height,
+                            ),
+                            surface_snapshot: &current,
+                            renderer_config,
+                            hyperlink_highlights: &[],
+                        },
+                    );
+                    let mut reference = vec![false; retained.len()];
+                    if renderer_config.blinking_cursor_visible {
+                        let end = (animated_y + base.row_height_px(3)).min(origin + height);
+                        reference[animated_y as usize..end as usize].fill(true);
+                    }
+                    let damage = match action {
+                        WgpuRetainedFrameAction::Full => Some((0, origin + height)),
+                        WgpuRetainedFrameAction::Reuse => None,
+                        WgpuRetainedFrameAction::Damage { top_px, bottom_px } => {
+                            Some((top_px, bottom_px))
+                        }
+                        WgpuRetainedFrameAction::ScrollUp {
+                            rows,
+                            preserved_rows,
+                            top_px,
+                            bottom_px,
+                        } => {
+                            let source = base.row_top_px(rows) as usize;
+                            let count = base.row_offset_px(preserved_rows) as usize;
+                            retained.copy_within(source..source + count, origin as usize);
+                            Some((top_px, bottom_px))
+                        }
+                    };
+                    if let Some((top, bottom)) = damage {
+                        retained[top as usize..bottom as usize]
+                            .copy_from_slice(&reference[top as usize..bottom as usize]);
+                    }
+                    assert_eq!(
+                        retained, reference,
+                        "height={height} origin={origin} frame={frame} action={action:?}"
+                    );
+                    previous = Some(WgpuRetainedWorkspaceSnapshot {
+                        snapshot: current.clone(),
+                        renderer_config,
+                        hyperlink_highlights: Vec::new(),
+                    });
+                }
+            }
+        }
     }
 
     #[test]
