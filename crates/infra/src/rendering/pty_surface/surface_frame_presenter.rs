@@ -514,6 +514,21 @@ fn retained_frame_action(
         if let Some(cursor) = snapshot.cursor {
             top_row = top_row.min(cursor.y);
         }
+        // Hover stays in viewport coordinates even when identical links scroll
+        // beneath the pointer. Repaint both copied highlights and their current rows.
+        for row in previous
+            .hyperlink_highlights
+            .iter()
+            .filter_map(|link| link.y.checked_sub(rows))
+            .chain(current.hyperlink_highlights.iter().map(|link| link.y))
+        {
+            top_row = top_row.min(row);
+        }
+        if top_row == 0 {
+            // No copied content survives this repaint, so avoid the texture copy
+            // and row-cache translation entirely.
+            return WgpuRetainedFrameAction::Full;
+        }
         return WgpuRetainedFrameAction::ScrollUp {
             rows,
             preserved_rows,
@@ -682,6 +697,7 @@ fn prepare_retained_target(
     };
     let source = cache.current;
     let destination = 1 - source;
+    let config = surface.renderer_config;
     if !cache.initialized[destination] {
         copy_texture(
             encoder,
@@ -693,9 +709,30 @@ fn prepare_retained_target(
             cache.height_px,
         );
         cache.initialized[destination] = true;
+    } else {
+        // The other texture may predate a full repaint (for example an OSC 11
+        // background change). Scrolled rows and damage do not cover vertical padding.
+        let top = config.content_origin_y.min(cache.height_px);
+        let bottom = config
+            .content_origin_y
+            .saturating_add(config.content_height_px)
+            .min(cache.height_px);
+        for (y, height) in [(0, top), (bottom, cache.height_px - bottom)] {
+            if height > 0 {
+                let origin = wgpu::Origin3d { x: 0, y, z: 0 };
+                copy_texture(
+                    encoder,
+                    &cache.textures[source],
+                    &cache.textures[destination],
+                    origin,
+                    origin,
+                    cache.width_px,
+                    height,
+                );
+            }
+        }
     }
 
-    let config = surface.renderer_config;
     let source_y = config.row_top_px(rows);
     let destination_y = config.row_top_px(0);
     let height = config.row_offset_px(preserved_rows);
@@ -985,6 +1022,47 @@ mod tests {
                     "height={height}, lines={lines:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn stationary_hover_damages_copied_and_current_highlights_after_scroll() {
+        for (hover_y, damage_top) in [(0, 0), (1, 0), (2, 16), (3, 32)] {
+            let highlights = vec![TerminalHyperlink {
+                uri: "https://example.com".to_string(),
+                x: 0,
+                y: hover_y,
+                columns: 4,
+            }];
+            let previous = WgpuRetainedWorkspaceSnapshot {
+                snapshot: snapshot(1, &["link", "link", "link", "link"], vec![0, 1, 2, 3]),
+                renderer_config: config(),
+                hyperlink_highlights: highlights.clone(),
+            };
+            let current = snapshot(2, &["link", "link", "link", "link"], vec![0, 1, 2, 3]);
+            let action = retained_frame_action(
+                Some(&previous),
+                &WgpuTerminalWorkspaceSurface {
+                    render_target_plan: WgpuTerminalRenderTargetPlan::new(80, 64),
+                    surface_snapshot: &current,
+                    renderer_config: config(),
+                    hyperlink_highlights: &highlights,
+                },
+            );
+            assert_eq!(
+                action,
+                if damage_top == 0 {
+                    WgpuRetainedFrameAction::Full
+                } else {
+                    WgpuRetainedFrameAction::ScrollUp {
+                        rows: 1,
+                        preserved_rows: 3,
+                        top_px: damage_top,
+                        bottom_px: 64,
+                    }
+                },
+                "hover row {hover_y}"
+            );
         }
     }
 
