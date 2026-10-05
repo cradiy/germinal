@@ -1842,6 +1842,16 @@ fn append_vi_search_prompt(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SurfaceCellStyleKey {
+    foreground: Color,
+    background: Color,
+    flags: Flags,
+    underline_color: Option<Color>,
+    hyperlink: bool,
+    selected: bool,
+}
+
 fn visible_surface_rows(
     term: &Term<PtyWriteEventListener>,
     color_theme: &TerminalColorTheme,
@@ -1858,6 +1868,11 @@ fn visible_surface_rows(
     let mut current_next_x = 0_u32;
     let mut current_text = String::new();
     let mut current_style = None::<(TextStyleDto, RenderSurfaceTextDecoration)>;
+    let mut last_cell_style = None::<(
+        SurfaceCellStyleKey,
+        TextStyleDto,
+        RenderSurfaceTextDecoration,
+    )>;
 
     for indexed in renderable.display_iter {
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
@@ -1899,18 +1914,32 @@ fn visible_surface_rows(
         }
         let character = display_cell_character(cell.c);
 
-        let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
-        let mut decoration = decoration_of_cell(cell, colors, color_theme);
-        if cell.hyperlink().is_some() {
-            style.underline = true;
-            if decoration.underline == RenderSurfaceUnderlineStyle::None {
-                decoration.underline = RenderSurfaceUnderlineStyle::Single;
-            }
-        }
-        let style = if selected {
-            selected_style(style, color_theme)
+        let key = SurfaceCellStyleKey {
+            foreground: cell.fg,
+            background: cell.bg,
+            flags: cell.flags,
+            underline_color: cell.underline_color(),
+            hyperlink: cell.hyperlink().is_some(),
+            selected,
+        };
+        let (style, decoration) = if let Some((previous, style, decoration)) = last_cell_style
+            && previous == key
+        {
+            (style, decoration)
         } else {
-            style
+            let mut style = style_of_cell(cell.fg, cell.bg, cell.flags, colors, color_theme);
+            let mut decoration = decoration_of_cell(cell, colors, color_theme);
+            if key.hyperlink {
+                style.underline = true;
+                if decoration.underline == RenderSurfaceUnderlineStyle::None {
+                    decoration.underline = RenderSurfaceUnderlineStyle::Single;
+                }
+            }
+            if selected {
+                style = selected_style(style, color_theme);
+            }
+            last_cell_style = Some((key, style, decoration));
+            (style, decoration)
         };
         if character == ' '
             && cell.zerowidth().is_none_or(<[char]>::is_empty)
@@ -2924,6 +2953,34 @@ mod tests {
                 columns: 19,
             }]
         );
+    }
+
+    #[test]
+    fn surface_styles_follow_palette_changes_between_snapshots() {
+        let store = AlacrittyTerminalStore::new();
+        let target_id = RenderTargetId::new(93);
+        store.apply_bytes(
+            target_id,
+            Seq::new(1),
+            b"\x1b]4;1;rgb:11/22/33\x07\x1b[31mAA\x1b[7mBB\x1b[27mCC",
+        );
+        for (seq, color) in [
+            (1, RgbColorDto::new(17, 34, 51)),
+            (2, RgbColorDto::new(68, 85, 102)),
+        ] {
+            if seq == 2 {
+                store.apply_bytes(target_id, Seq::new(seq), b"\x1b]4;1;rgb:44/55/66\x07");
+            }
+            let snapshot = store.render_surface_snapshot_of(target_id).unwrap();
+            let runs = &snapshot.rows[0].runs;
+            assert_eq!(
+                runs.iter().map(|run| run.text.as_str()).collect::<Vec<_>>(),
+                ["AA", "BB", "CC"]
+            );
+            assert_eq!(runs[0].style.foreground, Some(color));
+            assert_eq!(runs[1].style.background, Some(color));
+            assert_eq!(runs[2].style.foreground, Some(color));
+        }
     }
 
     #[test]
