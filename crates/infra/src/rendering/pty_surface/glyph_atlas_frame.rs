@@ -515,7 +515,7 @@ fn collect_text_segments(
                     )
                 });
             for segment in &collected {
-                insert_text_segment(&mut segments, segment.clone());
+                insert_text_segment(&mut segments, segment);
             }
             current.insert(text, collected);
         }
@@ -526,7 +526,7 @@ fn collect_text_segments(
             germinal_ports::rendering::frame_plan_builder::TextStyleDto::plain(),
             ligatures,
         ) {
-            insert_text_segment(&mut segments, segment);
+            insert_text_segment(&mut segments, &segment);
         }
     }
     segments
@@ -561,12 +561,16 @@ fn core_ascii_glyphs() -> impl Iterator<Item = WgpuTerminalGlyphKey> {
 
 fn insert_text_segment(
     segments: &mut BTreeMap<WgpuTerminalGlyphKey, TerminalTextSegment>,
-    segment: TerminalTextSegment,
+    segment: &TerminalTextSegment,
 ) {
-    for fallback in cursor_fallback_segments(&segment) {
+    if let std::collections::btree_map::Entry::Vacant(entry) = segments.entry(segment.glyph_key) {
+        entry.insert(segment.clone());
+    } else {
+        return;
+    }
+    for fallback in cursor_fallback_segments(segment) {
         segments.entry(fallback.glyph_key).or_insert(fallback);
     }
-    segments.entry(segment.glyph_key).or_insert(segment);
 }
 
 #[cfg(test)]
@@ -579,6 +583,38 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn duplicate_shaped_segments_keep_cursor_fallbacks() {
+        let mut actual = BTreeMap::new();
+        let mut expected = BTreeMap::new();
+        for text in [
+            "office != 👩\u{200d}💻 مرحبا",
+            "office != 👩\u{200d}💻 مرحبا",
+            "fi",
+        ] {
+            for bold in [false, true] {
+                let style = TextStyleDto {
+                    bold,
+                    ..TextStyleDto::plain()
+                };
+                for segment in terminal_text_segments_with_ligatures(text, style, true) {
+                    // Preserve the original fallback-first collection as the reference.
+                    for fallback in cursor_fallback_segments(&segment) {
+                        expected.entry(fallback.glyph_key).or_insert(fallback);
+                    }
+                    expected.entry(segment.glyph_key).or_insert(segment.clone());
+                    insert_text_segment(&mut actual, &segment);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+        for bold in [false, true] {
+            for character in ['f', 'i'] {
+                assert!(actual.contains_key(&WgpuTerminalGlyphKey::styled(character, bold, false)));
+            }
+        }
+    }
 
     #[test]
     fn repeated_unicode_runs_preserve_font_variants_and_preedit() {
