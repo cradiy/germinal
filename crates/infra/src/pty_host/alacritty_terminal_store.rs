@@ -1994,7 +1994,6 @@ struct VisibleUrlCharacter {
     character: char,
     x: u32,
     y: u32,
-    columns: u32,
 }
 
 fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperlink> {
@@ -2004,6 +2003,7 @@ fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperli
     let mut visible_characters = Vec::<Option<VisibleUrlCharacter>>::new();
     let mut current_row = None;
     let mut current_row_wrapped = false;
+    let mut has_uri_separator = false;
 
     for indexed in renderable.display_iter {
         let Some(point) = point_to_viewport(display_offset, indexed.point) else {
@@ -2030,22 +2030,26 @@ fn visible_hyperlinks(term: &Term<PtyWriteEventListener>) -> Vec<TerminalHyperli
         } else {
             display_cell_character(cell.c)
         };
-        let columns = terminal_char_cell_width(character).max(1);
-        visible_characters.push(Some(VisibleUrlCharacter {
-            character,
-            x,
-            y,
-            columns,
-        }));
+        has_uri_separator |= character == ':';
+        visible_characters.push(Some(VisibleUrlCharacter { character, x, y }));
         if cell.flags.contains(Flags::WRAPLINE) {
             current_row_wrapped = true;
         }
 
         if let Some(hyperlink) = cell.hyperlink() {
-            push_hyperlink_cell(&mut explicit_hyperlinks, hyperlink.uri(), x, y, columns);
+            push_hyperlink_cell(
+                &mut explicit_hyperlinks,
+                hyperlink.uri(),
+                x,
+                y,
+                terminal_char_cell_width(character).max(1),
+            );
         }
     }
 
+    if !has_uri_separator {
+        return explicit_hyperlinks;
+    }
     let mut hyperlinks = explicit_hyperlinks.clone();
     let mut index = 0;
     while index < visible_characters.len() {
@@ -2218,7 +2222,7 @@ fn hyperlink_segments(
             uri,
             character.x,
             character.y,
-            character.columns,
+            terminal_char_cell_width(character.character).max(1),
         );
     }
     hyperlinks
@@ -2857,6 +2861,48 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn hyperlink_hit_regions_preserve_wide_characters_and_explicit_labels() {
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(12, 6));
+        let target_id = RenderTargetId::new(92);
+        store.apply_bytes(target_id, Seq::new(1), "中 https://a/界".as_bytes());
+        assert_eq!(
+            store.visible_hyperlinks(target_id),
+            vec![
+                TerminalHyperlink {
+                    uri: "https://a/界".into(),
+                    x: 3,
+                    y: 0,
+                    columns: 9
+                },
+                TerminalHyperlink {
+                    uri: "https://a/界".into(),
+                    x: 0,
+                    y: 1,
+                    columns: 3
+                },
+            ]
+        );
+
+        store.apply_bytes(
+            target_id,
+            Seq::new(2),
+            "\x1b[2J\x1b[H\x1b]8;;file:///tmp/source.rs\x1b\\中文e\u{301}\x1b]8;;\x1b\\ plain"
+                .as_bytes(),
+        );
+        assert_eq!(
+            store.visible_hyperlinks(target_id),
+            vec![TerminalHyperlink {
+                uri: "file:///tmp/source.rs".into(),
+                x: 0,
+                y: 0,
+                columns: 5
+            },]
+        );
+        store.apply_bytes(target_id, Seq::new(3), b"\x1b[2J\x1b[Hplain text");
+        assert!(store.visible_hyperlinks(target_id).is_empty());
     }
 
     #[test]
