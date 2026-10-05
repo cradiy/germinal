@@ -183,9 +183,10 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
         let char_count = texts.iter().map(|text| text.chars().count()).sum();
 
         let (segments, glyphs) = match self.source.kind() {
-            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => {
-                (BTreeMap::new(), collect_glyphs(surface_snapshot))
-            }
+            WgpuTerminalGlyphAtlasSourceKind::Debug5x7 => (
+                BTreeMap::new(),
+                collect_glyphs(surface_snapshot).into_iter().collect(),
+            ),
             WgpuTerminalGlyphAtlasSourceKind::Crossfont => {
                 let segments = collect_text_segments(
                     surface_snapshot,
@@ -195,14 +196,16 @@ impl WgpuTerminalGlyphAtlasFrameBuilder {
                         .entry(surface_snapshot.target_id)
                         .or_default(),
                 );
-                let mut glyphs: BTreeSet<_> = segments.keys().copied().collect();
+                let mut glyphs: Vec<_> = segments.keys().copied().collect();
                 glyphs.extend(core_ascii_glyphs());
+                glyphs.sort_unstable();
+                glyphs.dedup();
                 (segments, glyphs)
             }
         };
         let cache_key = WgpuTerminalGlyphAtlasCacheKey {
             source: self.source.kind(),
-            glyphs: glyphs.iter().copied().collect(),
+            glyphs,
         };
         let content_key = WgpuTerminalGlyphAtlasContentKey {
             seq: surface_snapshot.latest_seq,

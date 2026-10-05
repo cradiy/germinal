@@ -490,6 +490,13 @@ fn retained_frame_action(
     if let Some((rows, preserved_rows)) =
         scroll_up_rows(&previous.snapshot, snapshot, config.grid_rows)
     {
+        // The retained texture contains the animated cursor, not just text. Its copied
+        // pixels need not land on the logical cursor row used by scroll damage below.
+        if cursor_is_between_rows(&previous.snapshot, previous.renderer_config)
+            || cursor_is_between_rows(snapshot, config)
+        {
+            return WgpuRetainedFrameAction::Full;
+        }
         let mut top_row = preserved_rows;
         if let Some(cursor) = previous.snapshot.cursor
             && cursor.y >= rows
@@ -514,6 +521,13 @@ fn retained_frame_action(
         config,
         snapshot.dirty_rows.iter().copied().chain(cursor_rows),
     )
+}
+
+fn cursor_is_between_rows(snapshot: &RenderSurfaceSnapshot, config: WgpuRendererConfig) -> bool {
+    match (snapshot.cursor, config.cursor_position_px) {
+        (Some(cursor), Some((_, y_px))) => y_px != config.row_top_px(cursor.y),
+        _ => false,
+    }
 }
 
 fn visible_scrollback(
@@ -916,6 +930,62 @@ mod tests {
                 rows: 1,
                 preserved_rows: 3,
                 top_px: 48,
+                bottom_px: 64,
+            }
+        );
+    }
+
+    #[test]
+    fn scrolling_during_cursor_animation_redraws_instead_of_copying_cursor_pixels() {
+        let mut old = snapshot(1, &["a", "b", "c", "d"], vec![0, 1, 2, 3]);
+        old.cursor = Some(RenderSurfaceCursorSnapshot {
+            x: 0,
+            y: 3,
+            focused: true,
+            shape: RenderSurfaceCursorShape::Block,
+            blinking: false,
+        });
+        let mut current = snapshot(2, &["b", "c", "d", "e"], vec![0, 1, 2, 3]);
+        current.cursor = old.cursor;
+        for (old_y, new_y) in [(8, 48), (48, 8), (8, 24)] {
+            let previous = WgpuRetainedWorkspaceSnapshot {
+                snapshot: old.clone(),
+                renderer_config: WgpuRendererConfig {
+                    cursor_position_px: Some((0, old_y)),
+                    ..config()
+                },
+                hyperlink_highlights: Vec::new(),
+            };
+            assert_eq!(
+                retained_frame_action(
+                    Some(&previous),
+                    &WgpuTerminalWorkspaceSurface {
+                        render_target_plan: WgpuTerminalRenderTargetPlan::new(80, 64),
+                        surface_snapshot: &current,
+                        renderer_config: WgpuRendererConfig {
+                            cursor_position_px: Some((0, new_y)),
+                            ..config()
+                        },
+                        hyperlink_highlights: &[],
+                    }
+                ),
+                WgpuRetainedFrameAction::Full
+            );
+        }
+        let settled = WgpuRetainedWorkspaceSnapshot {
+            snapshot: old,
+            renderer_config: WgpuRendererConfig {
+                cursor_position_px: Some((0, 48)),
+                ..config()
+            },
+            hyperlink_highlights: Vec::new(),
+        };
+        assert_eq!(
+            action(&settled, &current),
+            WgpuRetainedFrameAction::ScrollUp {
+                rows: 1,
+                preserved_rows: 3,
+                top_px: 32,
                 bottom_px: 64,
             }
         );
