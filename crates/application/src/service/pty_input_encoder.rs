@@ -508,6 +508,19 @@ fn kitty_named_key_bytes(
     text: Option<&str>,
 ) -> Option<Vec<u8>> {
     let modifiers = kitty_modifier_parameter(modifiers);
+    if modifiers == 1 && !modes.kitty_report_all_keys_as_escape_codes() {
+        let legacy = match key {
+            WindowInputNamedKey::Enter => Some(b'\r'),
+            WindowInputNamedKey::Tab => Some(b'\t'),
+            WindowInputNamedKey::Backspace => Some(0x7f),
+            _ => None,
+        };
+        if let Some(byte) = legacy {
+            // Keep unmodified recovery keys usable even if an application leaves
+            // enhanced keyboard mode enabled. Modified keys still use CSI u.
+            return (state == WindowInputElementState::Pressed).then_some(vec![byte]);
+        }
+    }
     let event_type = kitty_event_type(modes, state, repeat);
     let associated_text = kitty_associated_text(modes, state, text);
 
@@ -731,12 +744,14 @@ fn ctrl_bytes_from_key(key: &WindowInputKey) -> Option<Vec<u8>> {
     }
 
     let byte = match c {
+        ' ' | '@' => 0x00,
         'a' => 0x01,
         'b' => 0x02,
         'c' => 0x03,
         'd' => 0x04,
         'e' => 0x05,
         'f' => 0x06,
+        'g' => 0x07,
         'h' => 0x08,
         'i' => 0x09,
         'j' => 0x0A,
@@ -1058,9 +1073,77 @@ mod tests {
     }
 
     #[test]
+    fn legacy_control_keys_do_not_require_platform_text() {
+        for (key, byte) in [("g", 7), ("G", 7), (" ", 0), ("@", 0)] {
+            for alt in [false, true] {
+                let expected = if alt { vec![27, byte] } else { vec![byte] };
+                for text in [None, Some("")] {
+                    assert_eq!(
+                        encode_key_event(
+                            TerminalInputModes::default(),
+                            WindowInputModifiers::new(true, alt, false, false),
+                            WindowInputElementState::Pressed,
+                            &WindowInputKey::Character(key.into()),
+                            text,
+                        ),
+                        Some(expected.clone()),
+                        "Ctrl key={key:?} alt={alt} text={text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_preserves_unmodified_recovery_keys_without_report_all() {
+        for flags in 1..8 {
+            let modes = kitty_modes(flags & 1 != 0, flags & 2 != 0, flags & 4 != 0, false, false);
+            for (key, byte) in [
+                (WindowInputNamedKey::Enter, 13),
+                (WindowInputNamedKey::Tab, 9),
+                (WindowInputNamedKey::Backspace, 127),
+            ] {
+                for (state, repeat) in [
+                    (WindowInputElementState::Pressed, false),
+                    (WindowInputElementState::Pressed, true),
+                    (WindowInputElementState::Released, false),
+                ] {
+                    assert_eq!(
+                        encode_key_event_with_repeat(
+                            modes,
+                            WindowInputModifiers::new(false, false, false, false),
+                            state,
+                            repeat,
+                            &WindowInputKey::Named(key),
+                            None,
+                        ),
+                        (state == WindowInputElementState::Pressed).then_some(vec![byte]),
+                        "flags={flags} key={key:?} state={state:?} repeat={repeat}"
+                    );
+                }
+            }
+        }
+        let modes = kitty_modes(true, true, false, false, false);
+        for (key, expected) in [
+            (WindowInputNamedKey::Enter, b"\x1b[13;2u".as_slice()),
+            (WindowInputNamedKey::Tab, b"\x1b[9;2u".as_slice()),
+            (WindowInputNamedKey::Backspace, b"\x1b[127;2u".as_slice()),
+        ] {
+            assert_eq!(
+                encoded_named_key(
+                    modes,
+                    WindowInputModifiers::new(false, false, true, false),
+                    key
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn kitty_reports_named_key_events_and_suppresses_unsupported_releases() {
         let enter = WindowInputKey::Named(WindowInputNamedKey::Enter);
-        let events = kitty_modes(true, true, false, false, false);
+        let events = kitty_modes(true, true, false, true, false);
         let none = WindowInputModifiers::new(false, false, false, false);
 
         assert_eq!(
