@@ -100,7 +100,7 @@ fn spawn_activation_waiter<F>(
     F: Fn(GShellId) + Send + Sync + 'static + ?Sized,
 {
     if waiter_count
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < MAX_ACTIVATION_WAITERS).then_some(count + 1)
         })
         .is_err()

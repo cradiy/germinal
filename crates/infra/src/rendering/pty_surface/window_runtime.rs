@@ -2928,6 +2928,79 @@ mod tests {
     }
 
     #[test]
+    fn hidden_terminal_cursor_keeps_ime_text_and_candidate_anchor() {
+        use crate::pty_host::alacritty_terminal_store::{
+            AlacrittyTermSize, AlacrittyTerminalStore,
+        };
+        use crate::rendering::pty_surface::renderer_backend::{
+            WgpuRendererBackend, WgpuRendererConfig,
+        };
+        use germinal_ports::pty_host::snapshot::TerminalSnapshotProvider;
+        use germinal_ports::rendering::renderer_backend::RendererBackend;
+
+        let target = RenderTargetId::new(19);
+        let store = AlacrittyTerminalStore::with_size(AlacrittyTermSize::new(10, 4));
+        let placement = RenderSurfacePlacement::new(target, 40, 20, 80, 64);
+        let size_info = TerminalSizeInfo::new(
+            placement.window_size(),
+            TerminalCellSize::new(8, 16),
+            TerminalPadding::ZERO,
+        );
+        let backend = WgpuRendererBackend::new(WgpuRendererConfig {
+            cell_width_px: 8,
+            cell_height_px: 16,
+            content_width_px: 80,
+            content_height_px: 64,
+            grid_columns: 10,
+            grid_rows: 4,
+            ..WgpuRendererConfig::default()
+        });
+        for (seq, bytes, caret, anchor) in [
+            (1, b"\x1b[2;3H\x1b[?25l".as_slice(), (32, 16), (72, 36)),
+            (2, b"\x1b[3;5H".as_slice(), (48, 32), (88, 52)),
+        ] {
+            store.apply_bytes(target, Seq::new(seq), bytes);
+            let mut snapshot = store.render_surface_snapshot_of(target).unwrap();
+            snapshot.cursor = store.cursor_snapshot(target);
+            backend.render_surface(&snapshot);
+            assert!(
+                backend.state().geometric_quads().is_empty(),
+                "hidden cursor must not draw"
+            );
+            snapshot.ime_preedit = Some(RenderSurfaceImePreeditSnapshot {
+                text: "ni".into(),
+                cursor_range: Some((2, 2)),
+            });
+            backend.render_surface(&snapshot);
+            let state = backend.state();
+            assert_eq!(
+                state.glyph_quads().len(),
+                2,
+                "preedit must survive cursor hiding"
+            );
+            let quads = state.geometric_quads();
+            assert_eq!(quads.len(), 1);
+            assert_eq!((quads[0].x_px, quads[0].y_px), caret);
+            assert_eq!(
+                ime_cursor_area(placement, size_info, &snapshot),
+                Some((
+                    PhysicalPosition::new(anchor.0, anchor.1),
+                    PhysicalSize::new(8, 16)
+                ))
+            );
+            snapshot.ime_preedit = None;
+            backend.render_surface(&snapshot);
+            assert!(backend.state().glyph_quads().is_empty());
+            assert!(backend.state().geometric_quads().is_empty());
+        }
+        store.apply_bytes(target, Seq::new(3), b"\x1b[?25h");
+        assert_ne!(
+            store.cursor_snapshot(target).unwrap().shape,
+            RenderSurfaceCursorShape::Hidden
+        );
+    }
+
+    #[test]
     fn ime_cursor_area_cache_suppresses_duplicates_until_invalidated() {
         let target_id = RenderTargetId::new(9);
         let position = PhysicalPosition::new(416, 37);

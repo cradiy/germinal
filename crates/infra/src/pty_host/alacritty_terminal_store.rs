@@ -1057,10 +1057,9 @@ impl AlacrittyTerminalStore {
         let inner = self.inner.borrow();
         let state = inner.get(&render_target_id)?;
         let vi_mode = state.term.mode().contains(TermMode::VI);
-        if !vi_mode
-            && (state.term.grid().display_offset() != 0
-                || !state.term.mode().contains(TermMode::SHOW_CURSOR))
-        {
+        // Hidden cursors still anchor IME preedit and candidate windows. Keep
+        // their position and let the Hidden shape suppress cursor painting.
+        if !vi_mode && state.term.grid().display_offset() != 0 {
             return None;
         }
         let renderable = state.term.renderable_content();
