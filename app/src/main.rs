@@ -1,15 +1,29 @@
 mod app;
 
-use clap::Parser;
+use clap::{Parser, builder::TypedValueParser};
 use eros::Context;
 use germinal_ports::event::runtime_event::RuntimeEvent;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 use tracing::info;
 use winit::event_loop::EventLoop;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "A GPU-accelerated terminal emulator")]
-struct Cli;
+struct Cli {
+    /// Start the terminal in this directory (overrides the configured working directory).
+    #[arg(value_name = "DIRECTORY", value_parser = clap::builder::PathBufValueParser::new().try_map(parse_directory))]
+    directory: Option<PathBuf>,
+}
+
+fn parse_directory(path: PathBuf) -> Result<PathBuf, String> {
+    let resolved = path
+        .canonicalize()
+        .map_err(|error| format!("cannot open directory '{}': {error}", path.display()))?;
+    if !resolved.is_dir() {
+        return Err(format!("not a directory: '{}'", path.display()));
+    }
+    Ok(resolved)
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -23,10 +37,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> eros::Result<()> {
-    Cli::parse();
+    let cli = Cli::parse();
     app::prepare_crash_reporting();
 
-    let (config, paths) = app::load_or_create_config().context("failed to load Germinal config")?;
+    let (mut config, paths) =
+        app::load_or_create_config().context("failed to load Germinal config")?;
+    if let Some(directory) = cli.directory {
+        config.terminal.working_directory = Some(directory);
+    }
     app::init_logging(&config.logging, &paths).context("failed to initialize Germinal logging")?;
 
     let event_loop = EventLoop::<RuntimeEvent>::with_user_event()
@@ -46,7 +64,26 @@ mod tests {
 
     #[test]
     fn accepts_an_empty_command_line() {
-        Cli::try_parse_from(["germinal"]).expect("an empty command line should start Germinal");
+        let cli = Cli::try_parse_from(["germinal"]).unwrap();
+        assert!(cli.directory.is_none());
+        let cli = Cli::try_parse_from(["germinal", "."]).unwrap();
+        assert_eq!(
+            cli.directory,
+            Some(std::env::current_dir().unwrap().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_files_and_missing_directories_before_startup() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for path in [
+            root.join("Cargo.toml"),
+            root.join("Cargo.toml/missing-directory"),
+        ] {
+            let error = Cli::try_parse_from([std::ffi::OsStr::new("germinal"), path.as_os_str()])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
     }
 
     #[test]
