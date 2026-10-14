@@ -116,6 +116,7 @@ pub enum TerminalWorkerInput {
     ViMotion(TerminalViMotion),
     ViScroll {
         up: bool,
+        steps: u8,
     },
     SetViSelection(Option<TerminalViSelectionKind>),
     SelectViTextObject(TerminalViTextObject),

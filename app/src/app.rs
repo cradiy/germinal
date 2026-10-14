@@ -255,6 +255,9 @@ impl App {
             config,
         };
 
+        app.gshell_service_state
+            .pty_service_state()
+            .set_scroll_multiplier(app.config.scrolling.multiplier);
         app.gnative_tunnel.configure(
             app.runtime_event_dispatcher.clone(),
             app.snapshot_wake_pending(),

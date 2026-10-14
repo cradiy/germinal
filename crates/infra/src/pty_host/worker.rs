@@ -475,9 +475,9 @@ where
                     self.unpublished_seq = Some(seq);
                 }
             }
-            TerminalWorkerInput::ViScroll { up } => {
+            TerminalWorkerInput::ViScroll { up, steps } => {
                 self.flush_pending_input();
-                if let Some(seq) = self.vi_scroll(up) {
+                if let Some(seq) = self.vi_scroll(up, steps) {
                     self.unpublished_seq = Some(seq);
                 }
             }
@@ -877,7 +877,7 @@ where
             .then_some(seq)
     }
 
-    fn vi_scroll(&mut self, up: bool) -> Option<Seq> {
+    fn vi_scroll(&mut self, up: bool, steps: u8) -> Option<Seq> {
         if !self.terminal_store.vi_mode_enabled(self.target_id) {
             return None;
         }
@@ -896,7 +896,12 @@ where
         if modes.mouse_report_click() || modes.mouse_drag() || modes.mouse_motion() {
             return None;
         }
-        self.scroll_display(TerminalDisplayScroll::Delta(if up { 1 } else { -1 }))
+        let steps = i32::from(steps.clamp(1, 32));
+        self.scroll_display(TerminalDisplayScroll::Delta(if up {
+            steps
+        } else {
+            -steps
+        }))
     }
 
     fn vi_motion(&mut self, motion: TerminalViMotion) -> Option<Seq> {
@@ -1378,7 +1383,8 @@ mod tests {
             snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
         });
         runtime.apply_byte_chunks(&[
-            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[?1000h\x1b[?1006h\x1b[1;4H".to_vec(),
+            b"a\r\nb\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[?1000h\x1b[?1006h\x1b[1;4H"
+                .to_vec(),
         ]);
         runtime.set_vi_mode(true);
         event_rx.try_iter().for_each(drop);
@@ -1395,7 +1401,7 @@ mod tests {
             .cursor_snapshot(runtime.target_id)
             .unwrap()
             .x as u16;
-        assert!(runtime.vi_scroll(true).is_none());
+        assert!(runtime.vi_scroll(true, 1).is_none());
         assert_eq!(
             event_rx.try_recv().unwrap(),
             RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
@@ -1412,7 +1418,7 @@ mod tests {
             .unwrap();
         assert_eq!((cursor.x, cursor.y), (u32::from(expected_column), 1));
         event_rx.try_iter().for_each(drop);
-        assert!(runtime.vi_scroll(false).is_none());
+        assert!(runtime.vi_scroll(false, 1).is_none());
         assert!(matches!(
             event_rx.try_recv().unwrap(),
             RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
@@ -1422,27 +1428,45 @@ mod tests {
             })
         ));
         runtime.set_vi_selection(Some(TerminalViSelectionKind::Character));
-        assert!(runtime.vi_scroll(false).is_none());
+        assert!(runtime.vi_scroll(false, 1).is_none());
         assert!(event_rx.try_recv().is_err());
         runtime.set_vi_selection(None);
         runtime.scroll_display(TerminalDisplayScroll::Top);
         runtime.vi_motion(Motion::High);
-        assert!(runtime.vi_scroll(true).is_none());
+        assert!(runtime.vi_scroll(true, 1).is_none());
         assert!(event_rx.try_recv().is_err());
         runtime.scroll_display(TerminalDisplayScroll::Bottom);
         runtime.vi_motion(Motion::High);
         runtime.apply_byte_chunks(&[b"\x1b[?1000l".to_vec()]);
         event_rx.try_iter().for_each(drop);
-        assert!(runtime.vi_scroll(true).is_some());
+        assert!(runtime.vi_scroll(true, 1).is_some());
         assert!(event_rx.try_recv().is_err());
         let cursor = runtime
             .terminal_store
             .cursor_snapshot(runtime.target_id)
             .unwrap();
         assert_eq!(cursor.y, 1);
-        assert!(runtime.vi_scroll(false).is_some());
+        assert!(runtime.vi_scroll(false, 1).is_some());
+        assert!(runtime.vi_scroll(true, 3).is_some());
+        assert_eq!(
+            runtime
+                .terminal_store
+                .cursor_snapshot(runtime.target_id)
+                .unwrap()
+                .y,
+            3
+        );
+        assert!(runtime.vi_scroll(false, 3).is_some());
+        assert_eq!(
+            runtime
+                .terminal_store
+                .cursor_snapshot(runtime.target_id)
+                .unwrap()
+                .y,
+            0
+        );
         runtime.set_vi_mode(false);
-        assert!(runtime.vi_scroll(true).is_none());
+        assert!(runtime.vi_scroll(true, 1).is_none());
     }
 
     #[test]

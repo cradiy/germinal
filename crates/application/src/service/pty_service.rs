@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool, mpsc::SyncSender},
@@ -124,6 +124,7 @@ struct ViSearch {
 #[derive(kudi::DepInj)]
 #[target(PtyService)]
 pub struct PtyServiceState {
+    scroll_multiplier: Cell<u8>,
     pty_host_runtimes: RefCell<HashMap<PtyHostId, PtyPaneRuntime>>,
     gshell_pty_hosts: RefCell<HashMap<GShellId, PtyHostId>>,
     reported_working_directories: RefCell<HashMap<PtyHostId, PathBuf>>,
@@ -131,8 +132,17 @@ pub struct PtyServiceState {
 }
 
 impl PtyServiceState {
+    pub fn set_scroll_multiplier(&self, multiplier: u8) {
+        let multiplier = multiplier.clamp(1, 32);
+        self.scroll_multiplier.set(multiplier);
+        for runtime in self.pty_host_runtimes.borrow_mut().values_mut() {
+            runtime.mouse.scroll_multiplier = multiplier;
+        }
+    }
+
     pub fn new() -> Self {
         Self {
+            scroll_multiplier: Cell::new(1),
             pty_host_runtimes: RefCell::new(HashMap::new()),
             gshell_pty_hosts: RefCell::new(HashMap::new()),
             reported_working_directories: RefCell::new(HashMap::new()),
@@ -211,7 +221,8 @@ where
                 pty_input_sender,
                 terminal_worker_sender,
                 input_modes,
-                mouse: PtyMouseEncoder::new(pty_size),
+                mouse: PtyMouseEncoder::new(pty_size)
+                    .with_scroll_multiplier(state.scroll_multiplier.get()),
                 click_tracker: PtyClickTracker::default(),
                 selection_dragging: false,
                 selection_end: None,
@@ -768,6 +779,7 @@ fn send_vi_mode_key(
                 .terminal_worker_sender
                 .send(TerminalWorkerInput::ViScroll {
                     up: key.eq_ignore_ascii_case("k"),
+                    steps: runtime.mouse.scroll_multiplier,
                 });
             return;
         }
@@ -1608,7 +1620,7 @@ mod tests {
                 &WindowInputKey::Character(key.into()),
             );
             assert!(
-                matches!(terminal_worker_rx.try_recv(), Ok(TerminalWorkerInput::ViScroll { up: actual }) if actual == up)
+                matches!(terminal_worker_rx.try_recv(), Ok(TerminalWorkerInput::ViScroll { up: actual, steps: 1 }) if actual == up)
             );
         }
         runtime.input_modes.store(

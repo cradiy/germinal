@@ -102,6 +102,7 @@ pub(super) fn encode_focus_changed(modes: TerminalInputModes, focused: bool) -> 
 }
 
 pub(super) struct PtyMouseEncoder {
+    pub(super) scroll_multiplier: u8,
     size: TerminalPtySize,
     pressed_buttons: Vec<WindowPointerButton>,
     last_pointer_location: Option<(u16, u16)>,
@@ -112,12 +113,18 @@ pub(super) struct PtyMouseEncoder {
 impl PtyMouseEncoder {
     pub(super) fn new(size: TerminalPtySize) -> Self {
         Self {
+            scroll_multiplier: 1,
             size,
             pressed_buttons: Vec::new(),
             last_pointer_location: None,
             wheel_x: 0.0,
             wheel_y: 0.0,
         }
+    }
+
+    pub(super) fn with_scroll_multiplier(mut self, multiplier: u8) -> Self {
+        self.scroll_multiplier = multiplier.clamp(1, 32);
+        self
     }
 
     pub(super) fn resize(&mut self, size: TerminalPtySize) {
@@ -147,12 +154,10 @@ impl PtyMouseEncoder {
                 / f64::from(self.size.rows()),
         };
         let location = terminal_mouse_location(modes, position, self.size)?;
-        Some(mouse_report(
-            modes,
-            if up { 64 } else { 65 },
-            location,
-            false,
-        ))
+        Some(
+            mouse_report(modes, if up { 64 } else { 65 }, location, false)
+                .repeat(usize::from(self.scroll_multiplier)),
+        )
     }
 
     pub(super) fn pointer_left(&mut self) {
@@ -242,7 +247,10 @@ impl PtyMouseEncoder {
         modifiers: WindowInputModifiers,
     ) -> PtyScrollAction {
         let (x, y) = match delta {
-            WindowScrollDelta::Lines { x, y } => (f64::from(x), f64::from(y)),
+            WindowScrollDelta::Lines { x, y } => (
+                f64::from(x) * f64::from(self.scroll_multiplier),
+                f64::from(y) * f64::from(self.scroll_multiplier),
+            ),
             WindowScrollDelta::Pixels { x, y } => {
                 let cell_width =
                     f64::from(self.size.pixel_width()) / f64::from(self.size.columns().max(1));
@@ -1387,6 +1395,51 @@ mod tests {
                 WindowInputModifiers::new(false, false, false, false),
             ),
             Some(b"\x1b[<0;200;100m".to_vec())
+        );
+    }
+
+    #[test]
+    fn scroll_multiplier_scales_wheel_and_vi_but_not_pixel_scroll() {
+        let size = TerminalPtySize::new(4, 8, 80, 40);
+        let mut encoder = PtyMouseEncoder::new(size).with_scroll_multiplier(3);
+        let modes = modes(false, false, false, true, false, false);
+        let modifiers = WindowInputModifiers::new(false, false, false, false);
+        let position = WindowPointerPosition::new(35.0, 15.0);
+        assert_eq!(
+            encoder.scroll(
+                modes,
+                WindowScrollDelta::Lines { x: 0.0, y: 1.0 },
+                position,
+                modifiers
+            ),
+            PtyScrollAction::ReportToPty(vec![b"\x1b[<64;4;2M".to_vec(); 3])
+        );
+        assert_eq!(
+            encoder.vi_scroll(modes, 3, 1, true),
+            Some(b"\x1b[<64;4;2M".repeat(3))
+        );
+        assert_eq!(
+            encoder.scroll(
+                modes,
+                WindowScrollDelta::Pixels { x: 0.0, y: 10.0 },
+                position,
+                modifiers
+            ),
+            PtyScrollAction::ReportToPty(vec![b"\x1b[<64;4;2M".to_vec()])
+        );
+        assert_eq!(
+            encoder.scroll(
+                TerminalInputModes::default(),
+                WindowScrollDelta::Lines { x: 0.0, y: -1.0 },
+                position,
+                modifiers
+            ),
+            PtyScrollAction::ScrollDisplay(-3)
+        );
+        encoder.resize(size);
+        assert_eq!(
+            encoder.vi_scroll(modes, 3, 1, false),
+            Some(b"\x1b[<65;4;2M".repeat(3))
         );
     }
 

@@ -154,6 +154,9 @@ impl GerminalConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if !(1..=32).contains(&self.scrolling.multiplier) {
+            return Err("scrolling.multiplier must be between 1 and 32".into());
+        }
         if !self.window.opacity.is_finite() || !(0.0..=1.0).contains(&self.window.opacity) {
             return Err("window.opacity must be a finite number between 0.0 and 1.0".to_string());
         }
@@ -576,11 +579,15 @@ impl Default for FontFaceConfig {
 #[serde(default)]
 pub struct ScrollingConfig {
     pub history: usize,
+    pub multiplier: u8,
 }
 
 impl Default for ScrollingConfig {
     fn default() -> Self {
-        Self { history: 10_000 }
+        Self {
+            history: 10_000,
+            multiplier: 1,
+        }
     }
 }
 
@@ -1350,6 +1357,17 @@ mod tests {
         ] {
             let config: GerminalConfig = toml::from_str(contents).unwrap();
             assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn validates_scroll_multiplier_and_preserves_old_configs() {
+        let config: GerminalConfig = toml::from_str("[scrolling]\nhistory = 512").unwrap();
+        assert_eq!(config.scrolling.multiplier, 1);
+        for value in [0, 1, 3, 32, 33] {
+            let config: GerminalConfig =
+                toml::from_str(&format!("[scrolling]\nmultiplier = {value}")).unwrap();
+            assert_eq!(config.validate().is_ok(), (1..=32).contains(&value));
         }
     }
 
