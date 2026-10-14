@@ -114,6 +114,9 @@ pub enum TerminalWorkerInput {
     SetViMode(bool),
     SetSearchMode(bool),
     ViMotion(TerminalViMotion),
+    ViScroll {
+        up: bool,
+    },
     SetViSelection(Option<TerminalViSelectionKind>),
     SelectViTextObject(TerminalViTextObject),
     SetViSearchPrompt(Option<TerminalViSearchPrompt>),

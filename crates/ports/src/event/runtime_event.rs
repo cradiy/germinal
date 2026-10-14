@@ -100,6 +100,12 @@ pub enum GShellRuntimeEvent {
         gshell_id: GShellId,
         text: Option<String>,
     },
+    ViScroll {
+        gshell_id: GShellId,
+        column: u16,
+        row: u16,
+        up: bool,
+    },
     Closed {
         gshell_id: GShellId,
     },

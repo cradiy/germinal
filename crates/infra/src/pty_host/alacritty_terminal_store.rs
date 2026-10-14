@@ -602,6 +602,23 @@ impl AlacrittyTerminalStore {
         true
     }
 
+    pub fn vi_scroll_position(&self, render_target_id: RenderTargetId) -> Option<(u16, u16)> {
+        let inner = self.inner.borrow();
+        let state = inner.get(&render_target_id)?;
+        let mode = state.term.mode();
+        if !mode.contains(TermMode::VI)
+            || !mode.intersects(
+                TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION,
+            )
+            || state.term.selection.is_some()
+            || state.term.grid().display_offset() != 0
+        {
+            return None;
+        }
+        let point = state.term.vi_mode_cursor.point;
+        Some((point.column.0 as u16, point.line.0 as u16))
+    }
+
     pub fn vi_motion(
         &self,
         render_target_id: RenderTargetId,

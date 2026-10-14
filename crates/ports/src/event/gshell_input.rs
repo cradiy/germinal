@@ -21,6 +21,11 @@ pub enum GShellInputEvent {
         text: Option<String>,
     },
     ToggleViMode,
+    ViScroll {
+        column: u16,
+        row: u16,
+        up: bool,
+    },
     ToggleSearch,
     ScrollDisplay(TerminalDisplayScroll),
     Window(WindowInputEvent),

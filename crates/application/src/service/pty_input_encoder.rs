@@ -127,6 +127,34 @@ impl PtyMouseEncoder {
         self.wheel_y = 0.0;
     }
 
+    pub(super) fn vi_scroll(
+        &self,
+        modes: TerminalInputModes,
+        column: u16,
+        row: u16,
+        up: bool,
+    ) -> Option<Vec<u8>> {
+        if !mouse_reporting_enabled(modes)
+            || column >= self.size.columns()
+            || row >= self.size.rows()
+        {
+            return None;
+        }
+        let position = WindowPointerPosition {
+            x_px: (f64::from(column) + 0.5) * f64::from(self.size.pixel_width())
+                / f64::from(self.size.columns()),
+            y_px: (f64::from(row) + 0.5) * f64::from(self.size.pixel_height())
+                / f64::from(self.size.rows()),
+        };
+        let location = terminal_mouse_location(modes, position, self.size)?;
+        Some(mouse_report(
+            modes,
+            if up { 64 } else { 65 },
+            location,
+            false,
+        ))
+    }
+
     pub(super) fn pointer_left(&mut self) {
         self.last_pointer_location = None;
         self.pressed_buttons.clear();
@@ -1360,6 +1388,50 @@ mod tests {
             ),
             Some(b"\x1b[<0;200;100m".to_vec())
         );
+    }
+
+    #[test]
+    fn vi_scroll_uses_cursor_coordinates_without_changing_mouse_state() {
+        let mut encoder = PtyMouseEncoder::new(TerminalPtySize::new(4, 8, 80, 40));
+        let modes = modes(false, false, false, true, false, false);
+        let modifiers = WindowInputModifiers::new(false, false, false, false);
+        let position = WindowPointerPosition::new(5.0, 5.0);
+        encoder.scroll(
+            modes,
+            WindowScrollDelta::Lines { x: 0.0, y: 0.5 },
+            position,
+            modifiers,
+        );
+        let last_pointer = encoder.last_pointer_location;
+        assert_eq!(
+            encoder.vi_scroll(modes, 3, 0, true),
+            Some(b"\x1b[<64;4;1M".to_vec())
+        );
+        assert_eq!(
+            encoder.vi_scroll(modes, 3, 3, false),
+            Some(b"\x1b[<65;4;4M".to_vec())
+        );
+        assert_eq!(
+            encoder.vi_scroll(modes.with_sgr_pixel_mouse(true), 3, 3, false),
+            Some(b"\x1b[<65;36;36M".to_vec())
+        );
+        assert_eq!(encoder.last_pointer_location, last_pointer);
+        assert_eq!(
+            encoder.scroll(
+                modes,
+                WindowScrollDelta::Lines { x: 0.0, y: 0.5 },
+                position,
+                modifiers
+            ),
+            PtyScrollAction::ReportToPty(vec![b"\x1b[<64;1;1M".to_vec()])
+        );
+        assert!(
+            encoder
+                .vi_scroll(TerminalInputModes::default(), 3, 0, true)
+                .is_none()
+        );
+        encoder.resize(TerminalPtySize::new(2, 2, 20, 20));
+        assert!(encoder.vi_scroll(modes, 3, 3, false).is_none());
     }
 
     #[test]

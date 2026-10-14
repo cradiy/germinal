@@ -475,6 +475,12 @@ where
                     self.unpublished_seq = Some(seq);
                 }
             }
+            TerminalWorkerInput::ViScroll { up } => {
+                self.flush_pending_input();
+                if let Some(seq) = self.vi_scroll(up) {
+                    self.unpublished_seq = Some(seq);
+                }
+            }
             TerminalWorkerInput::SetViSelection(kind) => {
                 self.flush_pending_input();
                 if let Some(seq) = self.set_vi_selection(kind) {
@@ -869,6 +875,28 @@ where
         self.terminal_store
             .set_search_mode(self.target_id, seq, enabled)
             .then_some(seq)
+    }
+
+    fn vi_scroll(&mut self, up: bool) -> Option<Seq> {
+        if !self.terminal_store.vi_mode_enabled(self.target_id) {
+            return None;
+        }
+        if let Some((column, row)) = self.terminal_store.vi_scroll_position(self.target_id) {
+            let _ = self
+                .proxy
+                .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
+                    gshell_id: self.gshell_id,
+                    column,
+                    row,
+                    up,
+                }));
+            return None;
+        }
+        let modes = self.terminal_store.input_modes(self.target_id);
+        if modes.mouse_report_click() || modes.mouse_drag() || modes.mouse_motion() {
+            return None;
+        }
+        self.scroll_display(TerminalDisplayScroll::Delta(if up { 1 } else { -1 }))
     }
 
     fn vi_motion(&mut self, motion: TerminalViMotion) -> Option<Seq> {
@@ -1330,6 +1358,92 @@ mod tests {
     };
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
+
+    #[test]
+    fn vi_scroll_routes_only_live_unselected_mouse_navigation() {
+        use germinal_ports::pty_host::worker_input::{
+            TerminalViMotion as Motion, TerminalViSelectionKind,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id: GShellId::new(5),
+            initial_size: TerminalPtySize::new(4, 8, 80, 40),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+        runtime.apply_byte_chunks(&[
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[?1000h\x1b[?1006h\x1b[1;4H".to_vec(),
+        ]);
+        runtime.set_vi_mode(true);
+        event_rx.try_iter().for_each(drop);
+        assert!(runtime.vi_motion(Motion::Down).is_some());
+        assert!(runtime.vi_motion(Motion::Up).is_some());
+        assert!(event_rx.try_recv().is_err());
+        assert!(runtime.vi_motion(Motion::Up).is_some());
+        assert!(event_rx.try_recv().is_err());
+        runtime.scroll_display(TerminalDisplayScroll::Bottom);
+        runtime.vi_motion(Motion::High);
+        runtime.vi_motion(Motion::Down);
+        let expected_column = runtime
+            .terminal_store
+            .cursor_snapshot(runtime.target_id)
+            .unwrap()
+            .x as u16;
+        assert!(runtime.vi_scroll(true).is_none());
+        assert_eq!(
+            event_rx.try_recv().unwrap(),
+            RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
+                gshell_id: GShellId::new(5),
+                column: expected_column,
+                row: 1,
+                up: true,
+            })
+        );
+        runtime.apply_byte_chunks(&[b"\x1b[2J\x1b[Hnew page\x1b[4;1H".to_vec()]);
+        let cursor = runtime
+            .terminal_store
+            .cursor_snapshot(runtime.target_id)
+            .unwrap();
+        assert_eq!((cursor.x, cursor.y), (u32::from(expected_column), 1));
+        event_rx.try_iter().for_each(drop);
+        assert!(runtime.vi_scroll(false).is_none());
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
+                row: 1,
+                up: false,
+                ..
+            })
+        ));
+        runtime.set_vi_selection(Some(TerminalViSelectionKind::Character));
+        assert!(runtime.vi_scroll(false).is_none());
+        assert!(event_rx.try_recv().is_err());
+        runtime.set_vi_selection(None);
+        runtime.scroll_display(TerminalDisplayScroll::Top);
+        runtime.vi_motion(Motion::High);
+        assert!(runtime.vi_scroll(true).is_none());
+        assert!(event_rx.try_recv().is_err());
+        runtime.scroll_display(TerminalDisplayScroll::Bottom);
+        runtime.vi_motion(Motion::High);
+        runtime.apply_byte_chunks(&[b"\x1b[?1000l".to_vec()]);
+        event_rx.try_iter().for_each(drop);
+        assert!(runtime.vi_scroll(true).is_some());
+        assert!(event_rx.try_recv().is_err());
+        let cursor = runtime
+            .terminal_store
+            .cursor_snapshot(runtime.target_id)
+            .unwrap();
+        assert_eq!(cursor.y, 1);
+        assert!(runtime.vi_scroll(false).is_some());
+        runtime.set_vi_mode(false);
+        assert!(runtime.vi_scroll(true).is_none());
+    }
 
     #[test]
     fn panic_payloads_keep_useful_messages() {

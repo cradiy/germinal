@@ -165,6 +165,7 @@ fn gnative_input_event_from(
         GShellInputEvent::CopySelection => None,
         GShellInputEvent::Osc52ClipboardLoadResponse { .. } => None,
         GShellInputEvent::ToggleViMode => None,
+        GShellInputEvent::ViScroll { .. } => None,
         GShellInputEvent::ToggleSearch => None,
         GShellInputEvent::ScrollDisplay(_) => None,
         GShellInputEvent::Window(window_event) => match window_event {

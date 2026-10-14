@@ -1507,6 +1507,17 @@ impl ApplicationHandler<RuntimeEvent> for App {
             RuntimeEvent::GShell(GShellRuntimeEvent::SelectionText { gshell_id, text }) => {
                 self.write_selection_to_clipboard(gshell_id, text);
             }
+            RuntimeEvent::GShell(GShellRuntimeEvent::ViScroll {
+                gshell_id,
+                column,
+                row,
+                up,
+            }) => {
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id,
+                    event: GShellInputEvent::ViScroll { column, row, up },
+                });
+            }
             RuntimeEvent::GShell(GShellRuntimeEvent::Closed { gshell_id }) => {
                 self.close_workspace_gshell(event_loop, gshell_id);
             }

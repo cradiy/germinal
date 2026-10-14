@@ -274,6 +274,12 @@ where
                 }
             }
             GShellInputEvent::ToggleViMode => toggle_pty_host_vi_mode(state, pty_host_id),
+            GShellInputEvent::ViScroll { column, row, up } => {
+                let runtimes = state.pty_host_runtimes.borrow();
+                if let Some(runtime) = runtimes.get(&pty_host_id) {
+                    send_vi_scroll(runtime, column, row, up);
+                }
+            }
             GShellInputEvent::ToggleSearch => toggle_pty_host_search(state, pty_host_id),
             GShellInputEvent::ScrollDisplay(scroll) => {
                 send_pty_host_display_scroll(state, pty_host_id, scroll)
@@ -708,6 +714,18 @@ fn leave_pty_host_search(runtime: &mut PtyPaneRuntime) {
         .send(TerminalWorkerInput::SetSearchMode(false));
 }
 
+fn send_vi_scroll(runtime: &PtyPaneRuntime, column: u16, row: u16, up: bool) {
+    if runtime.vi_mode
+        && runtime.vi_selection_kind.is_none()
+        && runtime.vi_search_input.is_none()
+        && let Some(bytes) = runtime
+            .mouse
+            .vi_scroll(runtime.input_modes.load(), column, row, up)
+    {
+        let _ = runtime.pty_input_sender.send(PtyInput::Bytes(bytes));
+    }
+}
+
 fn send_vi_mode_key(
     runtime: &mut PtyPaneRuntime,
     modifiers: WindowInputModifiers,
@@ -745,6 +763,14 @@ fn send_vi_mode_key(
     if modifiers.control_key() && !modifiers.alt_key() && !modifiers.super_key() {
         runtime.vi_pending_g = false;
         runtime.vi_pending_text_object = None;
+        if matches!(key.to_ascii_lowercase().as_str(), "k" | "j") {
+            let _ = runtime
+                .terminal_worker_sender
+                .send(TerminalWorkerInput::ViScroll {
+                    up: key.eq_ignore_ascii_case("k"),
+                });
+            return;
+        }
         let motion = match key.to_ascii_lowercase().as_str() {
             "u" => Some(TerminalViMotion::HalfPageUp),
             "d" => Some(TerminalViMotion::HalfPageDown),
@@ -1524,7 +1550,7 @@ mod tests {
 
     #[test]
     fn vi_mode_routes_viewport_motions_without_pty_input() {
-        let (pty_input_sender, _pty_input_rx) = pty_input_channel();
+        let (pty_input_sender, pty_input_rx) = pty_input_channel();
         let (terminal_worker_sender, terminal_worker_rx) = mpsc::sync_channel(7);
         let mut runtime = PtyPaneRuntime {
             pty_input_sender,
@@ -1574,6 +1600,36 @@ mod tests {
                 Ok(TerminalWorkerInput::ViMotion(actual)) if actual == expected
             ));
         }
+        for (key, up) in [("k", true), ("j", false)] {
+            send_vi_mode_key(
+                &mut runtime,
+                WindowInputModifiers::new(true, false, false, false),
+                WindowInputElementState::Pressed,
+                &WindowInputKey::Character(key.into()),
+            );
+            assert!(
+                matches!(terminal_worker_rx.try_recv(), Ok(TerminalWorkerInput::ViScroll { up: actual }) if actual == up)
+            );
+        }
+        runtime.input_modes.store(
+            germinal_ports::pty_host::terminal_input_mode::TerminalInputModes::new(
+                false, false, false, true, true, false, false,
+            ),
+        );
+        super::send_vi_scroll(&runtime, 5, 4, true);
+        runtime.vi_selection_kind = Some(TerminalViSelectionKind::Character);
+        super::send_vi_scroll(&runtime, 5, 4, false);
+        runtime.vi_selection_kind = None;
+        runtime.vi_mode = false;
+        super::send_vi_scroll(&runtime, 5, 4, false);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(std::future::Future::poll(std::pin::pin!(pty_input_rx.recv()).as_mut(), &mut context), std::task::Poll::Ready(Some(germinal_ports::pty_host::pty_input::PtyInput::Bytes(bytes))) if bytes == b"\x1b[<64;6;5M")
+        );
+        assert!(
+            std::future::Future::poll(std::pin::pin!(pty_input_rx.recv()).as_mut(), &mut context)
+                .is_pending()
+        );
     }
 
     #[test]
