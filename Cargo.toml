@@ -49,6 +49,7 @@ toml = "1.1"
 base64 = "0.23"
 flate2 = "1"
 png = "0.18"
+resvg = { version = "0.46", default-features = false }
 
 # application
 kudi = "0.1"

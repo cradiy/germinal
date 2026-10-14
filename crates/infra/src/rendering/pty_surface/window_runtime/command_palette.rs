@@ -6,9 +6,14 @@ use germinal_ports::rendering::command_palette::{
 #[derive(Default)]
 pub(super) struct CommandPaletteViewport {
     first: usize,
+    icons: crate::rendering::pty_surface::svg_icon::SvgIconCache,
 }
 
 impl CommandPaletteViewport {
+    pub(super) fn reset(&mut self) {
+        self.first = 0;
+    }
+
     fn reveal(&mut self, selected: usize, count: usize, visible: usize) -> usize {
         let selected = selected.min(count.saturating_sub(1));
         self.first = self.first.min(count.saturating_sub(visible));
@@ -44,7 +49,7 @@ pub(super) fn query_line(palette: &CommandPaletteSnapshot, columns: u32) -> (Str
         .map(|(_, ch)| ch)
         .collect();
     let prefix = format!("{}{}", palette.query, before_cursor);
-    let available = columns.saturating_sub(11);
+    let available = columns.saturating_sub(14);
     let mut tail = Vec::new();
     let mut width = 0;
     for ch in prefix.chars().rev() {
@@ -61,7 +66,7 @@ pub(super) fn query_line(palette: &CommandPaletteSnapshot, columns: u32) -> (Str
         .chars()
         .skip(before_cursor.chars().count())
         .collect();
-    (format!("{text}▏{after}"), width + 2)
+    (format!("{text}▏{after}"), width + 5)
 }
 
 pub(super) fn build(
@@ -127,8 +132,8 @@ pub(super) fn build(
     };
     add(
         1,
-        2,
-        fit(&query, columns.saturating_sub(10)),
+        5,
+        fit(&query, columns.saturating_sub(13)),
         theme.foreground,
         false,
         Some((columns - 6, "esc".into())),
@@ -171,6 +176,20 @@ pub(super) fn build(
     );
     let width_px = columns * cell.width_px();
     let height_px = height * cell.height_px();
+    let icon_size = (cell.height_px() * 3 / 4)
+        .min(cell.width_px() * 2)
+        .clamp(1, 512);
+    let image_surfaces = viewport
+        .icons
+        .rasterize(include_str!("../icons/search.svg"), icon_size, Some(muted))
+        .map(|icon| {
+            vec![icon.placement(
+                "command-palette-search",
+                cell.width_px() * 2,
+                cell.height_px() + cell.height_px().saturating_sub(icon_size) / 2,
+            )]
+        })
+        .unwrap_or_default();
     Some(WgpuTabBarSurface {
         placement: RenderSurfacePlacement::new(
             COMMAND_PALETTE_TARGET_ID,
@@ -185,7 +204,7 @@ pub(super) fn build(
             default_background: background,
             rows,
             dirty_rows: Vec::new(),
-            image_surfaces: Vec::new(),
+            image_surfaces,
             scrollback: None,
             cursor: None,
             ime_preedit: None,
@@ -435,12 +454,13 @@ mod tests {
                 TerminalWindowSize::new(width, height),
                 TerminalCellSize::new(12, 24),
             );
+            let mut viewport = CommandPaletteViewport::default();
             let surface = build(
                 &palette,
                 size,
                 TerminalColorTheme::default(),
                 1,
-                &mut CommandPaletteViewport::default(),
+                &mut viewport,
             )
             .unwrap();
             assert!(surface.placement.x_px + surface.placement.width_px <= width);
@@ -465,6 +485,27 @@ mod tests {
             let (query, cursor) = query_line(&palette, surface.placement.width_px / 12);
             assert!(query.contains("zho▏ng"));
             assert!(cursor < surface.placement.width_px / 12 - 1);
+            // Query changes reset scrolling, but must not trigger another SVG upload.
+            viewport.reset();
+            let reopened = build(
+                &CommandPaletteSnapshot {
+                    query: String::new(),
+                    ..palette.clone()
+                },
+                size,
+                TerminalColorTheme::default(),
+                2,
+                &mut viewport,
+            )
+            .unwrap();
+            let icon = &surface.snapshot.image_surfaces[0];
+            assert_eq!(
+                icon.image_generation,
+                reopened.snapshot.image_surfaces[0].image_generation
+            );
+            assert!(
+                icon.x_offset_px + icon.image_width_px <= surface.snapshot.rows[0].runs[0].x * 12
+            );
         }
     }
 }

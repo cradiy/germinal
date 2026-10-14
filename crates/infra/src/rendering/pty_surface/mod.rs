@@ -27,6 +27,7 @@ pub mod render_target_plan;
 pub mod renderer_backend;
 pub mod shader;
 pub mod surface_frame_presenter;
+mod svg_icon;
 mod terminal_scrollbar;
 mod text_shaping;
 pub mod viewport_bind_group;

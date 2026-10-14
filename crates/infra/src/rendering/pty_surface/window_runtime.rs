@@ -922,7 +922,7 @@ impl WgpuTerminalWindowRuntime {
         if self.command_palette.as_ref().map(|palette| &palette.query)
             != palette.as_ref().map(|palette| &palette.query)
         {
-            self.command_palette_viewport = Default::default();
+            self.command_palette_viewport.reset();
         }
         self.command_palette = palette;
         self.command_palette_generation = self.command_palette_generation.wrapping_add(1);
