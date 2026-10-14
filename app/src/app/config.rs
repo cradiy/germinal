@@ -737,6 +737,11 @@ impl Default for KeyboardConfig {
                     mods: "Alt|Shift".to_string(),
                     action: KeyboardAction::ResizePaneDown,
                 },
+                KeyboardBinding {
+                    key: "P".to_string(),
+                    mods: "Control|Shift".to_string(),
+                    action: KeyboardAction::CommandPalette,
+                },
             ],
         }
     }
@@ -816,6 +821,7 @@ pub struct KeyboardBinding {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
+    CommandPalette,
     NewWindow,
     ToggleViMode,
     ToggleSearch,
@@ -1040,7 +1046,10 @@ mod tests {
 
         let round_trip: GerminalConfig = toml::from_str(&contents).unwrap();
         assert!(round_trip.keyboard.use_default_bindings);
-        assert_eq!(round_trip.keyboard.bindings.len(), 27);
+        assert_eq!(
+            round_trip.keyboard.bindings.len(),
+            super::KeyboardConfig::default().bindings.len()
+        );
     }
 
     #[test]
@@ -1382,7 +1391,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.scrolling.history, 512);
-        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert_eq!(
+            config.keyboard.bindings.len(),
+            super::KeyboardConfig::default().bindings.len()
+        );
         assert_eq!(
             config.keyboard.bindings[1].action,
             KeyboardAction::ToggleViMode
@@ -1433,7 +1445,10 @@ mod tests {
         .unwrap();
 
         assert!(config.keyboard.use_default_bindings);
-        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert_eq!(
+            config.keyboard.bindings.len(),
+            super::KeyboardConfig::default().bindings.len()
+        );
         let binding = config
             .keyboard
             .bindings
@@ -1489,7 +1504,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert_eq!(
+            config.keyboard.bindings.len(),
+            super::KeyboardConfig::default().bindings.len()
+        );
         assert!(config.keyboard.bindings.iter().any(|binding| {
             binding.key == "D"
                 && binding.mods == "Control|Shift"
@@ -1514,7 +1532,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.keyboard.bindings.len(), 27);
+        assert_eq!(
+            config.keyboard.bindings.len(),
+            super::KeyboardConfig::default().bindings.len()
+        );
         assert!(config.keyboard.bindings.iter().any(|binding| {
             binding.key.eq_ignore_ascii_case("V") && binding.action == KeyboardAction::ToggleViMode
         }));

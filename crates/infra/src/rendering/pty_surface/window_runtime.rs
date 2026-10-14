@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use germinal_ports::rendering::command_palette::CommandPaletteSnapshot;
 use germinal_ports::{
     event::window_input_event::WindowPointerPosition,
     pty_host::{
@@ -34,6 +35,7 @@ use germinal_ports::{
     seq::Seq,
 };
 use thiserror::Error;
+mod command_palette;
 use tracing::{error, info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -154,6 +156,10 @@ pub struct WgpuTerminalWindowRuntime {
     tab_bar: Option<TabBarSnapshot>,
     tab_bar_surface: Option<WgpuTabBarSurface>,
     tab_bar_generation: u64,
+    command_palette: Option<CommandPaletteSnapshot>,
+    command_palette_generation: u64,
+    command_palette_viewport: command_palette::CommandPaletteViewport,
+    command_palette_cell_size: Option<TerminalCellSize>,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     scale_factor: TerminalScaleFactor,
@@ -789,6 +795,10 @@ impl WgpuTerminalWindowRuntime {
             tab_bar: None,
             tab_bar_surface: None,
             tab_bar_generation: 0,
+            command_palette: None,
+            command_palette_generation: 0,
+            command_palette_viewport: Default::default(),
+            command_palette_cell_size: None,
             size_info,
             profile,
             scale_factor,
@@ -902,9 +912,90 @@ impl WgpuTerminalWindowRuntime {
         true
     }
 
+    pub fn set_command_palette(&mut self, palette: Option<CommandPaletteSnapshot>) {
+        if palette.is_some()
+            && self.command_palette_cell_size.is_none()
+            && let Err(error) = self.prepare_palette_renderer()
+        {
+            warn!(%error, "failed to prepare command palette font");
+        }
+        if self.command_palette.as_ref().map(|palette| &palette.query)
+            != palette.as_ref().map(|palette| &palette.query)
+        {
+            self.command_palette_viewport = Default::default();
+        }
+        self.command_palette = palette;
+        self.command_palette_generation = self.command_palette_generation.wrapping_add(1);
+        self.invalidate_ime_cursor_area();
+        self.schedule_redraw();
+    }
+
+    pub fn update_command_palette_ime_area(&mut self) {
+        let size = self.command_palette_size_info();
+        let Some(palette) = self.command_palette.as_ref() else {
+            return;
+        };
+        let Some(surface) = command_palette::build(
+            palette,
+            size,
+            self.color_theme,
+            self.command_palette_generation,
+            &mut self.command_palette_viewport,
+        ) else {
+            return;
+        };
+        let cell = size.cell_size();
+        let column = command_palette::query_line(
+            palette,
+            surface.placement.width_px / cell.width_px().max(1),
+        )
+        .1;
+        let position = PhysicalPosition::new(
+            surface.placement.x_px + column * cell.width_px(),
+            surface.placement.y_px + cell.height_px(),
+        );
+        let size = PhysicalSize::new(cell.width_px(), cell.height_px());
+        if self
+            .ime_cursor_area_cache
+            .record_if_changed(surface.snapshot.target_id, position, size)
+        {
+            self.window.set_ime_cursor_area(position, size);
+        }
+    }
+
     pub fn set_ime_allowed(&mut self, allowed: bool) {
         self.ime_cursor_area_cache.invalidate();
         self.window.set_ime_allowed(allowed);
+    }
+
+    fn command_palette_size_info(&self) -> TerminalSizeInfo {
+        TerminalSizeInfo::zero_padding(
+            self.size_info.window_size(),
+            self.command_palette_cell_size
+                .unwrap_or(self.size_info.cell_size()),
+        )
+    }
+
+    fn prepare_palette_renderer(&mut self) -> Result<(), WindowRuntimeError> {
+        let font_px = self.profile.font_physical_px(self.scale_factor) * 0.8;
+        let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics_for_font_config(
+            self.profile.font_config(),
+            font_px,
+        )
+        .map_err(WindowRuntimeError::LoadCrossfontMetrics)?;
+        let cell = TerminalCellSize::new(metrics.cell_width_px(), metrics.cell_height_px());
+        let atlas = WgpuCrossfontGlyphAtlasBuilder::from_terminal_font_config(
+            self.profile.font_config(),
+            font_px,
+        )
+        .map_err(WindowRuntimeError::BuildGlyphAtlas)?;
+        let size = TerminalSizeInfo::zero_padding(self.size_info.window_size(), cell);
+        let builder = WgpuTerminalFrameBuilder::new(WgpuRendererConfig::from(size))
+            .with_crossfont_glyph_atlas_builder(atlas);
+        self.presenter
+            .set_palette_frame_renderer(Some(WgpuTerminalFrameRenderer::new(builder)));
+        self.command_palette_cell_size = Some(cell);
+        Ok(())
     }
 
     pub fn invalidate_ime_cursor_area(&mut self) {
@@ -1166,6 +1257,11 @@ impl WgpuTerminalWindowRuntime {
         self.profile = profile;
         self.scale_factor = scale_factor;
         self.size_info = size_info;
+        self.command_palette_cell_size = None;
+        self.presenter.set_palette_frame_renderer(None);
+        if self.command_palette.is_some() {
+            self.prepare_palette_renderer()?;
+        }
         self.ime_cursor_area_cache.invalidate();
         self.rebuild_tab_bar_surface();
 
@@ -1397,6 +1493,34 @@ impl WgpuTerminalWindowRuntime {
                     .with_color_theme(self.color_theme)
                     .with_background_opacity(terminal_background_opacity)
                     .with_blinking_cursor_visible(blinking_cursor_visible),
+                hyperlink_highlights: &[],
+            });
+        }
+        let palette_size = self.command_palette_size_info();
+        let palette_surface = self.command_palette.as_ref().and_then(|palette| {
+            command_palette::build(
+                palette,
+                palette_size,
+                self.color_theme,
+                self.command_palette_generation,
+                &mut self.command_palette_viewport,
+            )
+        });
+        if let Some(overlay) = palette_surface.as_ref() {
+            surfaces.push(WgpuTerminalWorkspaceSurface {
+                render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                    overlay.placement.width_px,
+                    overlay.placement.height_px,
+                )
+                .with_origin(overlay.placement.x_px, overlay.placement.y_px)
+                .with_load_op(WgpuTerminalLoadOp::Load),
+                surface_snapshot: &overlay.snapshot,
+                renderer_config: WgpuRendererConfig::from(TerminalSizeInfo::zero_padding(
+                    overlay.placement.window_size(),
+                    palette_size.cell_size(),
+                ))
+                .with_color_theme(self.color_theme)
+                .with_background_opacity(0.0),
                 hyperlink_highlights: &[],
             });
         }

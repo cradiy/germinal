@@ -6,6 +6,7 @@ pub mod frame_plan_presenter;
 
 pub mod render_target_id;
 
+pub mod command_palette;
 pub mod surface_snapshot;
 pub mod surface_snapshot_mailbox;
 pub mod tab_bar;

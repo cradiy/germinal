@@ -28,6 +28,8 @@ pub struct WgpuTerminalSurfaceFramePresenter {
     divider_renderer: WgpuWorkspaceDividerRenderer,
     visual_bell_renderer: WgpuVisualBellRenderer,
     retained_frame: RefCell<Option<WgpuRetainedWorkspaceFrame>>,
+    palette_chrome: RefCell<Option<super::palette_chrome::PaletteChrome>>,
+    palette_frame_renderer: Option<WgpuTerminalFrameRenderer>,
 }
 
 impl WgpuTerminalSurfaceFramePresenter {
@@ -42,6 +44,8 @@ impl WgpuTerminalSurfaceFramePresenter {
             divider_renderer,
             visual_bell_renderer,
             retained_frame: RefCell::new(None),
+            palette_chrome: RefCell::new(None),
+            palette_frame_renderer: None,
         }
     }
 
@@ -56,6 +60,13 @@ impl WgpuTerminalSurfaceFramePresenter {
 
     pub fn frame_renderer_mut(&mut self) -> &mut WgpuTerminalFrameRenderer {
         &mut self.frame_renderer
+    }
+
+    pub(super) fn set_palette_frame_renderer(
+        &mut self,
+        renderer: Option<WgpuTerminalFrameRenderer>,
+    ) {
+        self.palette_frame_renderer = renderer;
     }
 
     pub fn present_workspace_frame(
@@ -168,10 +179,14 @@ impl WgpuTerminalSurfaceFramePresenter {
         let render_to_view_started_at = Instant::now();
         let damage = retained_action.and_then(WgpuRetainedFrameAction::renderer_damage);
         let vertical_bounds = damage.map(WgpuRendererDamage::vertical_bounds);
-        let render_results = input
+        let mut render_results: Vec<_> = input
             .surfaces
             .iter()
             .filter(|_| retained_action != Some(WgpuRetainedFrameAction::Reuse))
+            .filter(|surface| {
+                surface.surface_snapshot.target_id
+                    != germinal_ports::rendering::command_palette::COMMAND_PALETTE_TARGET_ID
+            })
             .map(|surface| {
                 let render_target_plan =
                     vertical_bounds.map_or(surface.render_target_plan, |(top_px, bottom_px)| {
@@ -239,6 +254,44 @@ impl WgpuTerminalSurfaceFramePresenter {
             self.visual_bell_renderer
                 .encode(&mut command_encoder, &target_view, frame)
         });
+        for surface in input.surfaces.iter().filter(|surface| {
+            surface.surface_snapshot.target_id
+                == germinal_ports::rendering::command_palette::COMMAND_PALETTE_TARGET_ID
+        }) {
+            self.palette_chrome
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    super::palette_chrome::PaletteChrome::new(input.device, input.color_format)
+                })
+                .encode(
+                    input.device,
+                    &mut command_encoder,
+                    &target_view,
+                    [input.width_px, input.height_px],
+                    surface,
+                );
+            render_results.push(
+                self.palette_frame_renderer
+                    .as_ref()
+                    .unwrap_or(&self.frame_renderer)
+                    .render_to_view(
+                        WgpuTerminalGpuContext {
+                            device: input.device,
+                            queue: input.queue,
+                        },
+                        WgpuTerminalRenderView {
+                            command_encoder: &mut command_encoder,
+                            target_view: &target_view,
+                            render_target_plan: surface.render_target_plan,
+                            pipeline: input.pipeline,
+                            surface_snapshot: surface.surface_snapshot,
+                            renderer_config: surface.renderer_config,
+                            damage: None,
+                            hyperlink_highlights: &[],
+                        },
+                    ),
+            );
+        }
         let render_to_view = render_to_view_started_at.elapsed();
 
         if let Some(cache) = retained_frame.as_mut() {

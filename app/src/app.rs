@@ -8,6 +8,7 @@ use std::{
 
 mod audible_bell;
 mod boilerplate;
+mod command_palette;
 mod config;
 mod error;
 mod logging;
@@ -125,6 +126,9 @@ pub struct App {
     pending_hyperlink_activation: Option<PendingHyperlinkActivation>,
     tab_pointer_consumed: bool,
     pane_navigation_enabled: bool,
+    command_palette: Option<command_palette::CommandPalette>,
+    palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
+    palette_consumed_buttons: HashSet<MouseButton>,
     config: GerminalConfig,
 }
 
@@ -234,6 +238,9 @@ impl App {
             ),
             render_runtime_factory,
             render_runtime: None,
+            command_palette: None,
+            palette_consumed_keys: HashSet::new(),
+            palette_consumed_buttons: HashSet::new(),
             pending_wgpu_pane_plugins: wgpu_pane_plugins,
             wgpu_pane_targets,
             render_window_id: None,
@@ -743,98 +750,102 @@ impl App {
         }
 
         if state == WindowInputElementState::Pressed {
-            match action {
-                KeyboardAction::NewWindow => self.create_window(),
-                KeyboardAction::ToggleViMode => {
-                    let gshell_id = self.focused_gshell();
-                    self.clear_ime_preedit(gshell_id);
-                    self.route_input_to_gshell(GShellInput {
-                        gshell_id,
-                        event: GShellInputEvent::ToggleViMode,
-                    });
-                    // Consume the shortcut chord immediately. On some Wayland
-                    // compositor/input-stack combinations, modifier releases
-                    // arrive late or not at all; carrying Ctrl into the first
-                    // Vi key turns `d` into terminal Ctrl+D (EOF) and can close
-                    // the last shell before Vi visibly updates.
-                    self.reset_input_modifiers();
-                }
-                KeyboardAction::ToggleSearch => {
-                    let gshell_id = self.focused_gshell();
-                    self.clear_ime_preedit(gshell_id);
-                    self.route_input_to_gshell(GShellInput {
-                        gshell_id,
-                        event: GShellInputEvent::ToggleSearch,
-                    });
-                }
-                KeyboardAction::Copy => {
-                    self.route_input_to_gshell(GShellInput {
-                        gshell_id: self.focused_gshell(),
-                        event: GShellInputEvent::CopySelection,
-                    });
-                }
-                KeyboardAction::Paste => {
-                    self.paste_controller.request_clipboard_paste(
-                        self.focused_gshell(),
-                        self.runtime_event_dispatcher.clone(),
-                    );
-                }
-                KeyboardAction::NewTab => self.create_workspace_tab(),
-                KeyboardAction::NextTab => self.activate_next_workspace_tab(),
-                KeyboardAction::PreviousTab => self.activate_previous_workspace_tab(),
-                KeyboardAction::MoveTabLeft => self.move_active_workspace_tab_left(),
-                KeyboardAction::MoveTabRight => self.move_active_workspace_tab_right(),
-                KeyboardAction::SplitHorizontal => {
-                    self.split_focused_workspace_pane(PaneSplitDirection::Horizontal);
-                }
-                KeyboardAction::SplitVertical => {
-                    self.split_focused_workspace_pane(PaneSplitDirection::Vertical);
-                }
-                KeyboardAction::FocusNextPane => {
-                    let previous_gshell = self.focused_gshell();
-                    let focused_gshell = self.focus_next_gshell();
-                    self.apply_gshell_focus_change(previous_gshell, focused_gshell);
-                }
-                KeyboardAction::FocusPreviousPane => {
-                    let previous_gshell = self.focused_gshell();
-                    let focused_gshell = self.focus_previous_gshell();
-                    self.apply_gshell_focus_change(previous_gshell, focused_gshell);
-                }
-                KeyboardAction::FocusPaneLeft => self.focus_workspace_pane(PaneDirection::Left),
-                KeyboardAction::FocusPaneRight => self.focus_workspace_pane(PaneDirection::Right),
-                KeyboardAction::FocusPaneUp => self.focus_workspace_pane(PaneDirection::Up),
-                KeyboardAction::FocusPaneDown => self.focus_workspace_pane(PaneDirection::Down),
-                KeyboardAction::ClosePane => {
-                    self.close_workspace_gshell(event_loop, self.focused_gshell());
-                }
-                KeyboardAction::SwapPaneLeft => {
-                    self.swap_focused_workspace_pane(PaneDirection::Left);
-                }
-                KeyboardAction::SwapPaneRight => {
-                    self.swap_focused_workspace_pane(PaneDirection::Right);
-                }
-                KeyboardAction::SwapPaneUp => {
-                    self.swap_focused_workspace_pane(PaneDirection::Up);
-                }
-                KeyboardAction::SwapPaneDown => {
-                    self.swap_focused_workspace_pane(PaneDirection::Down);
-                }
-                KeyboardAction::ResizePaneLeft => {
-                    self.resize_focused_workspace_pane(PaneResizeDirection::Left);
-                }
-                KeyboardAction::ResizePaneRight => {
-                    self.resize_focused_workspace_pane(PaneResizeDirection::Right);
-                }
-                KeyboardAction::ResizePaneUp => {
-                    self.resize_focused_workspace_pane(PaneResizeDirection::Up);
-                }
-                KeyboardAction::ResizePaneDown => {
-                    self.resize_focused_workspace_pane(PaneResizeDirection::Down);
-                }
+            self.execute_keyboard_action(event_loop, action);
+        }
+        true
+    }
+
+    fn execute_keyboard_action(&mut self, event_loop: &ActiveEventLoop, action: KeyboardAction) {
+        match action {
+            KeyboardAction::CommandPalette => self.open_command_palette(),
+            KeyboardAction::NewWindow => self.create_window(),
+            KeyboardAction::ToggleViMode => {
+                let gshell_id = self.focused_gshell();
+                self.clear_ime_preedit(gshell_id);
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id,
+                    event: GShellInputEvent::ToggleViMode,
+                });
+                // Consume the shortcut chord immediately. On some Wayland
+                // compositor/input-stack combinations, modifier releases
+                // arrive late or not at all; carrying Ctrl into the first
+                // Vi key turns `d` into terminal Ctrl+D (EOF) and can close
+                // the last shell before Vi visibly updates.
+                self.reset_input_modifiers();
+            }
+            KeyboardAction::ToggleSearch => {
+                let gshell_id = self.focused_gshell();
+                self.clear_ime_preedit(gshell_id);
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id,
+                    event: GShellInputEvent::ToggleSearch,
+                });
+            }
+            KeyboardAction::Copy => {
+                self.route_input_to_gshell(GShellInput {
+                    gshell_id: self.focused_gshell(),
+                    event: GShellInputEvent::CopySelection,
+                });
+            }
+            KeyboardAction::Paste => {
+                self.paste_controller.request_clipboard_paste(
+                    self.focused_gshell(),
+                    self.runtime_event_dispatcher.clone(),
+                );
+            }
+            KeyboardAction::NewTab => self.create_workspace_tab(),
+            KeyboardAction::NextTab => self.activate_next_workspace_tab(),
+            KeyboardAction::PreviousTab => self.activate_previous_workspace_tab(),
+            KeyboardAction::MoveTabLeft => self.move_active_workspace_tab_left(),
+            KeyboardAction::MoveTabRight => self.move_active_workspace_tab_right(),
+            KeyboardAction::SplitHorizontal => {
+                self.split_focused_workspace_pane(PaneSplitDirection::Horizontal);
+            }
+            KeyboardAction::SplitVertical => {
+                self.split_focused_workspace_pane(PaneSplitDirection::Vertical);
+            }
+            KeyboardAction::FocusNextPane => {
+                let previous_gshell = self.focused_gshell();
+                let focused_gshell = self.focus_next_gshell();
+                self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+            }
+            KeyboardAction::FocusPreviousPane => {
+                let previous_gshell = self.focused_gshell();
+                let focused_gshell = self.focus_previous_gshell();
+                self.apply_gshell_focus_change(previous_gshell, focused_gshell);
+            }
+            KeyboardAction::FocusPaneLeft => self.focus_workspace_pane(PaneDirection::Left),
+            KeyboardAction::FocusPaneRight => self.focus_workspace_pane(PaneDirection::Right),
+            KeyboardAction::FocusPaneUp => self.focus_workspace_pane(PaneDirection::Up),
+            KeyboardAction::FocusPaneDown => self.focus_workspace_pane(PaneDirection::Down),
+            KeyboardAction::ClosePane => {
+                self.close_workspace_gshell(event_loop, self.focused_gshell());
+            }
+            KeyboardAction::SwapPaneLeft => {
+                self.swap_focused_workspace_pane(PaneDirection::Left);
+            }
+            KeyboardAction::SwapPaneRight => {
+                self.swap_focused_workspace_pane(PaneDirection::Right);
+            }
+            KeyboardAction::SwapPaneUp => {
+                self.swap_focused_workspace_pane(PaneDirection::Up);
+            }
+            KeyboardAction::SwapPaneDown => {
+                self.swap_focused_workspace_pane(PaneDirection::Down);
+            }
+            KeyboardAction::ResizePaneLeft => {
+                self.resize_focused_workspace_pane(PaneResizeDirection::Left);
+            }
+            KeyboardAction::ResizePaneRight => {
+                self.resize_focused_workspace_pane(PaneResizeDirection::Right);
+            }
+            KeyboardAction::ResizePaneUp => {
+                self.resize_focused_workspace_pane(PaneResizeDirection::Up);
+            }
+            KeyboardAction::ResizePaneDown => {
+                self.resize_focused_workspace_pane(PaneResizeDirection::Down);
             }
         }
-
-        true
     }
 
     fn effective_input_modifiers(&self) -> WindowInputModifiers {
@@ -1037,6 +1048,10 @@ impl App {
         let Some(runtime) = self.render_runtime.as_mut() else {
             return;
         };
+        if self.command_palette.is_some() {
+            runtime.update_command_palette_ime_area();
+            return;
+        }
         let _ = runtime.update_ime_cursor_area(target_id);
     }
 
@@ -1550,6 +1565,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
         };
 
         if window_id != current_window_id {
+            return;
+        }
+
+        if self.handle_command_palette_event(event_loop, &event) {
             return;
         }
 
