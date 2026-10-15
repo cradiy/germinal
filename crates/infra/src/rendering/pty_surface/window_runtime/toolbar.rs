@@ -6,6 +6,7 @@ use germinal_ports::rendering::toolbar::{
 
 #[derive(Default)]
 pub(super) struct Toolbar {
+    pub sidebar_width: Option<u32>,
     pub config: Option<ToolbarConfig>,
     pub hovered: Option<ToolbarAction>,
     icons: SvgIconCache,
@@ -28,10 +29,12 @@ impl Toolbar {
         let width = size.window_size().width_px();
         let background = theme.background;
         let sidebar_width = if config.sidebar {
-            germinal_ports::rendering::tab_bar::sidebar_width_px(
-                width,
-                size.cell_size().height_px(),
-            )
+            self.sidebar_width.unwrap_or_else(|| {
+                germinal_ports::rendering::tab_bar::sidebar_width_px(
+                    width,
+                    size.cell_size().height_px(),
+                )
+            })
         } else {
             0
         };
@@ -39,7 +42,7 @@ impl Toolbar {
         let mut images = Vec::new();
         let mut runs = Vec::new();
         let mut sidebar_hover = None;
-        for button in toolbar_buttons(config, width, height, size.cell_size().height_px(), scale) {
+        for button in toolbar_buttons(config, width, height, sidebar_width, scale) {
             let button_background = if button.x < sidebar_width {
                 sidebar_background
             } else {
@@ -47,9 +50,13 @@ impl Toolbar {
             };
             let muted = mix_rgb(button_background, theme.foreground, 65, 100);
             let (id, svg) = match button.action {
-                ToolbarAction::CommandPalette => {
-                    ("commands", include_str!("../icons/terminal.svg"))
-                }
+                ToolbarAction::CommandPalette => (
+                    "commands",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../packaging/linux/io.github.cradiy.Germinal.svg"
+                    )),
+                ),
                 ToolbarAction::NewTab => ("new-tab", include_str!("../icons/plus.svg")),
                 ToolbarAction::ToggleSidebar => ("sidebar", include_str!("../icons/sidebar.svg")),
                 ToolbarAction::Minimize => ("minimize", include_str!("../icons/minimize.svg")),
@@ -98,7 +105,13 @@ impl Toolbar {
                 });
             }
             let icon_size = scale
-                .physical_px_from_logical_px(if linux_control { 12 } else { 16 })
+                .physical_px_from_logical_px(if button.action == ToolbarAction::CommandPalette {
+                    20
+                } else if linux_control {
+                    12
+                } else {
+                    16
+                })
                 .clamp(1, 512)
                 .min(button.width)
                 .min(button.height);
@@ -107,7 +120,8 @@ impl Toolbar {
             } else {
                 muted
             };
-            if let Ok(icon) = self.icons.rasterize(svg, icon_size, Some(color)) {
+            let tint = (button.action != ToolbarAction::CommandPalette).then_some(color);
+            if let Ok(icon) = self.icons.rasterize(svg, icon_size, tint) {
                 images.push(icon.placement(
                     id,
                     button.x + (button.width - icon_size) / 2,

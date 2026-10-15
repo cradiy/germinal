@@ -52,6 +52,7 @@ fn run() -> eros::Result<()> {
         .context("failed to create Germinal event loop")?;
     let mut app = app::App::new(event_loop.create_proxy(), config)
         .context("failed to create Germinal app")?;
+    app.restore_ui_state(paths.ui_state_file());
 
     info!("starting Germinal");
     app.run(event_loop).context("failed to run Germinal")?;

@@ -1,4 +1,4 @@
-use super::{render_target_id::RenderTargetId, tab_bar::sidebar_width_px};
+use super::render_target_id::RenderTargetId;
 use crate::pty_host::scale_factor::TerminalScaleFactor;
 
 pub const TOOLBAR_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX - 3);
@@ -38,7 +38,7 @@ pub fn toolbar_buttons(
     config: ToolbarConfig,
     width: u32,
     height: u32,
-    cell_height: u32,
+    sidebar: u32,
     scale: TerminalScaleFactor,
 ) -> Vec<ToolbarButton> {
     if height == 0 {
@@ -66,7 +66,6 @@ pub fn toolbar_buttons(
     } else {
         width
     };
-    let sidebar = sidebar_width_px(width, cell_height);
     for (action, x) in [
         (ToolbarAction::CommandPalette, 0),
         (
@@ -159,7 +158,7 @@ mod tests {
                         },
                         width,
                         30,
-                        24,
+                        super::super::tab_bar::sidebar_width_px(width, 24),
                         TerminalScaleFactor::DEFAULT,
                     );
                     for (i, b) in buttons.iter().enumerate() {

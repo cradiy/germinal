@@ -5,6 +5,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Default)]
 pub(super) struct TabSidebar {
+    pub(super) width: Option<u32>,
     first: usize,
     active: Option<usize>,
     visible: usize,
@@ -34,7 +35,9 @@ impl TabSidebar {
         }
         let cw = cell.width_px().max(1);
         let ch = cell.height_px().max(1);
-        let width = sidebar_width_px(size.window_size().width_px(), size.cell_size().height_px());
+        let width = self.width.unwrap_or_else(|| {
+            sidebar_width_px(size.window_size().width_px(), size.cell_size().height_px())
+        });
         let height = size.window_size().height_px();
         if width == 0 || height == 0 {
             return None;
@@ -242,6 +245,12 @@ mod tests {
         assert_eq!(image_count, plain.snapshot.image_surfaces.len() + 1);
         assert_eq!(plain.snapshot.rows[0].runs[1].text, *title);
         assert!(!plain.snapshot.rows[0].runs[0].style.italic);
+        state.width = Some(336);
+        state.pointer = Some((306.0, 48.0));
+        let resized = build(&mut state);
+        assert_eq!(resized.sidebar_close_at_position(210.0, 48.0), None);
+        assert_eq!(resized.sidebar_close_at_position(306.0, 48.0), Some(0));
+        assert_eq!(resized.tab_index_at_position(337.0, 48.0), None);
     }
 
     #[test]

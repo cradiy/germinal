@@ -199,6 +199,7 @@ pub struct WgpuTerminalWindowRuntime {
     render_plugins: Vec<WgpuPaneRenderPlugin>,
     scrollbar_drag: Option<(RenderTargetId, WgpuTerminalScrollbarDrag)>,
     hovered_terminal_hyperlinks: Option<(RenderTargetId, Vec<TerminalHyperlink>)>,
+    sidebar_resize_cursor: bool,
     started_at: Instant,
 }
 
@@ -841,6 +842,7 @@ impl WgpuTerminalWindowRuntime {
             render_plugins,
             scrollbar_drag: None,
             hovered_terminal_hyperlinks: None,
+            sidebar_resize_cursor: false,
             started_at: now,
         })
     }
@@ -858,11 +860,23 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_pointer_over_hyperlink(&self, pointer_over_hyperlink: bool) {
-        self.window.set_cursor(if pointer_over_hyperlink {
+        self.window.set_cursor(if self.sidebar_resize_cursor {
+            CursorIcon::ColResize
+        } else if pointer_over_hyperlink {
             CursorIcon::Pointer
         } else {
             CursorIcon::Default
         });
+    }
+
+    pub fn set_sidebar_resize_cursor(&mut self, resizing: bool) {
+        self.sidebar_resize_cursor = resizing;
+        self.set_pointer_over_hyperlink(self.hovered_terminal_hyperlinks.is_some());
+    }
+
+    pub fn set_sidebar_width(&mut self, width: u32) {
+        self.tab_sidebar.width = Some(width);
+        self.toolbar.sidebar_width = Some(width);
     }
 
     pub fn set_hovered_terminal_hyperlinks(
@@ -1233,7 +1247,12 @@ impl WgpuTerminalWindowRuntime {
                 config,
                 size.window_size().width_px(),
                 height,
-                size.cell_size().height_px(),
+                self.toolbar.sidebar_width.unwrap_or_else(|| {
+                    germinal_ports::rendering::tab_bar::sidebar_width_px(
+                        size.window_size().width_px(),
+                        size.cell_size().height_px(),
+                    )
+                }),
                 self.scale_factor,
             ),
             height,

@@ -153,6 +153,9 @@ impl CommandPalette {
 
 impl App {
     pub(super) fn open_command_palette(&mut self) {
+        if self.finish_sidebar_resize() {
+            self.palette_consumed_buttons.insert(MouseButton::Left);
+        }
         self.clear_ime_preedit(self.focused_gshell());
         self.pointer_capture = None;
         self.pending_hyperlink_activation = None;
@@ -162,6 +165,7 @@ impl App {
             self.tab_count() > 1,
         ));
         if let Some(runtime) = self.render_runtime.as_mut() {
+            runtime.set_sidebar_resize_cursor(false);
             runtime.end_terminal_scrollbar_drag();
             runtime.set_hovered_terminal_hyperlinks(None);
         }
@@ -398,7 +402,7 @@ mod tests {
                         },
                         size.width_px(),
                         h,
-                        cell.height_px(),
+                        self.app.sidebar_width(size.width_px()),
                         self.app
                             .render_runtime
                             .as_ref()

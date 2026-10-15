@@ -66,6 +66,10 @@ impl AppPaths {
     pub fn log_dir(&self) -> &Path {
         &self.log_dir
     }
+
+    pub fn ui_state_file(&self) -> PathBuf {
+        self.log_dir.with_file_name("ui-state.toml")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

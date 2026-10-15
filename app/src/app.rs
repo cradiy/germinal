@@ -13,6 +13,7 @@ mod config;
 mod error;
 mod logging;
 mod paste;
+mod sidebar;
 
 use audible_bell::AudibleBell;
 pub use config::{GerminalConfig, load_or_create_config};
@@ -126,6 +127,7 @@ pub struct App {
     pending_hyperlink_activation: Option<PendingHyperlinkActivation>,
     tab_pointer_consumed: bool,
     sidebar_close_pressed: Option<GShellId>,
+    sidebar_resize: sidebar::SidebarResize,
     pane_navigation_enabled: bool,
     command_palette: Option<command_palette::CommandPalette>,
     palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
@@ -223,6 +225,7 @@ impl App {
         };
 
         let app = Self {
+            sidebar_resize: sidebar::SidebarResize::default(),
             toolbar_pressed: None,
             toolbar_pointer_consumed: false,
             horizontal_tab_position: if config.tabs.position == TabBarPosition::Left {
@@ -399,6 +402,13 @@ impl App {
             self.config.tabs.position,
         );
         layout.y_px += toolbar;
+        if self.config.tabs.position == TabBarPosition::Left {
+            layout.x_px = self.sidebar_width(window_size.width_px());
+            layout.content_size = TerminalWindowSize::new(
+                window_size.width_px().saturating_sub(layout.x_px).max(1),
+                layout.content_size.height_px(),
+            );
+        }
         self.workspace_render_layout(layout.content_size)
             .into_iter()
             .map(|placement| {
@@ -414,6 +424,9 @@ impl App {
     }
 
     fn set_current_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        let sidebar_width =
+            self.sidebar_width(self.current_terminal_size_info().window_size().width_px());
+        let resizing = self.sidebar_resize.is_dragging() || self.sidebar_edge_at_cursor();
         let toolbar = self.modern_toolbar_visible().then_some(
             germinal_ports::rendering::toolbar::ToolbarConfig {
                 sidebar: self.config.tabs.position == TabBarPosition::Left,
@@ -421,6 +434,8 @@ impl App {
             },
         );
         if let Some(runtime) = self.render_runtime.as_mut() {
+            runtime.set_sidebar_width(sidebar_width);
+            runtime.set_sidebar_resize_cursor(resizing);
             runtime.set_toolbar(toolbar);
         }
         let visible_gshells = placements
@@ -800,6 +815,9 @@ impl App {
     fn execute_keyboard_action(&mut self, event_loop: &ActiveEventLoop, action: KeyboardAction) {
         match action {
             KeyboardAction::ToggleToolbar => {
+                if self.finish_sidebar_resize() {
+                    self.tab_pointer_consumed = true;
+                }
                 let was_visible = self.modern_toolbar_visible();
                 self.config.window.toolbar = !was_visible;
                 if was_visible && self.config.tabs.position == TabBarPosition::Left {
@@ -809,6 +827,9 @@ impl App {
                 self.update_ime_cursor_area();
             }
             KeyboardAction::ToggleTabSidebar => {
+                if self.finish_sidebar_resize() {
+                    self.tab_pointer_consumed = true;
+                }
                 self.config.window.toolbar = true;
                 if self.config.tabs.position == TabBarPosition::Left {
                     self.config.tabs.position = self.horizontal_tab_position;
@@ -1737,6 +1758,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if self.window_focused != focused {
                     self.window_focused = focused;
                     if !focused {
+                        self.finish_sidebar_resize();
+                        if let Some(runtime) = self.render_runtime.as_mut() {
+                            runtime.set_sidebar_resize_cursor(false);
+                        }
                         self.toolbar_pressed = None;
                         self.toolbar_pointer_consumed = false;
                     }
@@ -1792,11 +1817,18 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
+                if self.move_sidebar_resize(position) {
+                    return;
+                }
+                let sidebar_edge = self.sidebar_edge_at_cursor();
                 if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.set_sidebar_resize_cursor(sidebar_edge);
                     runtime.hover_toolbar(Some((position.x, position.y)));
                     runtime.hover_tab_sidebar(Some((position.x, position.y)));
                 }
-                if !self.try_update_terminal_scrollbar_drag(position) {
+                if sidebar_edge && self.pointer_capture.is_none() {
+                    self.route_pointer_left();
+                } else if !self.try_update_terminal_scrollbar_drag(position) {
                     self.route_pointer_moved(position);
                 }
                 self.sync_terminal_hyperlink_cursor();
@@ -1804,6 +1836,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_position = None;
                 if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.set_sidebar_resize_cursor(self.sidebar_resize.is_dragging());
                     runtime.hover_toolbar(None);
                     runtime.hover_tab_sidebar(None);
                     runtime.set_hovered_terminal_hyperlinks(None);
@@ -1814,6 +1847,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
+                    if self.handle_sidebar_resize_button(state) {
+                        return;
+                    }
                     if self.handle_toolbar_button(event_loop, state) {
                         return;
                     }
@@ -1861,6 +1897,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.route_pointer_button(state, button);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.sidebar_resize.is_dragging() {
+                    return;
+                }
                 if let Some(position) = self.cursor_position {
                     let vertical = match delta {
                         MouseScrollDelta::LineDelta(_, y) => f64::from(y),
