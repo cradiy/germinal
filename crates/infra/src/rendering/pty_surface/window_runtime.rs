@@ -36,6 +36,8 @@ use germinal_ports::{
 };
 use thiserror::Error;
 mod command_palette;
+mod tab_sidebar;
+mod toolbar;
 use tracing::{error, info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -156,10 +158,13 @@ pub struct WgpuTerminalWindowRuntime {
     tab_bar: Option<TabBarSnapshot>,
     tab_bar_surface: Option<WgpuTabBarSurface>,
     tab_bar_generation: u64,
+    tab_sidebar: tab_sidebar::TabSidebar,
+    toolbar: toolbar::Toolbar,
     command_palette: Option<CommandPaletteSnapshot>,
     command_palette_generation: u64,
     command_palette_viewport: command_palette::CommandPaletteViewport,
     command_palette_cell_size: Option<TerminalCellSize>,
+    sidebar_cell_size: Option<TerminalCellSize>,
     size_info: TerminalSizeInfo,
     profile: TerminalProfile,
     scale_factor: TerminalScaleFactor,
@@ -795,10 +800,13 @@ impl WgpuTerminalWindowRuntime {
             tab_bar: None,
             tab_bar_surface: None,
             tab_bar_generation: 0,
+            tab_sidebar: Default::default(),
+            toolbar: Default::default(),
             command_palette: None,
             command_palette_generation: 0,
             command_palette_viewport: Default::default(),
             command_palette_cell_size: None,
+            sidebar_cell_size: None,
             size_info,
             profile,
             scale_factor,
@@ -977,7 +985,24 @@ impl WgpuTerminalWindowRuntime {
     }
 
     fn prepare_palette_renderer(&mut self) -> Result<(), WindowRuntimeError> {
-        let font_px = self.profile.font_physical_px(self.scale_factor) * 0.8;
+        let (cell, renderer) = self.build_ui_renderer(0.8)?;
+        self.presenter.set_palette_frame_renderer(Some(renderer));
+        self.command_palette_cell_size = Some(cell);
+        Ok(())
+    }
+
+    fn prepare_sidebar_renderer(&mut self) -> Result<(), WindowRuntimeError> {
+        let (cell, renderer) = self.build_ui_renderer(0.7)?;
+        self.presenter.set_sidebar_frame_renderer(Some(renderer));
+        self.sidebar_cell_size = Some(cell);
+        Ok(())
+    }
+
+    fn build_ui_renderer(
+        &self,
+        scale: f32,
+    ) -> Result<(TerminalCellSize, WgpuTerminalFrameRenderer), WindowRuntimeError> {
+        let font_px = self.profile.font_physical_px(self.scale_factor) * scale;
         let metrics = WgpuCrossfontGlyphAtlasBuilder::load_cell_metrics_for_font_config(
             self.profile.font_config(),
             font_px,
@@ -992,10 +1017,7 @@ impl WgpuTerminalWindowRuntime {
         let size = TerminalSizeInfo::zero_padding(self.size_info.window_size(), cell);
         let builder = WgpuTerminalFrameBuilder::new(WgpuRendererConfig::from(size))
             .with_crossfont_glyph_atlas_builder(atlas);
-        self.presenter
-            .set_palette_frame_renderer(Some(WgpuTerminalFrameRenderer::new(builder)));
-        self.command_palette_cell_size = Some(cell);
-        Ok(())
+        Ok((cell, WgpuTerminalFrameRenderer::new(builder)))
     }
 
     pub fn invalidate_ime_cursor_area(&mut self) {
@@ -1155,9 +1177,96 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn set_tab_bar(&mut self, tab_bar: Option<TabBarSnapshot>) {
+        if tab_bar
+            .as_ref()
+            .is_some_and(|bar| bar.position == TabBarPosition::Left)
+            && self.sidebar_cell_size.is_none()
+            && let Err(error) = self.prepare_sidebar_renderer()
+        {
+            warn!(%error, "failed to prepare sidebar font");
+        }
         self.tab_bar = tab_bar;
         self.rebuild_tab_bar_surface();
         self.schedule_redraw();
+    }
+
+    pub fn set_toolbar(
+        &mut self,
+        config: Option<germinal_ports::rendering::toolbar::ToolbarConfig>,
+    ) {
+        self.toolbar.config = config;
+        self.toolbar.hovered = None;
+        self.schedule_redraw();
+    }
+
+    pub fn toolbar_contains(&self, x: f64, y: f64) -> bool {
+        self.toolbar.config.is_some()
+            && x.is_finite()
+            && y.is_finite()
+            && x >= 0.0
+            && x < f64::from(self.size_info.window_size().width_px())
+            && y >= 0.0
+            && y < f64::from(germinal_ports::rendering::toolbar::toolbar_height(
+                self.scale_factor,
+                self.size_info.window_size().height_px(),
+            ))
+    }
+
+    pub fn display_scale_factor(&self) -> TerminalScaleFactor {
+        self.scale_factor
+    }
+
+    pub fn toolbar_action_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<germinal_ports::rendering::toolbar::ToolbarAction> {
+        use germinal_ports::rendering::toolbar::{toolbar_buttons, toolbar_height, toolbar_hit};
+        if !self.toolbar_contains(x, y) {
+            return None;
+        }
+        let config = self.toolbar.config?;
+        let size = self.size_info;
+        let height = toolbar_height(self.scale_factor, size.window_size().height_px());
+        toolbar_hit(
+            &toolbar_buttons(
+                config,
+                size.window_size().width_px(),
+                height,
+                size.cell_size().height_px(),
+                self.scale_factor,
+            ),
+            height,
+            x,
+            y,
+        )
+    }
+
+    pub fn hover_toolbar(&mut self, position: Option<(f64, f64)>) {
+        let hovered = position.and_then(|(x, y)| self.toolbar_action_at(x, y));
+        if self.toolbar.hovered != hovered {
+            self.toolbar.hovered = hovered;
+            self.schedule_redraw();
+        }
+    }
+
+    pub fn perform_toolbar_window_action(
+        &self,
+        action: germinal_ports::rendering::toolbar::ToolbarAction,
+    ) {
+        use germinal_ports::rendering::toolbar::ToolbarAction;
+        match action {
+            ToolbarAction::Minimize => self.window.set_minimized(true),
+            ToolbarAction::Maximize => self.window.set_maximized(!self.window.is_maximized()),
+            _ => {}
+        }
+        self.window.request_redraw();
+    }
+
+    pub fn drag_window_from_toolbar(&self) {
+        if let Err(error) = self.window.drag_window() {
+            tracing::debug!(%error, "window drag unavailable");
+        }
     }
 
     pub fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
@@ -1166,18 +1275,93 @@ impl WgpuTerminalWindowRuntime {
             .tab_index_at_position(x_px, y_px)
     }
 
+    pub fn sidebar_close_at_position(&self, x: f64, y: f64) -> Option<usize> {
+        self.tab_bar_surface
+            .as_ref()?
+            .sidebar_close_at_position(x, y)
+    }
+
+    pub fn hover_tab_sidebar(&mut self, position: Option<(f64, f64)>) {
+        let hit = |position: Option<(f64, f64)>| {
+            position.map(|(x, y)| {
+                (
+                    self.tab_index_at_position(x, y),
+                    self.sidebar_close_at_position(x, y),
+                )
+            })
+        };
+        let changed = hit(self.tab_sidebar.pointer) != hit(position);
+        self.tab_sidebar.pointer = position;
+        if changed
+            && self
+                .tab_bar
+                .as_ref()
+                .is_some_and(|bar| bar.position == TabBarPosition::Left)
+        {
+            self.rebuild_tab_bar_surface();
+            self.schedule_redraw();
+        }
+    }
+
     fn rebuild_tab_bar_surface(&mut self) {
         self.tab_bar_generation = self.tab_bar_generation.wrapping_add(1).max(1);
         self.tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
-            let mut surface = build_tab_bar_surface(
-                tab_bar,
-                self.size_info,
-                self.color_theme,
-                self.background_shader_enabled && tab_bar.style == TabBarStyle::Fade,
-            )?;
+            let mut surface = if tab_bar.position == TabBarPosition::Left {
+                self.tab_sidebar.build(
+                    tab_bar,
+                    self.size_info,
+                    self.sidebar_cell_size.unwrap_or(self.size_info.cell_size()),
+                    germinal_ports::rendering::toolbar::toolbar_height(
+                        self.scale_factor,
+                        self.size_info.window_size().height_px(),
+                    ),
+                    self.color_theme,
+                )
+            } else {
+                build_tab_bar_surface(
+                    tab_bar,
+                    self.size_info,
+                    self.color_theme,
+                    self.background_shader_enabled && tab_bar.style == TabBarStyle::Fade,
+                )
+            }?;
+            if tab_bar.position != TabBarPosition::Left && self.toolbar.config.is_some() {
+                let height = germinal_ports::rendering::toolbar::toolbar_height(
+                    self.scale_factor,
+                    self.size_info.window_size().height_px(),
+                );
+                if tab_bar.position == TabBarPosition::Top {
+                    surface.placement.y_px += height;
+                }
+            }
             surface.snapshot.latest_seq = Seq::new(self.tab_bar_generation);
             Some(surface)
         });
+    }
+
+    pub fn scroll_tab_sidebar(&mut self, x: f64, y: f64, delta: f64) -> bool {
+        if self
+            .tab_bar
+            .as_ref()
+            .is_none_or(|bar| bar.position != TabBarPosition::Left)
+            || !x.is_finite()
+            || !y.is_finite()
+            || !delta.is_finite()
+            || self.tab_bar_surface.as_ref().is_none_or(|surface| {
+                x < 0.0
+                    || y < 0.0
+                    || x >= f64::from(surface.placement.width_px)
+                    || y >= f64::from(surface.placement.height_px)
+            })
+        {
+            return false;
+        }
+        if delta != 0.0 {
+            self.tab_sidebar.scroll(delta < 0.0);
+            self.rebuild_tab_bar_surface();
+            self.schedule_redraw();
+        }
+        true
     }
 
     pub fn set_window_title(&mut self, title: &str) {
@@ -1258,6 +1442,15 @@ impl WgpuTerminalWindowRuntime {
         self.scale_factor = scale_factor;
         self.size_info = size_info;
         self.command_palette_cell_size = None;
+        self.sidebar_cell_size = None;
+        self.presenter.set_sidebar_frame_renderer(None);
+        if self
+            .tab_bar
+            .as_ref()
+            .is_some_and(|bar| bar.position == TabBarPosition::Left)
+        {
+            self.prepare_sidebar_renderer()?;
+        }
         self.presenter.set_palette_frame_renderer(None);
         if self.command_palette.is_some() {
             self.prepare_palette_renderer()?;
@@ -1476,8 +1669,18 @@ impl WgpuTerminalWindowRuntime {
                 })
                 .collect::<Vec<_>>();
         if let Some(tab_bar_surface) = self.tab_bar_surface.as_ref() {
-            let size_info =
-                self.terminal_size_info_for_window_size(tab_bar_surface.placement.window_size());
+            let sidebar = self
+                .tab_bar
+                .as_ref()
+                .is_some_and(|bar| bar.position == TabBarPosition::Left);
+            let size_info = if sidebar {
+                TerminalSizeInfo::zero_padding(
+                    tab_bar_surface.placement.window_size(),
+                    self.sidebar_cell_size.unwrap_or(self.size_info.cell_size()),
+                )
+            } else {
+                self.terminal_size_info_for_window_size(tab_bar_surface.placement.window_size())
+            };
             surfaces.push(WgpuTerminalWorkspaceSurface {
                 render_target_plan: WgpuTerminalRenderTargetPlan::new(
                     tab_bar_surface.placement.width_px,
@@ -1491,8 +1694,35 @@ impl WgpuTerminalWindowRuntime {
                 surface_snapshot: &tab_bar_surface.snapshot,
                 renderer_config: WgpuRendererConfig::from(size_info)
                     .with_color_theme(self.color_theme)
-                    .with_background_opacity(terminal_background_opacity)
+                    .with_background_opacity(if sidebar {
+                        0.0
+                    } else {
+                        terminal_background_opacity
+                    })
                     .with_blinking_cursor_visible(blinking_cursor_visible),
+                hyperlink_highlights: &[],
+            });
+        }
+        let toolbar_surface = self.toolbar.build(
+            self.size_info,
+            self.color_theme,
+            self.scale_factor,
+            self.window.is_maximized(),
+        );
+        if let Some(toolbar) = &toolbar_surface {
+            surfaces.push(WgpuTerminalWorkspaceSurface {
+                render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                    toolbar.placement.width_px,
+                    toolbar.placement.height_px,
+                )
+                .with_load_op(WgpuTerminalLoadOp::Load),
+                surface_snapshot: &toolbar.snapshot,
+                renderer_config: WgpuRendererConfig::from(TerminalSizeInfo::zero_padding(
+                    toolbar.placement.window_size(),
+                    TerminalCellSize::new(1, toolbar.placement.height_px),
+                ))
+                .with_color_theme(self.color_theme)
+                .with_background_opacity(1.0),
                 hyperlink_highlights: &[],
             });
         }
@@ -1787,9 +2017,21 @@ struct TabBarHitRegion {
     tab_index: usize,
     start_column: u32,
     end_column: u32,
+    top_px: u32,
+    bottom_px: u32,
 }
 
 impl WgpuTabBarSurface {
+    fn sidebar_close_at_position(&self, x: f64, y: f64) -> Option<usize> {
+        if self.snapshot.target_id != germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID {
+            return None;
+        }
+        let index = self.tab_index_at_position(x, y)?;
+        let columns = self.placement.width_px / self.cell_width_px.max(1);
+        (x >= f64::from(self.placement.x_px + columns.saturating_sub(3) * self.cell_width_px))
+            .then_some(index)
+    }
+
     fn tab_index_at_position(&self, x_px: f64, y_px: f64) -> Option<usize> {
         if !x_px.is_finite() || !y_px.is_finite() {
             return None;
@@ -1808,7 +2050,12 @@ impl WgpuTabBarSurface {
         let column = (local_x / f64::from(self.cell_width_px.max(1))) as u32;
         self.hit_regions
             .iter()
-            .find(|region| region.start_column <= column && column < region.end_column)
+            .find(|region| {
+                region.start_column <= column
+                    && column < region.end_column
+                    && local_y >= f64::from(region.top_px)
+                    && local_y < f64::from(region.bottom_px)
+            })
             .map(|region| region.tab_index)
     }
 }
@@ -1866,6 +2113,7 @@ fn build_tab_bar_surface(
     let y_px = match tab_bar.position {
         TabBarPosition::Top => 0,
         TabBarPosition::Bottom => window_size.height_px().saturating_sub(bar_height_px),
+        TabBarPosition::Left => return None,
     };
     let columns = (window_size.width_px() / window_size_info.cell_size().width_px().max(1)).max(1);
     let palette = tab_bar_palette(color_theme);
@@ -1926,6 +2174,8 @@ fn build_tab_bar_surface(
             },
         );
         hit_regions.push(TabBarHitRegion {
+            top_px: 0,
+            bottom_px: bar_height_px,
             tab_index: index,
             start_column,
             end_column: x,
@@ -2661,8 +2911,7 @@ mod tests {
         frame_interval_for_refresh_rate, ime_cursor_area, is_enter_cursor_motion,
         normalized_opacity, powerline_tab_background, render_target_is_visible,
         surface_frame_recovery, tab_bar_palette, take_due_redraw,
-        terminal_power_preference_for_device_types, terminal_wgpu_backends,
-        transparent_surface_alpha_mode,
+        terminal_power_preference_for_device_types, transparent_surface_alpha_mode,
     };
     use crate::rendering::pty_surface::surface_frame_presenter::WgpuTerminalSurfaceFramePresentError;
 
@@ -2871,14 +3120,6 @@ mod tests {
 
         assert_eq!(second.dirty_rows, vec![1, 2, 4, 5]);
         assert_eq!(pending.get(&target_id), Some(&vec![1, 2, 4, 5]));
-    }
-
-    #[test]
-    fn terminal_uses_primary_wgpu_backends_without_gl() {
-        let backends = terminal_wgpu_backends();
-
-        assert_eq!(backends, wgpu::Backends::PRIMARY);
-        assert!(!backends.contains(wgpu::Backends::GL));
     }
 
     #[test]

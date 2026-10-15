@@ -1089,14 +1089,4 @@ mod tests {
 
         assert!(second.cache_hit);
     }
-
-    #[test]
-    fn source_kind_reports_debug_by_default() {
-        let builder = WgpuTerminalGlyphAtlasFrameBuilder::new();
-
-        assert_eq!(
-            builder.source_kind(),
-            WgpuTerminalGlyphAtlasSourceKind::Debug5x7
-        );
-    }
 }

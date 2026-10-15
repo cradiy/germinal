@@ -91,42 +91,65 @@ impl PaletteChrome {
             instances.extend(color);
             instances.extend([radius, softness, window[0] as f32, window[1] as f32]);
         };
-        rect(
-            [0.0, 0.0, window[0] as f32, window[1] as f32],
-            [0.0, 0.0, 0.0, 0.28],
-            0.0,
-            0.5,
-        );
-        rect(
-            [x - 12.0 * scale, y, w + 24.0 * scale, h + 24.0 * scale],
-            [0.0, 0.0, 0.0, 0.28],
-            24.0 * scale,
-            12.0 * scale,
-        );
-        rect([x, y, w, h], lighter(0.13), 12.0 * scale, 0.7);
-        rect(
-            [x + scale, y + scale, w - 2.0 * scale, h - 2.0 * scale],
-            base,
-            11.0 * scale,
-            0.7,
-        );
-        for line_y in [y + ch * 3.0, y + h - ch * 3.0] {
+        let sidebar = surface.surface_snapshot.target_id
+            == germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID;
+        if sidebar {
+            rect([x, y, w, h], base, 0.0, 0.5);
+            rect([x + w - scale, y, scale, h], lighter(0.08), 0.0, 0.5);
+        } else {
             rect(
-                [x + scale, line_y, w - 2.0 * scale, scale],
-                lighter(0.1),
+                [0.0, 0.0, window[0] as f32, window[1] as f32],
+                [0.0, 0.0, 0.0, 0.28],
                 0.0,
                 0.5,
             );
+            rect(
+                [x - 12.0 * scale, y, w + 24.0 * scale, h + 24.0 * scale],
+                [0.0, 0.0, 0.0, 0.28],
+                24.0 * scale,
+                12.0 * scale,
+            );
+            rect([x, y, w, h], lighter(0.13), 12.0 * scale, 0.7);
+            rect(
+                [x + scale, y + scale, w - 2.0 * scale, h - 2.0 * scale],
+                base,
+                11.0 * scale,
+                0.7,
+            );
+            for line_y in [y + ch * 3.0, y + h - ch * 3.0] {
+                rect(
+                    [x + scale, line_y, w - 2.0 * scale, scale],
+                    lighter(0.1),
+                    0.0,
+                    0.5,
+                );
+            }
         }
         for row in &surface.surface_snapshot.rows {
             let row_y = y + row.y as f32 * ch;
-            if row.runs.first().is_some_and(|run| run.style.bold) {
+            let hovered = sidebar && row.runs.first().is_some_and(|run| run.style.italic);
+            if hovered || row.runs.first().is_some_and(|run| run.style.bold) {
                 rect(
                     [x + cw, row_y - ch * 0.25, w - cw * 2.0, ch * 1.5],
-                    lighter(0.08),
+                    lighter(if hovered {
+                        0.055
+                    } else if sidebar {
+                        0.035
+                    } else {
+                        0.08
+                    }),
                     7.0 * scale,
                     0.7,
                 );
+            }
+            if sidebar {
+                rect(
+                    [x + cw * 1.7, row_y - ch * 0.05, cw * 2.2, ch * 1.1],
+                    lighter(0.025),
+                    ch * 0.55,
+                    0.7,
+                );
+                continue;
             }
             for run in row.runs.iter().skip(1) {
                 if run.text.trim().is_empty() {

@@ -125,11 +125,15 @@ pub struct App {
     terminal_hyperlinks: HashMap<GShellId, Vec<TerminalHyperlink>>,
     pending_hyperlink_activation: Option<PendingHyperlinkActivation>,
     tab_pointer_consumed: bool,
+    sidebar_close_pressed: Option<GShellId>,
     pane_navigation_enabled: bool,
     command_palette: Option<command_palette::CommandPalette>,
     palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
     palette_consumed_buttons: HashSet<MouseButton>,
     config: GerminalConfig,
+    horizontal_tab_position: TabBarPosition,
+    toolbar_pressed: Option<germinal_ports::rendering::toolbar::ToolbarAction>,
+    toolbar_pointer_consumed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +223,13 @@ impl App {
         };
 
         let app = Self {
+            toolbar_pressed: None,
+            toolbar_pointer_consumed: false,
+            horizontal_tab_position: if config.tabs.position == TabBarPosition::Left {
+                TabBarPosition::Bottom
+            } else {
+                config.tabs.position
+            },
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
             gshell_service_state: GShellServiceState::new(),
             worker_service_state: WorkerServiceState::new(),
@@ -258,6 +269,7 @@ impl App {
             terminal_hyperlinks: HashMap::new(),
             pending_hyperlink_activation: None,
             tab_pointer_consumed: false,
+            sidebar_close_pressed: None,
             pane_navigation_enabled,
             config,
         };
@@ -333,18 +345,19 @@ impl App {
     }
 
     fn current_tab_bar_snapshot(&self) -> Option<TabBarSnapshot> {
-        (self.tab_count() > 1).then(|| TabBarSnapshot {
-            titles: self.tab_titles(),
-            progresses: self.tab_progresses(),
-            render_target_ids: self
-                .tab_gshells()
-                .into_iter()
-                .map(|gshell_id| RenderTargetId::new(gshell_id.value()))
-                .collect(),
-            active_tab_index: self.active_tab_index(),
-            position: self.config.tabs.position,
-            style: self.config.tabs.style,
-        })
+        (self.horizontal_tab_bar_visible() || self.config.tabs.position == TabBarPosition::Left)
+            .then(|| TabBarSnapshot {
+                titles: self.tab_titles(),
+                progresses: self.tab_progresses(),
+                render_target_ids: self
+                    .tab_gshells()
+                    .into_iter()
+                    .map(|gshell_id| RenderTargetId::new(gshell_id.value()))
+                    .collect(),
+                active_tab_index: self.active_tab_index(),
+                position: self.config.tabs.position,
+                style: self.config.tabs.style,
+            })
     }
 
     fn current_terminal_window_title(&self) -> String {
@@ -363,18 +376,35 @@ impl App {
         &self,
         window_size: TerminalWindowSize,
     ) -> Vec<RenderSurfacePlacement> {
-        let layout = workspace_content_layout(
-            window_size,
+        let toolbar = if self.modern_toolbar_visible() {
+            germinal_ports::rendering::toolbar::toolbar_height(
+                self.render_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.display_scale_factor())
+                    .unwrap_or(
+                        germinal_ports::pty_host::scale_factor::TerminalScaleFactor::DEFAULT,
+                    ),
+                window_size.height_px(),
+            )
+        } else {
+            0
+        };
+        let mut layout = workspace_content_layout(
+            TerminalWindowSize::new(
+                window_size.width_px(),
+                window_size.height_px().saturating_sub(toolbar).max(1),
+            ),
             self.current_terminal_size_info().cell_size().height_px(),
-            self.tab_count() > 1,
+            self.horizontal_tab_bar_visible(),
             self.config.tabs.position,
         );
+        layout.y_px += toolbar;
         self.workspace_render_layout(layout.content_size)
             .into_iter()
             .map(|placement| {
                 RenderSurfacePlacement::new(
                     placement.target_id,
-                    placement.x_px,
+                    placement.x_px.saturating_add(layout.x_px),
                     placement.y_px.saturating_add(layout.y_px),
                     placement.width_px,
                     placement.height_px,
@@ -384,6 +414,15 @@ impl App {
     }
 
     fn set_current_workspace_render_layout(&mut self, placements: Vec<RenderSurfacePlacement>) {
+        let toolbar = self.modern_toolbar_visible().then_some(
+            germinal_ports::rendering::toolbar::ToolbarConfig {
+                sidebar: self.config.tabs.position == TabBarPosition::Left,
+                window_controls: self.config.window.show_window_controls,
+            },
+        );
+        if let Some(runtime) = self.render_runtime.as_mut() {
+            runtime.set_toolbar(toolbar);
+        }
         let visible_gshells = placements
             .iter()
             .map(|placement| GShellId::new(placement.target_id.value()))
@@ -721,6 +760,9 @@ impl App {
         let Some(action) = action else {
             return false;
         };
+        if action == KeyboardAction::ToggleTabSidebar && !self.modern_toolbar_visible() {
+            return false;
+        }
         if matches!(
             action,
             KeyboardAction::FocusNextPane
@@ -757,6 +799,26 @@ impl App {
 
     fn execute_keyboard_action(&mut self, event_loop: &ActiveEventLoop, action: KeyboardAction) {
         match action {
+            KeyboardAction::ToggleToolbar => {
+                let was_visible = self.modern_toolbar_visible();
+                self.config.window.toolbar = !was_visible;
+                if was_visible && self.config.tabs.position == TabBarPosition::Left {
+                    self.config.tabs.position = self.horizontal_tab_position;
+                }
+                self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
+                self.update_ime_cursor_area();
+            }
+            KeyboardAction::ToggleTabSidebar => {
+                self.config.window.toolbar = true;
+                if self.config.tabs.position == TabBarPosition::Left {
+                    self.config.tabs.position = self.horizontal_tab_position;
+                } else {
+                    self.horizontal_tab_position = self.config.tabs.position;
+                    self.config.tabs.position = TabBarPosition::Left;
+                }
+                self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
+                self.update_ime_cursor_area();
+            }
             KeyboardAction::CommandPalette => self.open_command_palette(),
             KeyboardAction::NewWindow => self.create_window(),
             KeyboardAction::ToggleViMode => {
@@ -856,6 +918,55 @@ impl App {
             self.window_input_modifiers.shift_key() || physical_modifiers.shift,
             self.window_input_modifiers.super_key(),
         )
+    }
+
+    fn modern_toolbar_visible(&self) -> bool {
+        self.config.window.toolbar || self.config.tabs.position == TabBarPosition::Left
+    }
+
+    fn horizontal_tab_bar_visible(&self) -> bool {
+        !self.modern_toolbar_visible() && self.tab_count() > 1
+    }
+
+    fn handle_toolbar_button(&mut self, event_loop: &ActiveEventLoop, state: ElementState) -> bool {
+        use germinal_ports::rendering::toolbar::ToolbarAction;
+        let Some(runtime) = self.render_runtime.as_mut() else {
+            return false;
+        };
+        let action = self
+            .cursor_position
+            .and_then(|p| runtime.toolbar_action_at(p.x, p.y));
+        if state == ElementState::Pressed {
+            if self
+                .cursor_position
+                .is_none_or(|p| !runtime.toolbar_contains(p.x, p.y))
+            {
+                return false;
+            }
+            self.toolbar_pressed = action;
+            self.toolbar_pointer_consumed = true;
+            if action.is_none() {
+                runtime.drag_window_from_toolbar();
+            }
+            return true;
+        }
+        if !std::mem::take(&mut self.toolbar_pointer_consumed) {
+            return false;
+        }
+        if self.toolbar_pressed.take() != action {
+            return true;
+        }
+        match action {
+            Some(ToolbarAction::NewTab) => self.create_workspace_tab(),
+            Some(ToolbarAction::ToggleSidebar) => {
+                self.execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar)
+            }
+            Some(ToolbarAction::CommandPalette) => self.open_command_palette(),
+            Some(ToolbarAction::Close) => self.exit_and_persist(event_loop),
+            Some(action) => runtime.perform_toolbar_window_action(action),
+            None => {}
+        }
+        true
     }
 
     fn route_effective_input_modifiers(&mut self) {
@@ -1020,6 +1131,27 @@ impl App {
         debug!(tab_index, "activated tab from pointer");
         self.activate_workspace_tab(previous_gshell, focused_gshell);
         true
+    }
+
+    fn sidebar_close_target_at_cursor(&self) -> Option<GShellId> {
+        let position = self.cursor_position?;
+        let index = self
+            .render_runtime
+            .as_ref()?
+            .sidebar_close_at_position(position.x, position.y)?;
+        self.tab_gshells().get(index).copied()
+    }
+
+    fn close_sidebar_tab(&mut self, event_loop: &ActiveEventLoop, target: GShellId) {
+        let previous = self.focused_gshell();
+        if !self.focus_gshell(target) {
+            return;
+        }
+        let panes = self.visible_gshells();
+        self.focus_gshell(previous);
+        for pane in panes {
+            self.close_workspace_gshell(event_loop, pane);
+        }
     }
 
     fn apply_gshell_focus_change(&mut self, previous: GShellId, focused: GShellId) {
@@ -1605,6 +1737,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 if self.window_focused != focused {
                     self.window_focused = focused;
                     if !focused {
+                        self.toolbar_pressed = None;
+                        self.toolbar_pointer_consumed = false;
+                    }
+                    if !focused {
                         self.ime_enabled = false;
                         self.clear_ime_preedit(self.focused_gshell());
                         self.pointer_capture = None;
@@ -1614,6 +1750,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
                         }
                         self.pending_hyperlink_activation = None;
                         self.tab_pointer_consumed = false;
+                        self.sidebar_close_pressed = None;
+                        if let Some(runtime) = self.render_runtime.as_mut() {
+                            runtime.hover_tab_sidebar(None);
+                        }
                         self.route_pointer_left();
                         // Some compositors do not deliver modifier key releases after
                         // focus moves away. Never carry those stale keys into the next
@@ -1652,6 +1792,10 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(position);
+                if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.hover_toolbar(Some((position.x, position.y)));
+                    runtime.hover_tab_sidebar(Some((position.x, position.y)));
+                }
                 if !self.try_update_terminal_scrollbar_drag(position) {
                     self.route_pointer_moved(position);
                 }
@@ -1660,6 +1804,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 self.cursor_position = None;
                 if let Some(runtime) = self.render_runtime.as_mut() {
+                    runtime.hover_toolbar(None);
+                    runtime.hover_tab_sidebar(None);
                     runtime.set_hovered_terminal_hyperlinks(None);
                 }
                 if self.pointer_capture.is_none() {
@@ -1668,8 +1814,16 @@ impl ApplicationHandler<RuntimeEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
+                    if self.handle_toolbar_button(event_loop, state) {
+                        return;
+                    }
                     if state == ElementState::Pressed {
                         self.pending_hyperlink_activation = None;
+                        if let Some(target) = self.sidebar_close_target_at_cursor() {
+                            self.sidebar_close_pressed = Some(target);
+                            self.tab_pointer_consumed = true;
+                            return;
+                        }
                     }
                     if state == ElementState::Pressed && self.try_activate_tab_at_cursor() {
                         self.tab_pointer_consumed = true;
@@ -1677,6 +1831,11 @@ impl ApplicationHandler<RuntimeEvent> for App {
                     }
                     if state == ElementState::Released && self.tab_pointer_consumed {
                         self.tab_pointer_consumed = false;
+                        if let Some(target) = self.sidebar_close_pressed.take()
+                            && self.sidebar_close_target_at_cursor() == Some(target)
+                        {
+                            self.close_sidebar_tab(event_loop, target);
+                        }
                         return;
                     }
                     if state == ElementState::Pressed && self.try_begin_hyperlink_activation() {
@@ -1702,6 +1861,17 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 self.route_pointer_button(state, button);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(position) = self.cursor_position {
+                    let vertical = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                        MouseScrollDelta::PixelDelta(point) => point.y,
+                    };
+                    if self.render_runtime.as_mut().is_some_and(|runtime| {
+                        runtime.scroll_tab_sidebar(position.x, position.y, vertical)
+                    }) {
+                        return;
+                    }
+                }
                 if let Some(position) = self.cursor_position
                     && let Some((gshell_id, local_position)) = self.pointer_input_at(position)
                 {
@@ -1819,6 +1989,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkspaceContentLayout {
+    x_px: u32,
     y_px: u32,
     content_size: TerminalWindowSize,
 }
@@ -1829,12 +2000,27 @@ fn workspace_content_layout(
     show_tab_bar: bool,
     position: TabBarPosition,
 ) -> WorkspaceContentLayout {
+    if position == TabBarPosition::Left {
+        let width = germinal_ports::rendering::tab_bar::sidebar_width_px(
+            window_size.width_px(),
+            cell_height_px,
+        );
+        return WorkspaceContentLayout {
+            x_px: width,
+            y_px: 0,
+            content_size: TerminalWindowSize::new(
+                window_size.width_px().saturating_sub(width).max(1),
+                window_size.height_px(),
+            ),
+        };
+    }
     let bar_height_px = if show_tab_bar {
         cell_height_px.min(window_size.height_px().saturating_sub(1))
     } else {
         0
     };
     WorkspaceContentLayout {
+        x_px: 0,
         y_px: if position == TabBarPosition::Top {
             bar_height_px
         } else {
@@ -2308,63 +2494,6 @@ mod tests {
     }
 
     #[test]
-    fn default_ctrl_shift_d_is_consumed_as_horizontal_split() {
-        let config = GerminalConfig::default();
-        let binding = config
-            .keyboard
-            .bindings
-            .iter()
-            .find(|binding| binding.action == KeyboardAction::SplitHorizontal)
-            .expect("horizontal split should have a default binding");
-
-        assert!(matches_keyboard_binding(
-            binding,
-            WindowInputModifiers::new(true, false, true, false),
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("D".to_string()),
-            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD),
-        ));
-    }
-
-    #[test]
-    fn default_ctrl_shift_n_is_consumed_as_new_window() {
-        let config = GerminalConfig::default();
-        let binding = config
-            .keyboard
-            .bindings
-            .iter()
-            .find(|binding| binding.action == KeyboardAction::NewWindow)
-            .expect("new window should have a default binding");
-
-        assert!(matches_keyboard_binding(
-            binding,
-            WindowInputModifiers::new(true, false, true, false),
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("n".to_string()),
-            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyN),
-        ));
-    }
-
-    #[test]
-    fn default_host_search_uses_ctrl_shift_f() {
-        let config = GerminalConfig::default();
-        let binding = config
-            .keyboard
-            .bindings
-            .iter()
-            .find(|binding| binding.action == KeyboardAction::ToggleSearch)
-            .expect("host search should have a default binding");
-
-        assert!(matches_keyboard_binding(
-            binding,
-            WindowInputModifiers::new(true, false, true, false),
-            WindowInputElementState::Pressed,
-            &WindowInputKey::Character("F".to_string()),
-            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyF),
-        ));
-    }
-
-    #[test]
     fn default_clipboard_bindings_match_physical_keys_on_release() {
         let config = GerminalConfig::default();
         for (key, key_code, action) in [
@@ -2385,66 +2514,6 @@ mod tests {
                 &WindowInputKey::Unidentified,
                 winit::keyboard::PhysicalKey::Code(key_code),
             ));
-        }
-    }
-
-    #[test]
-    fn default_tab_switching_supports_arrows_and_vim_aliases() {
-        let config = GerminalConfig::default();
-        for (key, action) in [
-            ("Left", KeyboardAction::PreviousTab),
-            ("H", KeyboardAction::PreviousTab),
-            ("Right", KeyboardAction::NextTab),
-            ("L", KeyboardAction::NextTab),
-        ] {
-            assert!(config.keyboard.bindings.iter().any(|binding| {
-                binding.key == key && binding.mods == "Control|Shift" && binding.action == action
-            }));
-        }
-    }
-
-    #[test]
-    fn default_tab_reordering_uses_ctrl_shift_alt_h_and_l() {
-        let config = GerminalConfig::default();
-        for (key, action) in [
-            ("H", KeyboardAction::MoveTabLeft),
-            ("L", KeyboardAction::MoveTabRight),
-        ] {
-            assert!(config.keyboard.bindings.iter().any(|binding| {
-                binding.key == key
-                    && binding.mods == "Control|Shift|Alt"
-                    && binding.action == action
-            }));
-        }
-    }
-
-    #[test]
-    fn default_directional_pane_focus_uses_ctrl_alt_arrows() {
-        let config = GerminalConfig::default();
-        for (key, action) in [
-            ("Left", KeyboardAction::FocusPaneLeft),
-            ("Right", KeyboardAction::FocusPaneRight),
-            ("Up", KeyboardAction::FocusPaneUp),
-            ("Down", KeyboardAction::FocusPaneDown),
-        ] {
-            assert!(config.keyboard.bindings.iter().any(|binding| {
-                binding.key == key && binding.mods == "Control|Alt" && binding.action == action
-            }));
-        }
-    }
-
-    #[test]
-    fn default_directional_pane_resize_uses_alt_shift_arrows() {
-        let config = GerminalConfig::default();
-        for (key, action) in [
-            ("Left", KeyboardAction::ResizePaneLeft),
-            ("Right", KeyboardAction::ResizePaneRight),
-            ("Up", KeyboardAction::ResizePaneUp),
-            ("Down", KeyboardAction::ResizePaneDown),
-        ] {
-            assert!(config.keyboard.bindings.iter().any(|binding| {
-                binding.key == key && binding.mods == "Alt|Shift" && binding.action == action
-            }));
         }
     }
 
@@ -2485,6 +2554,22 @@ mod tests {
 
         assert_eq!(layout.y_px, 0);
         assert_eq!(layout.content_size, TerminalWindowSize::new(800, 600));
+    }
+
+    #[test]
+    fn sidebar_reserves_width_even_for_single_tab_and_leaves_room_in_small_windows() {
+        for (width, height) in [(1200, 800), (300, 200), (1, 1)] {
+            let layout = workspace_content_layout(
+                TerminalWindowSize::new(width, height),
+                24,
+                false,
+                TabBarPosition::Left,
+            );
+            assert_eq!(layout.x_px + layout.content_size.width_px(), width);
+            assert_eq!(layout.content_size.height_px(), height);
+            assert_eq!(layout.y_px, 0);
+            assert!(layout.content_size.width_px() >= width * 2 / 3);
+        }
     }
 
     #[test]

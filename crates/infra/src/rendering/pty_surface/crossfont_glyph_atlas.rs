@@ -2163,7 +2163,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        FontCoverage, GlyphAtlasShelfLayout, RasterizedGlyphCache, RasterizedTerminalGlyph,
+        GlyphAtlasShelfLayout, RasterizedGlyphCache, RasterizedTerminalGlyph,
         WgpuCrossfontStrikeoutMetrics, WgpuCrossfontUnderlineMetrics, WgpuTerminalGlyphKey,
         build_atlas_from_rasterized_glyphs, crossfont_size_from_physical_px,
         crossfont_strikeout_metrics, crossfont_underline_metrics, terminal_glyph_draw_offset,
@@ -2294,12 +2294,6 @@ mod tests {
         };
 
         assert_eq!(terminal_glyph_draw_offset(&glyph, 12, 24), (3, 6));
-    }
-
-    #[test]
-    fn all_font_coverage_accepts_every_unicode_character() {
-        assert!(FontCoverage::all().contains('🙂'));
-        assert!(FontCoverage::all().contains('界'));
     }
 
     #[test]

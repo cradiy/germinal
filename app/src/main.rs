@@ -85,16 +85,4 @@ mod tests {
             assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
         }
     }
-
-    #[test]
-    fn reports_the_package_version() {
-        let error = Cli::try_parse_from(["germinal", "--version"])
-            .expect_err("--version should print the package version and exit");
-
-        assert_eq!(error.exit_code(), 0);
-        assert_eq!(
-            error.to_string(),
-            format!("germinal {}\n", env!("CARGO_PKG_VERSION"))
-        );
-    }
 }

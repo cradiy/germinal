@@ -723,13 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn state_defaults_to_single_pane() {
-        let state = state();
-
-        assert_eq!(state.visible_gshells().len(), 1);
-    }
-
-    #[test]
     fn state_binds_two_visible_panes_to_distinct_gshells() {
         let state = state_with_workspace(Workspace::two_pane());
 

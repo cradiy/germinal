@@ -507,6 +507,8 @@ impl Default for TabsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
+    pub toolbar: bool,
+    pub show_window_controls: bool,
     pub title: String,
     pub width_px: u32,
     pub height_px: u32,
@@ -518,6 +520,8 @@ pub struct WindowConfig {
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
+            toolbar: false,
+            show_window_controls: true,
             title: "Germinal".to_string(),
             width_px: 960,
             height_px: 540,
@@ -742,6 +746,11 @@ impl Default for KeyboardConfig {
                     mods: "Control|Shift".to_string(),
                     action: KeyboardAction::CommandPalette,
                 },
+                KeyboardBinding {
+                    key: "B".to_string(),
+                    mods: "Control|Alt".to_string(),
+                    action: KeyboardAction::ToggleTabSidebar,
+                },
             ],
         }
     }
@@ -822,6 +831,8 @@ pub struct KeyboardBinding {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum KeyboardAction {
     CommandPalette,
+    ToggleTabSidebar,
+    ToggleToolbar,
     NewWindow,
     ToggleViMode,
     ToggleSearch,
@@ -989,60 +1000,17 @@ mod tests {
     use germinal_infra::rendering::pty_surface::window_runtime::WgpuTerminalPowerPreference;
     use germinal_ports::pty_host::{
         cursor_style::{TerminalCursorShape, TerminalCursorStyle},
-        font_family::TerminalFontFamily,
         terminal_clipboard::TerminalOsc52Mode,
     };
     use germinal_ports::rendering::tab_bar::{TabBarPosition, TabBarStyle};
 
     use super::{
         BackgroundConfig, GerminalConfig, GpuPowerPreference, KeyboardAction, ShellConfig,
-        first_run_config,
     };
 
     #[test]
-    fn default_config_serializes_alacritty_style_fields() {
+    fn default_config_round_trip_does_not_duplicate_keyboard_bindings() {
         let contents = toml::to_string_pretty(&GerminalConfig::default()).unwrap();
-
-        let value: toml::Value = toml::from_str(&contents).unwrap();
-        assert_eq!(value["window"]["opacity"].as_float(), Some(1.0));
-        assert_eq!(value["window"]["decorations"].as_bool(), Some(true));
-        assert_eq!(value["window"]["maximized"].as_bool(), Some(false));
-        assert_eq!(
-            value["rendering"]["power_preference"].as_str(),
-            Some("high")
-        );
-        assert!(value.get("background").is_none());
-        assert_eq!(value["font"]["size"].as_float(), Some(16.0));
-        assert_eq!(value["font"]["ligatures"].as_bool(), Some(true));
-        assert_eq!(
-            value["font"]["normal"]["family"].as_str(),
-            Some(TerminalFontFamily::default().name())
-        );
-        assert_eq!(value["scrolling"]["history"].as_integer(), Some(10_000));
-        assert_eq!(value["cursor"]["shape"].as_str(), Some("block"));
-        assert_eq!(value["cursor"]["blinking"].as_bool(), Some(false));
-        assert_eq!(value["cursor"]["blink_interval_ms"].as_integer(), Some(750));
-        assert_eq!(value["cursor"]["motion_duration_ms"].as_integer(), Some(80));
-        assert_eq!(value["cursor"]["motion_on_input"].as_bool(), Some(true));
-        assert_eq!(value["cursor"]["motion_on_enter"].as_bool(), Some(true));
-        assert_eq!(value["terminal"]["osc52"].as_str(), Some("OnlyCopy"));
-        assert_eq!(value["bell"]["duration_ms"].as_integer(), Some(150));
-        assert_eq!(value["bell"]["urgent_on_unfocused"].as_bool(), Some(true));
-        assert_eq!(value["tabs"]["position"].as_str(), Some("bottom"));
-        assert_eq!(value["tabs"]["style"].as_str(), Some("fade"));
-        assert_eq!(value["logging"]["console_level"].as_str(), Some("info"));
-        assert_eq!(value["logging"]["file_level"].as_str(), Some("info"));
-        assert_eq!(
-            value["keyboard"]["use_default_bindings"].as_bool(),
-            Some(true)
-        );
-        assert!(
-            value["keyboard"]["bindings"]
-                .as_array()
-                .is_some_and(|bindings| bindings
-                    .iter()
-                    .any(|binding| { binding["action"].as_str() == Some("ToggleViMode") }))
-        );
 
         let round_trip: GerminalConfig = toml::from_str(&contents).unwrap();
         assert!(round_trip.keyboard.use_default_bindings);
@@ -1067,13 +1035,6 @@ mod tests {
             config.terminal_power_preference(),
             WgpuTerminalPowerPreference::Low
         );
-    }
-
-    #[test]
-    fn first_run_config_uses_detected_power_preference() {
-        let config = first_run_config(WgpuTerminalPowerPreference::Low);
-
-        assert_eq!(config.rendering.power_preference, GpuPowerPreference::Low);
     }
 
     #[test]

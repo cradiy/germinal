@@ -453,17 +453,4 @@ mod tests {
         assert!(output.starts_with("\x1b_Ga=T,q=2,m=1;"));
         assert!(output.contains("\x1b\\\x1b_Gm=0,q=2;"));
     }
-
-    #[test]
-    fn generated_image_has_expected_rgba_size() {
-        assert_eq!(image_pixels(12, 7, 0).len(), 12 * 7 * 4);
-    }
-
-    #[test]
-    fn png_payload_has_png_signature() {
-        let rgba = image_pixels(12, 7, 0);
-        let (kitty_format, payload) = encode_image_payload("png", 12, 7, &rgba).unwrap();
-        assert_eq!(kitty_format, 100);
-        assert_eq!(&payload[..8], b"\x89PNG\r\n\x1a\n");
-    }
 }

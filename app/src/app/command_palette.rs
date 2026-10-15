@@ -1,106 +1,36 @@
 use super::*;
 use germinal_ports::rendering::command_palette::{CommandPaletteEntry, CommandPaletteSnapshot};
 
-const COMMANDS: &[(KeyboardAction, &str, &str)] = &[
-    (KeyboardAction::NewTab, "New tab", "新建标签"),
-    (KeyboardAction::NewWindow, "New window", "新建窗口"),
-    (
-        KeyboardAction::SplitHorizontal,
-        "Split horizontally",
-        "水平分屏 左右",
-    ),
-    (
-        KeyboardAction::SplitVertical,
-        "Split vertically",
-        "垂直分屏 上下",
-    ),
-    (KeyboardAction::NextTab, "Next tab", "下一个标签"),
-    (KeyboardAction::PreviousTab, "Previous tab", "上一个标签"),
-    (KeyboardAction::ToggleSearch, "Search terminal", "搜索查找"),
-    (
-        KeyboardAction::ToggleViMode,
-        "Toggle Vi mode",
-        "切换 vim 模式",
-    ),
-    (KeyboardAction::Copy, "Copy selection", "复制选中"),
-    (KeyboardAction::Paste, "Paste clipboard", "粘贴剪贴板"),
-    (
-        KeyboardAction::FocusNextPane,
-        "Focus next pane",
-        "下一个面板焦点",
-    ),
-    (
-        KeyboardAction::FocusPreviousPane,
-        "Focus previous pane",
-        "上一个面板焦点",
-    ),
-    (
-        KeyboardAction::FocusPaneLeft,
-        "Focus pane left",
-        "左侧面板焦点",
-    ),
-    (
-        KeyboardAction::FocusPaneRight,
-        "Focus pane right",
-        "右侧面板焦点",
-    ),
-    (
-        KeyboardAction::FocusPaneUp,
-        "Focus pane above",
-        "上方面板焦点",
-    ),
-    (
-        KeyboardAction::FocusPaneDown,
-        "Focus pane below",
-        "下方面板焦点",
-    ),
-    (KeyboardAction::MoveTabLeft, "Move tab left", "左移标签"),
-    (KeyboardAction::MoveTabRight, "Move tab right", "右移标签"),
-    (
-        KeyboardAction::SwapPaneLeft,
-        "Swap pane left",
-        "交换左侧面板",
-    ),
-    (
-        KeyboardAction::SwapPaneRight,
-        "Swap pane right",
-        "交换右侧面板",
-    ),
-    (
-        KeyboardAction::SwapPaneUp,
-        "Swap pane above",
-        "交换上方面板",
-    ),
-    (
-        KeyboardAction::SwapPaneDown,
-        "Swap pane below",
-        "交换下方面板",
-    ),
-    (
-        KeyboardAction::ResizePaneLeft,
-        "Resize pane left",
-        "调整面板大小 向左",
-    ),
-    (
-        KeyboardAction::ResizePaneRight,
-        "Resize pane right",
-        "调整面板大小 向右",
-    ),
-    (
-        KeyboardAction::ResizePaneUp,
-        "Resize pane up",
-        "调整面板大小 向上",
-    ),
-    (
-        KeyboardAction::ResizePaneDown,
-        "Resize pane down",
-        "调整面板大小 向下",
-    ),
-    (
-        KeyboardAction::ClosePane,
-        "Close current pane",
-        "关闭当前面板标签",
-    ),
+const COMMANDS: &[(KeyboardAction, &str)] = &[
+    (KeyboardAction::NewTab, "New tab"),
+    (KeyboardAction::NewWindow, "New window"),
+    (KeyboardAction::SplitHorizontal, "Split horizontally"),
+    (KeyboardAction::SplitVertical, "Split vertically"),
+    (KeyboardAction::NextTab, "Next tab"),
+    (KeyboardAction::PreviousTab, "Previous tab"),
+    (KeyboardAction::ToggleSearch, "Search terminal"),
+    (KeyboardAction::ToggleViMode, "Toggle Vi mode"),
+    (KeyboardAction::Copy, "Copy selection"),
+    (KeyboardAction::Paste, "Paste clipboard"),
+    (KeyboardAction::ToggleToolbar, "Toggle modern toolbar"),
+    (KeyboardAction::ToggleTabSidebar, "Toggle tab sidebar"),
+    (KeyboardAction::FocusNextPane, "Focus next pane"),
+    (KeyboardAction::FocusPreviousPane, "Focus previous pane"),
+    (KeyboardAction::FocusPaneLeft, "Focus pane left"),
+    (KeyboardAction::FocusPaneRight, "Focus pane right"),
+    (KeyboardAction::FocusPaneUp, "Focus pane above"),
+    (KeyboardAction::FocusPaneDown, "Focus pane below"),
+    (KeyboardAction::MoveTabLeft, "Move tab left"),
+    (KeyboardAction::MoveTabRight, "Move tab right"),
+    (KeyboardAction::SwapPaneLeft, "Swap pane left"),
+    (KeyboardAction::SwapPaneRight, "Swap pane right"),
+    (KeyboardAction::SwapPaneUp, "Swap pane above"),
+    (KeyboardAction::SwapPaneDown, "Swap pane below"),
+    (KeyboardAction::ResizePaneLeft, "Resize pane left"),
+    (KeyboardAction::ResizePaneRight, "Resize pane right"),
+    (KeyboardAction::ResizePaneUp, "Resize pane up"),
+    (KeyboardAction::ResizePaneDown, "Resize pane down"),
+    (KeyboardAction::ClosePane, "Close current pane"),
 ];
 
 pub(super) struct CommandPalette {
@@ -115,7 +45,7 @@ impl CommandPalette {
     fn new(bindings: &[KeyboardBinding], panes: bool, tabs: bool) -> Self {
         let commands = COMMANDS
             .iter()
-            .filter(|(action, _, _)| match action {
+            .filter(|(action, _)| match action {
                 KeyboardAction::FocusNextPane
                 | KeyboardAction::FocusPreviousPane
                 | KeyboardAction::FocusPaneLeft
@@ -136,7 +66,7 @@ impl CommandPalette {
                 | KeyboardAction::MoveTabRight => tabs,
                 _ => true,
             })
-            .map(|(action, title, aliases)| {
+            .map(|(action, title)| {
                 let shortcut = bindings
                     .iter()
                     .find(|binding| binding.action == *action)
@@ -155,7 +85,7 @@ impl CommandPalette {
                         title: (*title).into(),
                         shortcut,
                     },
-                    format!("{title} {aliases}").to_lowercase(),
+                    title.to_lowercase(),
                 )
             })
             .collect();
@@ -397,29 +327,223 @@ mod tests {
     #[test]
     #[ignore = "opens an isolated Wayland window for command palette inspection"]
     fn command_palette_window_smoke() {
+        run_window_preview(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "opens an isolated Wayland window for sidebar inspection"]
+    fn sidebar_window_smoke() {
+        run_window_preview(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_window_preview(sidebar: bool) {
         use winit::platform::wayland::EventLoopBuilderExtWayland;
         struct Preview {
             app: App,
             deadline: Instant,
+            sidebar: bool,
         }
         impl ApplicationHandler<RuntimeEvent> for Preview {
             fn resumed(&mut self, event_loop: &ActiveEventLoop) {
                 self.app.resumed(event_loop);
+                if self.sidebar {
+                    let size = self.app.current_terminal_size_info().window_size();
+                    self.app.config.tabs.position = TabBarPosition::Top;
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar);
+                    assert!(self.app.current_tab_bar_snapshot().is_some());
+                    let layout = self.app.current_workspace_render_layout(size);
+                    assert!(layout[0].x_px > 0);
+                    assert_eq!(layout[0].x_px + layout[0].width_px, size.width_px());
+                    assert!(
+                        self.app
+                            .pointer_input_at(PhysicalPosition::new(1.0, 100.0))
+                            .is_none()
+                    );
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar);
+                    assert_eq!(self.app.config.tabs.position, TabBarPosition::Top);
+                    assert_eq!(
+                        self.app.current_workspace_render_layout(size)[0].width_px,
+                        size.width_px()
+                    );
+                    self.app.create_workspace_tab();
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar);
+                    let cell = self.app.current_terminal_size_info().cell_size();
+                    let x = f64::from(cell.width_px() * 5);
+                    let y = (0..size.height_px())
+                        .find(|y| self.app.tab_index_at_position(x, f64::from(*y)) == Some(0))
+                        .unwrap();
+                    self.app.cursor_position = Some(PhysicalPosition::new(x, f64::from(y)));
+                    assert!(self.app.try_activate_tab_at_cursor());
+                    assert_eq!(self.app.active_tab_index(), 0);
+                    use germinal_ports::rendering::toolbar::{
+                        ToolbarAction, ToolbarConfig, toolbar_buttons, toolbar_height,
+                    };
+                    let h = toolbar_height(
+                        self.app
+                            .render_runtime
+                            .as_ref()
+                            .unwrap()
+                            .display_scale_factor(),
+                        size.height_px(),
+                    );
+                    let buttons = toolbar_buttons(
+                        ToolbarConfig {
+                            sidebar: true,
+                            window_controls: true,
+                        },
+                        size.width_px(),
+                        h,
+                        cell.height_px(),
+                        self.app
+                            .render_runtime
+                            .as_ref()
+                            .unwrap()
+                            .display_scale_factor(),
+                    );
+                    let toggle = buttons
+                        .iter()
+                        .find(|b| b.action == ToolbarAction::ToggleSidebar)
+                        .unwrap();
+                    let position = PhysicalPosition::new(f64::from(toggle.x + 1), f64::from(h / 2));
+                    self.app.cursor_position = Some(position);
+                    assert!(
+                        self.app
+                            .handle_toolbar_button(event_loop, ElementState::Pressed)
+                    );
+                    self.app.cursor_position =
+                        Some(PhysicalPosition::new(position.x, f64::from(h + 1)));
+                    assert!(
+                        self.app
+                            .handle_toolbar_button(event_loop, ElementState::Released)
+                    );
+                    assert_eq!(self.app.config.tabs.position, TabBarPosition::Left);
+                    self.app.cursor_position = Some(position);
+                    assert!(
+                        self.app
+                            .handle_toolbar_button(event_loop, ElementState::Pressed)
+                    );
+                    assert!(
+                        self.app
+                            .handle_toolbar_button(event_loop, ElementState::Released)
+                    );
+                    assert_eq!(self.app.config.tabs.position, TabBarPosition::Top);
+                    assert!(self.app.modern_toolbar_visible());
+                    for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
+                        self.app.config.tabs.position = position;
+                        self.app.resize_workspace_gshells(size);
+                        assert!(self.app.current_tab_bar_snapshot().is_none());
+                        let layout = self.app.current_workspace_render_layout(size);
+                        assert_eq!(layout[0].y_px, h);
+                        assert_eq!(layout[0].height_px, size.height_px() - h);
+                        assert!(
+                            self.app
+                                .tab_index_at_position(5.0, f64::from(size.height_px() - 2))
+                                .is_none()
+                        );
+                        self.app
+                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleToolbar);
+                        assert!(self.app.current_tab_bar_snapshot().is_some());
+                        self.app.window_input_modifiers =
+                            WindowInputModifiers::new(true, true, false, false);
+                        for state in [
+                            WindowInputElementState::Pressed,
+                            WindowInputElementState::Released,
+                        ] {
+                            assert!(!self.app.try_handle_keyboard_binding(
+                                event_loop,
+                                state,
+                                &WindowInputKey::Character("b".into()),
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB),
+                            ));
+                        }
+                        assert!(!self.app.modern_toolbar_visible());
+                        assert_eq!(
+                            self.app.current_workspace_render_layout(size)[0].height_px,
+                            size.height_px() - cell.height_px()
+                        );
+                        self.app
+                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleToolbar);
+                        for expected in [TabBarPosition::Left, position] {
+                            assert!(self.app.try_handle_keyboard_binding(
+                                event_loop,
+                                WindowInputElementState::Pressed,
+                                &WindowInputKey::Character("b".into()),
+                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyB),
+                            ));
+                            assert_eq!(self.app.config.tabs.position, expected);
+                        }
+                        self.app.reset_input_modifiers();
+                    }
+                    self.app.config.window.show_window_controls = false;
+                    self.app.resize_workspace_gshells(size);
+                    assert!(
+                        self.app
+                            .render_runtime
+                            .as_ref()
+                            .unwrap()
+                            .toolbar_action_at(f64::from(size.width_px() - 1), f64::from(h / 2))
+                            .is_none()
+                    );
+                    self.app.config.window.show_window_controls = true;
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar);
+                    let retained = self.app.focused_gshell();
+                    self.app.create_workspace_tab();
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::SplitVertical);
+                    let closing = self.app.focused_gshell();
+                    let closed_panes = self.app.visible_gshells();
+                    assert_eq!(closed_panes.len(), 2);
+                    assert!(self.app.focus_gshell(retained));
+                    self.app.activate_workspace_tab(closing, retained);
+                    let count = self.app.tab_count();
+                    let close_position = (0..size.height_px())
+                        .find_map(|y| {
+                            (0..size.width_px() / 3).find_map(|x| {
+                                let index = self
+                                    .app
+                                    .render_runtime
+                                    .as_ref()
+                                    .unwrap()
+                                    .sidebar_close_at_position(f64::from(x), f64::from(y))?;
+                                (self.app.tab_gshells()[index] == closing)
+                                    .then_some(PhysicalPosition::new(f64::from(x), f64::from(y)))
+                            })
+                        })
+                        .unwrap();
+                    let window_id = self.app.render_window_id.unwrap();
+                    let click = |app: &mut App, state| {
+                        app.window_event(
+                            event_loop,
+                            window_id,
+                            WindowEvent::MouseInput {
+                                device_id: winit::event::DeviceId::dummy(),
+                                state,
+                                button: MouseButton::Left,
+                            },
+                        )
+                    };
+                    self.app.cursor_position = Some(close_position);
+                    click(&mut self.app, ElementState::Pressed);
+                    self.app.cursor_position = Some(PhysicalPosition::new(600.0, 400.0));
+                    click(&mut self.app, ElementState::Released);
+                    assert_eq!(self.app.tab_count(), count);
+                    self.app.cursor_position = Some(close_position);
+                    click(&mut self.app, ElementState::Pressed);
+                    click(&mut self.app, ElementState::Released);
+                    assert_eq!(self.app.tab_count(), count - 1);
+                    assert_eq!(self.app.focused_gshell(), retained);
+                    for pane in closed_panes {
+                        assert!(!self.app.focus_gshell(pane));
+                    }
+                    return;
+                }
                 self.app.open_command_palette();
-                assert!(self.app.handle_command_palette_event(
-                    event_loop,
-                    &WindowEvent::Ime(Ime::Preedit("fen".into(), Some((3, 3))))
-                ));
-                assert!(self.app.handle_command_palette_event(
-                    event_loop,
-                    &WindowEvent::Ime(Ime::Commit("分屏".into()))
-                ));
-                assert_eq!(
-                    self.app.command_palette.as_ref().unwrap().matches().len(),
-                    2
-                );
-                self.app.command_palette.as_mut().unwrap().query.clear();
-                self.app.sync_command_palette();
             }
             fn window_event(
                 &mut self,
@@ -447,7 +571,12 @@ mod tests {
             .build()
             .unwrap();
         let mut config = GerminalConfig::default();
-        config.window.title = "Germinal command palette preview".into();
+        config.window.title = if sidebar {
+            "Germinal sidebar preview"
+        } else {
+            "Germinal command palette preview"
+        }
+        .into();
         config.window.width_px = 960;
         config.window.height_px = 640;
         config.terminal.shell = Some(config::ShellConfig {
@@ -463,7 +592,8 @@ mod tests {
         event_loop
             .run_app(&mut Preview {
                 app,
-                deadline: Instant::now() + Duration::from_secs(20),
+                deadline: Instant::now() + Duration::from_secs(if sidebar { 8 } else { 20 }),
+                sidebar,
             })
             .unwrap();
     }
@@ -471,7 +601,7 @@ mod tests {
     #[test]
     fn filtering_navigation_and_commit_select_the_same_command() {
         let mut palette = CommandPalette::new(&[], true, true);
-        palette.insert("分屏");
+        palette.insert("split");
         assert_eq!(palette.matches().len(), 2);
         palette.navigate(true);
         assert_eq!(palette.action(), Some(KeyboardAction::SplitVertical));

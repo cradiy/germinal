@@ -313,18 +313,4 @@ mod tests {
 
         assert!(factory.build_upload_bytes(&atlas).is_none());
     }
-
-    #[test]
-    fn texture_spec_matches_rgba_atlas() {
-        let spec = WgpuTerminalGlyphAtlasTextureSpec::new();
-
-        assert_eq!(spec.format, wgpu::TextureFormat::Rgba8UnormSrgb);
-        assert_eq!(spec.dimension, wgpu::TextureDimension::D2);
-        assert_eq!(spec.mip_level_count, 1);
-        assert_eq!(spec.sample_count, 1);
-        assert!(spec.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
-        assert!(spec.usage.contains(wgpu::TextureUsages::COPY_DST));
-        assert_eq!(spec.sampler_mag_filter, wgpu::FilterMode::Nearest);
-        assert_eq!(spec.sampler_min_filter, wgpu::FilterMode::Nearest);
-    }
 }

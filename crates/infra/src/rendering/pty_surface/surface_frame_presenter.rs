@@ -30,6 +30,7 @@ pub struct WgpuTerminalSurfaceFramePresenter {
     retained_frame: RefCell<Option<WgpuRetainedWorkspaceFrame>>,
     palette_chrome: RefCell<Option<super::palette_chrome::PaletteChrome>>,
     palette_frame_renderer: Option<WgpuTerminalFrameRenderer>,
+    sidebar_frame_renderer: Option<WgpuTerminalFrameRenderer>,
 }
 
 impl WgpuTerminalSurfaceFramePresenter {
@@ -46,6 +47,7 @@ impl WgpuTerminalSurfaceFramePresenter {
             retained_frame: RefCell::new(None),
             palette_chrome: RefCell::new(None),
             palette_frame_renderer: None,
+            sidebar_frame_renderer: None,
         }
     }
 
@@ -67,6 +69,13 @@ impl WgpuTerminalSurfaceFramePresenter {
         renderer: Option<WgpuTerminalFrameRenderer>,
     ) {
         self.palette_frame_renderer = renderer;
+    }
+
+    pub(super) fn set_sidebar_frame_renderer(
+        &mut self,
+        renderer: Option<WgpuTerminalFrameRenderer>,
+    ) {
+        self.sidebar_frame_renderer = renderer;
     }
 
     pub fn present_workspace_frame(
@@ -186,6 +195,10 @@ impl WgpuTerminalSurfaceFramePresenter {
             .filter(|surface| {
                 surface.surface_snapshot.target_id
                     != germinal_ports::rendering::command_palette::COMMAND_PALETTE_TARGET_ID
+                    && surface.surface_snapshot.target_id
+                        != germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID
+                    && surface.surface_snapshot.target_id
+                        != germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID
             })
             .map(|surface| {
                 let render_target_plan =
@@ -257,39 +270,57 @@ impl WgpuTerminalSurfaceFramePresenter {
         for surface in input.surfaces.iter().filter(|surface| {
             surface.surface_snapshot.target_id
                 == germinal_ports::rendering::command_palette::COMMAND_PALETTE_TARGET_ID
+                || surface.surface_snapshot.target_id
+                    == germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID
+                || surface.surface_snapshot.target_id
+                    == germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID
         }) {
-            self.palette_chrome
-                .borrow_mut()
-                .get_or_insert_with(|| {
-                    super::palette_chrome::PaletteChrome::new(input.device, input.color_format)
-                })
-                .encode(
-                    input.device,
-                    &mut command_encoder,
-                    &target_view,
-                    [input.width_px, input.height_px],
-                    surface,
-                );
+            let toolbar = surface.surface_snapshot.target_id
+                == germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID;
+            if !toolbar {
+                self.palette_chrome
+                    .borrow_mut()
+                    .get_or_insert_with(|| {
+                        super::palette_chrome::PaletteChrome::new(input.device, input.color_format)
+                    })
+                    .encode(
+                        input.device,
+                        &mut command_encoder,
+                        &target_view,
+                        [input.width_px, input.height_px],
+                        surface,
+                    );
+            }
             render_results.push(
-                self.palette_frame_renderer
-                    .as_ref()
-                    .unwrap_or(&self.frame_renderer)
-                    .render_to_view(
-                        WgpuTerminalGpuContext {
-                            device: input.device,
-                            queue: input.queue,
-                        },
-                        WgpuTerminalRenderView {
-                            command_encoder: &mut command_encoder,
-                            target_view: &target_view,
-                            render_target_plan: surface.render_target_plan,
-                            pipeline: input.pipeline,
-                            surface_snapshot: surface.surface_snapshot,
-                            renderer_config: surface.renderer_config,
-                            damage: None,
-                            hyperlink_highlights: &[],
-                        },
-                    ),
+                (if toolbar {
+                    &self.frame_renderer
+                } else if surface.surface_snapshot.target_id
+                    == germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID
+                {
+                    self.sidebar_frame_renderer
+                        .as_ref()
+                        .unwrap_or(&self.frame_renderer)
+                } else {
+                    self.palette_frame_renderer
+                        .as_ref()
+                        .unwrap_or(&self.frame_renderer)
+                })
+                .render_to_view(
+                    WgpuTerminalGpuContext {
+                        device: input.device,
+                        queue: input.queue,
+                    },
+                    WgpuTerminalRenderView {
+                        command_encoder: &mut command_encoder,
+                        target_view: &target_view,
+                        render_target_plan: surface.render_target_plan,
+                        pipeline: input.pipeline,
+                        surface_snapshot: surface.surface_snapshot,
+                        renderer_config: surface.renderer_config,
+                        damage: None,
+                        hyperlink_highlights: &[],
+                    },
+                ),
             );
         }
         let render_to_view = render_to_view_started_at.elapsed();

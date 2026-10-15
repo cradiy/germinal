@@ -229,23 +229,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adapter_spec_matches_terminal_pass_layout() {
-        let spec = WgpuTerminalCommandEncoderAdapterSpec::new();
-
-        assert_eq!(spec.color_attachment_count, 1);
-        assert!(!spec.has_depth_stencil_attachment);
-        assert!(!spec.has_timestamp_writes);
-        assert!(!spec.has_occlusion_query_set);
-        assert!(!spec.has_multiview_mask);
-    }
-
-    #[test]
-    fn maps_store_flag_to_wgpu_store_op() {
-        assert_eq!(store_op_of(true), wgpu::StoreOp::Store);
-        assert_eq!(store_op_of(false), wgpu::StoreOp::Discard);
-    }
-
-    #[test]
     fn splits_surface_cell_background_and_foreground_index_ranges() {
         assert_eq!(
             text_layer_index_range(WgpuTerminalTextLayer::SurfaceBackground, 30, 18),

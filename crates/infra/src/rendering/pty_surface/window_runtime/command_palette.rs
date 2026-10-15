@@ -222,6 +222,16 @@ mod tests {
     #[test]
     #[ignore = "requires a GPU adapter and system fonts; renders only an offscreen fixture"]
     fn palette_offscreen_preview() {
+        render_ui_preview(false);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter and system fonts; renders only an offscreen fixture"]
+    fn sidebar_offscreen_preview() {
+        render_ui_preview(true);
+    }
+
+    fn render_ui_preview(sidebar: bool) {
         use crate::rendering::pty_surface::{
             frame_renderer::{WgpuTerminalGpuContext, WgpuTerminalRenderView},
             palette_chrome::PaletteChrome,
@@ -282,17 +292,49 @@ mod tests {
             })
             .collect(),
         };
-        let built = build(
-            &palette,
-            size,
-            theme,
-            1,
-            &mut CommandPaletteViewport::default(),
-        )
+        let ui_cell = if sidebar {
+            TerminalCellSize::new(7, 16)
+        } else {
+            size.cell_size()
+        };
+        let built = if sidebar {
+            let mut sidebar = super::super::tab_sidebar::TabSidebar::default();
+            sidebar.pointer = Some((200.0, 7.0 * 16.0));
+            sidebar.build(
+                &TabBarSnapshot {
+                    titles: vec![
+                        "~".into(),
+                        "germinal".into(),
+                        "~/rust/project/构建终端".into(),
+                        "server logs".into(),
+                    ],
+                    progresses: vec![],
+                    render_target_ids: vec![],
+                    active_tab_index: 1,
+                    position: TabBarPosition::Left,
+                    style: TabBarStyle::Fade,
+                },
+                size,
+                ui_cell,
+                germinal_ports::rendering::toolbar::toolbar_height(
+                    TerminalScaleFactor::DEFAULT,
+                    height,
+                ),
+                theme,
+            )
+        } else {
+            build(
+                &palette,
+                size,
+                theme,
+                1,
+                &mut CommandPaletteViewport::default(),
+            )
+        }
         .unwrap();
         let config = WgpuRendererConfig::from(TerminalSizeInfo::zero_padding(
             built.placement.window_size(),
-            size.cell_size(),
+            ui_cell,
         ))
         .with_background_opacity(0.0);
         let surface = WgpuTerminalWorkspaceSurface {
@@ -310,10 +352,18 @@ mod tests {
             WgpuTerminalPipelineFactory::new(WgpuTerminalPipelineSpec::new(format)).create(&device);
         let renderer = WgpuTerminalFrameRenderer::new(
             WgpuTerminalFrameBuilder::new(config)
-                .with_crossfont_glyph_atlas("monospace", 16.0)
+                .with_crossfont_glyph_atlas("monospace", if sidebar { 11.2 } else { 16.0 })
                 .unwrap(),
         );
         let mut encoder = device.create_command_encoder(&Default::default());
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &view,
@@ -321,9 +371,9 @@ mod tests {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.010,
-                        g: 0.011,
-                        b: 0.019,
+                        r: linear(theme.background.red),
+                        g: linear(theme.background.green),
+                        b: linear(theme.background.blue),
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
@@ -357,6 +407,41 @@ mod tests {
                 hyperlink_highlights: &[],
             },
         );
+        if sidebar {
+            let mut toolbar = super::super::toolbar::Toolbar::default();
+            toolbar.config = Some(germinal_ports::rendering::toolbar::ToolbarConfig {
+                sidebar: true,
+                window_controls: true,
+            });
+            toolbar.hovered = Some(germinal_ports::rendering::toolbar::ToolbarAction::Minimize);
+            let toolbar = toolbar
+                .build(size, theme, TerminalScaleFactor::DEFAULT, false)
+                .unwrap();
+            renderer.render_to_view(
+                WgpuTerminalGpuContext {
+                    device: &device,
+                    queue: &queue,
+                },
+                WgpuTerminalRenderView {
+                    command_encoder: &mut encoder,
+                    target_view: &view,
+                    render_target_plan: WgpuTerminalRenderTargetPlan::new(
+                        width,
+                        toolbar.placement.height_px,
+                    )
+                    .with_load_op(WgpuTerminalLoadOp::Load),
+                    pipeline: &pipeline,
+                    surface_snapshot: &toolbar.snapshot,
+                    renderer_config: WgpuRendererConfig::from(TerminalSizeInfo::zero_padding(
+                        toolbar.placement.window_size(),
+                        TerminalCellSize::new(1, toolbar.placement.height_px),
+                    ))
+                    .with_background_opacity(1.0),
+                    damage: None,
+                    hyperlink_highlights: &[],
+                },
+            );
+        }
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: u64::from(width * height * 4),
@@ -391,16 +476,28 @@ mod tests {
         receiver.recv().unwrap().unwrap();
         let pixels = buffer.slice(..).get_mapped_range().unwrap();
         let pixel = |x: u32, y: u32| pixels[((y * width + x) * 4) as usize];
-        assert!(pixel(width / 2, built.placement.y_px + 4) > pixel(0, 0));
-        assert!(
-            pixel(built.placement.x_px, built.placement.y_px)
-                < pixel(width / 2, built.placement.y_px + 4)
-        );
-        assert_eq!(
-            pixel(width / 2, built.placement.y_px + 22),
-            pixel(width / 2, built.placement.y_px + 4)
-        );
-        if let Some(path) = std::env::var_os("GERMINAL_PALETTE_PREVIEW") {
+        if sidebar {
+            // Sidebar fills its own area without dimming the terminal area.
+            assert_eq!(pixel(4, 4), pixel(4, 40));
+            assert_eq!(pixel(width / 2, 4), pixel(width / 2, 40));
+            assert!(pixel(4, 40) > pixel(width / 2, 40));
+            assert!(pixel(8, 5 * 16) > pixel(8, 3 * 16));
+        } else {
+            assert!(pixel(width / 2, built.placement.y_px + 4) > pixel(0, 0));
+            assert!(
+                pixel(built.placement.x_px, built.placement.y_px)
+                    < pixel(width / 2, built.placement.y_px + 4)
+            );
+            assert_eq!(
+                pixel(width / 2, built.placement.y_px + 22),
+                pixel(width / 2, built.placement.y_px + 4)
+            );
+        }
+        if let Some(path) = std::env::var_os(if sidebar {
+            "GERMINAL_SIDEBAR_PREVIEW"
+        } else {
+            "GERMINAL_PALETTE_PREVIEW"
+        }) {
             let mut encoder =
                 png::Encoder::new(std::fs::File::create(path).unwrap(), width, height);
             encoder.set_color(png::ColorType::Rgba);

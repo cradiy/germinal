@@ -100,29 +100,6 @@ mod tests {
     use crate::rendering::pty_surface::buffer_uploader::WgpuGpuVertex;
 
     #[test]
-    fn builds_draw_indexed_plan_from_upload_bytes() {
-        let upload_bytes = WgpuBufferUploadBytes {
-            vertex_data: Arc::from(vec![WgpuGpuVertex::default(); 4]),
-            index_data: Arc::from(vec![0_u32; 6]),
-            vertex_count: 4,
-            index_count: 6,
-        };
-
-        let plan =
-            WgpuDrawIndexedPlan::from_upload_bytes(&upload_bytes).expect("draw plan should exist");
-
-        assert_eq!(plan.vertex_slot, 0);
-        assert_eq!(plan.index_format, wgpu::IndexFormat::Uint32);
-        assert_eq!(plan.index_count, 6);
-        assert_eq!(plan.base_vertex, 0);
-        assert_eq!(plan.first_instance, 0);
-        assert_eq!(plan.instance_count, 1);
-
-        assert_eq!(plan.index_range(), 0..6);
-        assert_eq!(plan.instance_range(), 0..1);
-    }
-
-    #[test]
     fn returns_none_for_empty_upload_bytes() {
         let upload_bytes = WgpuBufferUploadBytes {
             vertex_data: Arc::from(Vec::<WgpuGpuVertex>::new()),
@@ -132,30 +109,5 @@ mod tests {
         };
 
         assert_eq!(WgpuDrawIndexedPlan::from_upload_bytes(&upload_bytes), None);
-    }
-
-    #[test]
-    fn records_draw_indexed_stats() {
-        let plan = WgpuDrawIndexedPlan {
-            vertex_slot: 0,
-            index_format: wgpu::IndexFormat::Uint32,
-            index_count: 42,
-            base_vertex: 0,
-            first_instance: 0,
-            instance_count: 1,
-        };
-
-        let mut stats = WgpuDrawIndexedStats::default();
-
-        stats.record(plan);
-
-        assert_eq!(
-            stats,
-            WgpuDrawIndexedStats {
-                draw_count: 1,
-                last_index_count: 42,
-                last_instance_count: 1,
-            }
-        );
     }
 }

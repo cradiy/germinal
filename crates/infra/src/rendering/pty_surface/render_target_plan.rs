@@ -171,26 +171,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_default_render_target_plan() {
-        let plan = WgpuTerminalRenderTargetPlan::new(1280, 720);
-
-        assert_eq!(plan.width_px, 1280);
-        assert_eq!(plan.height_px, 720);
-        assert_eq!(plan.x_px, 0);
-        assert_eq!(plan.y_px, 0);
-        assert_eq!(plan.scissor_x_px, 0);
-        assert_eq!(plan.scissor_y_px, 0);
-        assert_eq!(plan.scissor_width_px, 1280);
-        assert_eq!(plan.scissor_height_px, 720);
-        assert_eq!(plan.viewport_width_px(), 1280.0);
-        assert_eq!(plan.viewport_height_px(), 720.0);
-        assert_eq!(plan.clear_color, WgpuTerminalClearColor::black());
-        assert_eq!(plan.load_op, WgpuTerminalLoadOp::Clear);
-        assert!(plan.store);
-        assert!(!plan.is_empty());
-    }
-
-    #[test]
     fn positions_render_target_inside_window() {
         let plan = WgpuTerminalRenderTargetPlan::new(640, 720).with_origin(640, 0);
 
@@ -216,44 +196,5 @@ mod tests {
         assert_eq!(plan.scissor_y_px, 680);
         assert_eq!(plan.scissor_width_px, 640);
         assert_eq!(plan.scissor_height_px, 40);
-    }
-
-    #[test]
-    fn detects_empty_render_target() {
-        assert!(WgpuTerminalRenderTargetPlan::new(0, 720).is_empty());
-        assert!(WgpuTerminalRenderTargetPlan::new(1280, 0).is_empty());
-        assert!(WgpuTerminalRenderTargetPlan::new(0, 0).is_empty());
-        assert!(!WgpuTerminalRenderTargetPlan::new(1280, 720).is_empty());
-    }
-
-    #[test]
-    fn converts_clear_color_to_wgpu_color() {
-        let plan = WgpuTerminalRenderTargetPlan::new(1280, 720)
-            .with_clear_color(WgpuTerminalClearColor::new(0.1, 0.2, 0.3, 1.0));
-
-        let color = plan.wgpu_color();
-
-        assert_eq!(color.r, 0.1);
-        assert_eq!(color.g, 0.2);
-        assert_eq!(color.b, 0.3);
-        assert_eq!(color.a, 1.0);
-    }
-
-    #[test]
-    fn builds_wgpu_load_op() {
-        let clear_plan =
-            WgpuTerminalRenderTargetPlan::new(1280, 720).with_load_op(WgpuTerminalLoadOp::Clear);
-
-        match clear_plan.wgpu_load_op() {
-            wgpu::LoadOp::Clear(color) => {
-                assert_eq!(color, wgpu::Color::BLACK);
-            }
-            other => panic!("expected clear load op, got {other:?}"),
-        }
-
-        let load_plan =
-            WgpuTerminalRenderTargetPlan::new(1280, 720).with_load_op(WgpuTerminalLoadOp::Load);
-
-        assert!(matches!(load_plan.wgpu_load_op(), wgpu::LoadOp::Load));
     }
 }

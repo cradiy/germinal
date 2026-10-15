@@ -8,6 +8,13 @@ use crate::pty_host::terminal_progress::TerminalProgress;
 pub enum TabBarPosition {
     Top,
     Bottom,
+    Left,
+}
+
+pub const SIDEBAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX - 2);
+
+pub fn sidebar_width_px(window_width: u32, cell_height: u32) -> u32 {
+    cell_height.saturating_mul(10).min(window_width / 3)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

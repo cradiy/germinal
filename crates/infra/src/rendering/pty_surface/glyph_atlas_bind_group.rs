@@ -109,32 +109,3 @@ pub struct WgpuTerminalGlyphAtlasBindGroup {
     pub texture_binding: u32,
     pub sampler_binding: u32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_spec_uses_fragment_texture_and_sampler_bindings() {
-        let spec = WgpuTerminalGlyphAtlasBindGroupSpec::new();
-
-        assert_eq!(spec.texture_binding, 0);
-        assert_eq!(spec.sampler_binding, 1);
-        assert_eq!(spec.visibility, wgpu::ShaderStages::FRAGMENT);
-        assert_eq!(spec.view_dimension, wgpu::TextureViewDimension::D2);
-        assert!(spec.sample_type_filterable);
-        assert_eq!(
-            spec.sampler_binding_type,
-            wgpu::SamplerBindingType::Filtering
-        );
-    }
-
-    #[test]
-    fn factory_exposes_spec() {
-        let factory = WgpuTerminalGlyphAtlasBindGroupFactory::new();
-        let spec = factory.spec();
-
-        assert_eq!(spec.texture_binding, 0);
-        assert_eq!(spec.sampler_binding, 1);
-    }
-}

@@ -10,6 +10,7 @@ pub mod command_palette;
 pub mod surface_snapshot;
 pub mod surface_snapshot_mailbox;
 pub mod tab_bar;
+pub mod toolbar;
 
 pub mod renderer_backend;
 

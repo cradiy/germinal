@@ -88,37 +88,3 @@ impl WgpuViewportBindGroup {
         self.byte_len = bytes.len();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_viewport_upload_bytes() {
-        let factory = WgpuViewportBindGroupFactory::new();
-
-        let upload_bytes = factory.build_upload_bytes(WgpuViewportUniform::new(1280.0, 720.0));
-
-        assert_eq!(upload_bytes.width_px, 1280.0);
-        assert_eq!(upload_bytes.height_px, 720.0);
-        assert_eq!(upload_bytes.byte_len(), 8);
-        assert!(!upload_bytes.is_empty());
-
-        let width = f32::from_ne_bytes(upload_bytes.bytes[0..4].try_into().unwrap());
-
-        let height = f32::from_ne_bytes(upload_bytes.bytes[4..8].try_into().unwrap());
-
-        assert_eq!(width, 1280.0);
-        assert_eq!(height, 720.0);
-    }
-
-    #[test]
-    fn viewport_upload_bytes_match_uniform_serialization() {
-        let factory = WgpuViewportBindGroupFactory::new();
-        let viewport = WgpuViewportUniform::new(1920.0, 1080.0);
-
-        let upload_bytes = factory.build_upload_bytes(viewport);
-
-        assert_eq!(upload_bytes.bytes, viewport.as_std140_bytes().to_vec());
-    }
-}

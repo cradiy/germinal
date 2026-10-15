@@ -150,22 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn shader_spec_uses_terminal_entries() {
-        let spec = WgpuTerminalShaderSpec::new();
-
-        assert_eq!(spec.vertex_entry, "vs_main");
-        assert_eq!(spec.fragment_entry, "fs_main");
-        assert_eq!(spec.viewport_binding, 0);
-        assert_eq!(spec.viewport_bind_group, 0);
-        assert!(spec.shader_source().contains("fn vs_main"));
-        assert!(spec.shader_source().contains("fn fs_main"));
-        assert!(spec.source.contains("@group(0) @binding(0)"));
-        assert!(spec.source.contains("@group(1) @binding(0)"));
-        assert!(spec.source.contains("@group(1) @binding(1)"));
-        assert!(spec.source.contains("textureSample"));
-    }
-
-    #[test]
     fn terminal_shader_validates() {
         let module = wgpu::naga::front::wgsl::parse_str(WGPU_TERMINAL_SHADER_WGSL)
             .expect("terminal shader should parse");

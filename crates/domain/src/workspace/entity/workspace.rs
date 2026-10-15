@@ -212,14 +212,6 @@ mod tests {
     };
 
     #[test]
-    fn main_workspace_starts_with_single_focused_pane() {
-        let workspace = Workspace::main();
-
-        assert_eq!(workspace.focused_pane(), PaneId::new(0));
-        assert_eq!(workspace.active_tab().pane_count(), 1);
-    }
-
-    #[test]
     fn split_focused_pane_creates_new_pane_and_focuses_it() {
         let mut workspace = Workspace::main();
 

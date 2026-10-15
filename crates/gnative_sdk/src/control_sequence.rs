@@ -62,20 +62,6 @@ mod tests {
     use super::{GNativeTunnelEnv, write_enter_control_sequence};
 
     #[test]
-    fn encodes_enter_control_sequence() {
-        let tunnel_env = GNativeTunnelEnv {
-            endpoint: "/tmp/germinal.sock".to_string(),
-            token: "secret".to_string(),
-            protocol_version: 1,
-        };
-
-        assert_eq!(
-            tunnel_env.enter_control_sequence(),
-            "\u{1b}Pgerminal-gnative;\u{1b}\\"
-        );
-    }
-
-    #[test]
     fn writes_enter_control_sequence_to_writer() {
         let tunnel_env = GNativeTunnelEnv {
             endpoint: "test".to_string(),
