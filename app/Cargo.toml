@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dirs.workspace = true
 clap.workspace = true
 germinal-application.workspace = true
 germinal-domain.workspace = true

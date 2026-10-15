@@ -38,19 +38,26 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 pub struct AppPaths {
     config_dir: PathBuf,
     config_file: PathBuf,
+    state_dir: PathBuf,
     log_dir: PathBuf,
 }
 
 impl AppPaths {
     pub fn resolve() -> AppResult<Self> {
-        let config_dir = xdg_dir("XDG_CONFIG_HOME", ".config")?.join(APP_NAME);
-        let state_dir = xdg_dir("XDG_STATE_HOME", ".local/state")?.join(APP_NAME);
+        let config_dir = dirs::config_dir()
+            .ok_or(AppError::MissingPlatformDirectory("configuration"))?
+            .join(APP_NAME);
+        let state_dir = dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .ok_or(AppError::MissingPlatformDirectory("state"))?
+            .join(APP_NAME);
         let config_file = config_dir.join(CONFIG_FILE_NAME);
         let log_dir = state_dir.join("logs");
 
         Ok(Self {
             config_dir,
             config_file,
+            state_dir,
             log_dir,
         })
     }
@@ -68,7 +75,7 @@ impl AppPaths {
     }
 
     pub fn ui_state_file(&self) -> PathBuf {
-        self.log_dir.with_file_name("ui-state.toml")
+        self.state_dir.join("ui-state.toml")
     }
 }
 
@@ -288,10 +295,10 @@ fn expand_home(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    let Some(home) = env::var_os("HOME") else {
+    let Some(home) = dirs::home_dir() else {
         return path.to_path_buf();
     };
-    PathBuf::from(home).join(components.as_path())
+    home.join(components.as_path())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -978,16 +985,6 @@ fn first_run_config(power_preference: WgpuTerminalPowerPreference) -> GerminalCo
     let mut config = GerminalConfig::default();
     config.rendering.power_preference = power_preference.into();
     config
-}
-
-fn xdg_dir(env_name: &str, home_suffix: &str) -> AppResult<PathBuf> {
-    match env::var_os(env_name) {
-        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
-        _ => {
-            let home = env::var_os("HOME").ok_or(AppError::MissingHomeDir)?;
-            Ok(PathBuf::from(home).join(home_suffix))
-        }
-    }
 }
 
 pub fn create_dir_all(path: &Path) -> AppResult<()> {

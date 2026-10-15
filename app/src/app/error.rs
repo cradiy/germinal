@@ -8,8 +8,8 @@ pub type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("HOME is not set; cannot resolve Germinal XDG paths")]
-    MissingHomeDir,
+    #[error("cannot resolve the platform {0} directory")]
+    MissingPlatformDirectory(&'static str),
     #[error("failed to create directory {path}: {source}")]
     CreateDirectory {
         path: PathBuf,

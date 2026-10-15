@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dirs.workspace = true
 germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
 germinal-ports.workspace = true

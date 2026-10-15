@@ -48,11 +48,7 @@ impl WorkspaceServiceState {
     }
 
     pub fn with_workspace(workspace: Workspace) -> Self {
-        Self::with_workspace_environment(
-            workspace,
-            default_tab_title(),
-            env::var_os("HOME").map(PathBuf::from),
-        )
+        Self::with_workspace_environment(workspace, default_tab_title(), dirs::home_dir())
     }
 
     fn with_workspace_environment(
@@ -426,7 +422,7 @@ fn default_tab_title() -> String {
     let Ok(current_dir) = env::current_dir() else {
         return ".".to_string();
     };
-    let home_dir = env::var_os("HOME").map(std::path::PathBuf::from);
+    let home_dir = dirs::home_dir();
     pretty_path(&current_dir, home_dir.as_deref())
 }
 

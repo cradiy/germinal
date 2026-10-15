@@ -138,8 +138,8 @@ fn default_terminfo_search_paths() -> Vec<PathBuf> {
 
     if let Some(dir) = env::var_os("TERMINFO") {
         paths.push(PathBuf::from(dir));
-    } else if let Some(home) = env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join(".terminfo"));
+    } else if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".terminfo"));
     }
 
     if let Ok(dirs) = env::var("TERMINFO_DIRS") {

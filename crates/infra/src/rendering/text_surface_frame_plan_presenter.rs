@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
-    env,
     fs::OpenOptions,
     io::Cursor,
     path::{Path, PathBuf},
@@ -403,9 +402,7 @@ struct SharedFrameMapping {
 
 impl SharedFrameMapping {
     fn open(path: &Path, layout: SharedRgbaLayout) -> Option<Self> {
-        let runtime_dir = PathBuf::from(env::var_os("XDG_RUNTIME_DIR")?)
-            .canonicalize()
-            .ok()?;
+        let runtime_dir = dirs::runtime_dir()?.canonicalize().ok()?;
         let path = path.canonicalize().ok()?;
         if !path.starts_with(&runtime_dir) {
             return None;
