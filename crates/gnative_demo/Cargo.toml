@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 germinal-domain.workspace = true
 germinal-gnative-protocol.workspace = true
 germinal-gnative-sdk.workspace = true

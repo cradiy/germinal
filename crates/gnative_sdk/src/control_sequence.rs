@@ -18,6 +18,9 @@ pub struct GNativeTunnelEnv {
 
 impl GNativeTunnelEnv {
     pub fn from_env() -> GNativeSdkResult<Self> {
+        if !cfg!(target_os = "linux") {
+            return Err(GNativeSdkError::UnsupportedPlatform);
+        }
         let endpoint = std::env::var(GNATIVE_TUNNEL_ENDPOINT_ENV).map_err(|_| {
             GNativeSdkError::MissingEnv {
                 name: GNATIVE_TUNNEL_ENDPOINT_ENV,
@@ -53,11 +56,17 @@ pub fn write_enter_control_sequence<W: Write>(
     writer: &mut W,
     tunnel_env: &GNativeTunnelEnv,
 ) -> io::Result<()> {
+    if !cfg!(target_os = "linux") {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "GNative is only supported on Linux",
+        ));
+    }
     writer.write_all(tunnel_env.enter_control_sequence().as_bytes())?;
     writer.flush()
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{GNativeTunnelEnv, write_enter_control_sequence};
 

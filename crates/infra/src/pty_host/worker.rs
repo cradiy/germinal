@@ -638,7 +638,7 @@ where
         }
         self.dispatch_clipboard_events();
 
-        if enter_gnative {
+        if cfg!(target_os = "linux") && enter_gnative {
             let _ = self
                 .proxy
                 .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative {
@@ -1572,6 +1572,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn terminal_worker_strips_enter_gnative_control_sequence_and_dispatches_mode_switch() {
         let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
         let backend = PlatformTerminalWorkerBackend::with_worker_count(

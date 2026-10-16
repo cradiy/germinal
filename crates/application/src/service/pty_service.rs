@@ -7,7 +7,10 @@ use std::{
 };
 
 use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::pty_host_id::PtyHostId};
+#[cfg(target_os = "linux")]
 use germinal_gnative_protocol::gnative::session::GNATIVE_PROTOCOL_VERSION;
+#[cfg(target_os = "linux")]
+use germinal_ports::service::gnative_tunnel::IGNativeTunnel;
 use germinal_ports::{
     event::{
         gshell_input::GShellInputEvent,
@@ -31,11 +34,11 @@ use germinal_ports::{
     },
     rendering::surface_snapshot_mailbox::SurfaceSnapshotSender,
     service::{
-        gnative_tunnel::{IGNativeTunnel, IGNativeTunnelProvider},
-        pty_service::IPtyService,
+        gnative_tunnel::IGNativeTunnelProvider, pty_service::IPtyService,
         worker_service::IWorkerService,
     },
 };
+#[cfg(target_os = "linux")]
 use tracing::warn;
 
 use super::pty_input_encoder::{
@@ -188,6 +191,9 @@ where
         ) else {
             return;
         };
+        #[cfg(not(target_os = "linux"))]
+        let shell_env = Vec::new();
+        #[cfg(target_os = "linux")]
         let shell_env = match self
             .prj_ref()
             .gnative_tunnel()

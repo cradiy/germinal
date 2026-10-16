@@ -9,9 +9,11 @@ repository.workspace = true
 germinal-gnative-protocol.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 flume.workspace = true
 
-[dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 germinal-domain.workspace = true
 germinal-infra.workspace = true
 germinal-ports.workspace = true

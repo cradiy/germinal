@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GNativeTunnelError {
+    #[error("GNative is only supported on Linux")]
+    UnsupportedPlatform,
     #[error("failed to create gnative tunnel async runtime: {source}")]
     CreateRuntime {
         #[source]

@@ -280,6 +280,7 @@ impl App {
         app.gshell_service_state
             .pty_service_state()
             .set_scroll_multiplier(app.config.scrolling.multiplier);
+        #[cfg(target_os = "linux")]
         app.gnative_tunnel.configure(
             app.runtime_event_dispatcher.clone(),
             app.snapshot_wake_pending(),
@@ -1531,6 +1532,9 @@ impl ApplicationHandler<RuntimeEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
         match event {
             RuntimeEvent::GShell(GShellRuntimeEvent::EnterGNative { gshell_id }) => {
+                if !cfg!(target_os = "linux") {
+                    return;
+                }
                 self.clear_ime_preedit(gshell_id);
                 self.begin_gnative_mode(gshell_id);
                 if let Err(error) = self.begin_gnative_session(gshell_id) {

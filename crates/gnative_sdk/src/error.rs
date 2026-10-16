@@ -6,6 +6,8 @@ pub type GNativeSdkResult<T> = Result<T, GNativeSdkError>;
 
 #[derive(Debug, Error)]
 pub enum GNativeSdkError {
+    #[error("GNative is only supported on Linux")]
+    UnsupportedPlatform,
     #[error("missing environment variable {name}")]
     MissingEnv { name: &'static str },
     #[error("invalid numeric environment variable {name}: {source}")]
