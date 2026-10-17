@@ -304,12 +304,22 @@ impl App {
         let window_attributes = winit::window::Window::default_attributes()
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
-            .with_decorations(self.config.window.decorations)
+            .with_decorations(self.config.window.decorations && !self.modern_toolbar_visible())
             .with_maximized(self.config.window.maximized)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
                 f64::from(self.config.window.height_px),
             ));
+        // Keep the native background offscreen while GPU and font resources load.
+        #[cfg(windows)]
+        let window_attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            window_attributes
+                .with_visible(false)
+                // The custom frame supplies its own DWM shadow without winit's
+                // extra top non-client strip above the custom caption.
+                .with_undecorated_shadow(false)
+        };
         #[cfg(target_os = "linux")]
         let window_attributes = {
             use winit::platform::{
@@ -335,10 +345,22 @@ impl App {
         let runtime = self
             .render_runtime_factory
             .create_window_runtime_with_plugins(
-                window,
+                std::sync::Arc::clone(&window),
                 std::mem::take(&mut self.pending_wgpu_pane_plugins),
             )
             .map_err(AppError::CreateWindowRuntime)?;
+        #[cfg(windows)]
+        let runtime = {
+            let mut runtime = runtime;
+            // Prime the surface before showing it. Some backends report hidden surfaces
+            // as occluded, so showing the window must not depend on a successful present.
+            runtime.render();
+            window.set_visible(true);
+            runtime.set_window_occluded(false);
+            runtime.schedule_redraw();
+            window.request_redraw();
+            runtime
+        };
         self.render_runtime = Some(runtime);
         self.render_window_id = Some(window_id);
         Ok(())
@@ -437,6 +459,7 @@ impl App {
         if let Some(runtime) = self.render_runtime.as_mut() {
             runtime.set_sidebar_width(sidebar_width);
             runtime.set_sidebar_resize_cursor(resizing);
+            runtime.set_window_decorations(self.config.window.decorations && toolbar.is_none());
             runtime.set_toolbar(toolbar);
         }
         let visible_gshells = placements

@@ -199,32 +199,37 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
-        sync::mpsc,
-        thread,
-        time::Duration,
     };
 
+    #[cfg(target_os = "linux")]
     use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::vo::pty_host_id::PtyHostId};
+    use germinal_ports::pty_host::{
+        spawn_config::{PtyShellCommand, PtySpawnConfig},
+        terminal_size::TerminalPtySize,
+    };
+    #[cfg(target_os = "linux")]
     use germinal_ports::{
         event::{
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
             runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
         },
-        pty_host::{
-            spawn_config::{PtyShellCommand, PtySpawnConfig},
-            terminal_size::TerminalPtySize,
-            worker_input::TerminalWorkerInput,
-        },
+        pty_host::worker_input::TerminalWorkerInput,
     };
+    #[cfg(target_os = "linux")]
+    use std::{sync::mpsc, thread, time::Duration};
 
+    #[cfg(target_os = "linux")]
+    use super::PtyBridge;
     use super::{
-        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridge, PtyBridgeConfig,
+        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridgeConfig,
         preferred_terminal_term_name_with_paths, terminfo_exists_in_paths,
     };
 
+    #[cfg(target_os = "linux")]
     #[derive(Clone)]
     struct TestDispatcher(mpsc::Sender<RuntimeEvent>);
 
+    #[cfg(target_os = "linux")]
     impl IRuntimeEventDispatcher for TestDispatcher {
         fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
             self.0
@@ -332,6 +337,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "PTY child fixture; spawned by closing_pty_input_terminates_the_child_process"]
     fn pty_child_fixture() {

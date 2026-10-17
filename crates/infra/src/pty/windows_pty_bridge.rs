@@ -13,11 +13,10 @@ use germinal_ports::{
     },
     pty_host::{
         pty_input::{PtyInput, PtyInputReceiver},
-        terminal_size::TerminalPtySize,
         worker_input::TerminalWorkerInput,
     },
 };
-use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
+use portable_pty::{CommandBuilder, native_pty_system};
 use tracing::{error, warn};
 
 use crate::pty::portable_pty_bridge::{

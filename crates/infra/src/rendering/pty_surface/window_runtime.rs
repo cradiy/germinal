@@ -38,6 +38,8 @@ use thiserror::Error;
 mod command_palette;
 mod tab_sidebar;
 mod toolbar;
+#[cfg(windows)]
+mod windows_frame;
 use tracing::{error, info, warn};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
@@ -142,6 +144,8 @@ fn terminal_power_preference_for_device_types(
 }
 
 pub struct WgpuTerminalWindowRuntime {
+    #[cfg(windows)]
+    windows_frame: Option<windows_frame::WindowsFrame>,
     window: Arc<Window>,
     base_title: String,
     instance: wgpu::Instance,
@@ -785,7 +789,11 @@ impl WgpuTerminalWindowRuntime {
                 "configured background shader frame pacing"
             );
         }
+        #[cfg(windows)]
+        let windows_frame = windows_frame::WindowsFrame::install(Arc::clone(&window));
         Ok(Self {
+            #[cfg(windows)]
+            windows_frame,
             window,
             base_title,
             instance,
@@ -1204,10 +1212,28 @@ impl WgpuTerminalWindowRuntime {
         self.schedule_redraw();
     }
 
+    pub fn set_window_decorations(&self, decorations: bool) {
+        if self.window.is_decorated() != decorations {
+            self.window.set_decorations(decorations);
+        }
+    }
+
     pub fn set_toolbar(
         &mut self,
         config: Option<germinal_ports::rendering::toolbar::ToolbarConfig>,
     ) {
+        #[cfg(windows)]
+        if let Some(frame) = &self.windows_frame {
+            frame.update(
+                config,
+                self.toolbar.sidebar_width.unwrap_or_else(|| {
+                    germinal_ports::rendering::tab_bar::sidebar_width_px(
+                        self.size_info.window_size().width_px(),
+                        self.size_info.cell_size().height_px(),
+                    )
+                }),
+            );
+        }
         self.toolbar.config = config;
         self.toolbar.hovered = None;
         self.schedule_redraw();
@@ -1620,6 +1646,14 @@ impl WgpuTerminalWindowRuntime {
     }
 
     pub fn render(&mut self) {
+        #[cfg(windows)]
+        if let Some(hover) = self
+            .windows_frame
+            .as_ref()
+            .and_then(|frame| frame.take_hover_change())
+        {
+            self.toolbar.hovered = hover;
+        }
         if self.window_occluded {
             return;
         }

@@ -1,0 +1,2 @@
+# Keep Rust sources consistent with rustfmt's Unix newline_style on Windows.
+*.rs text eol=lf

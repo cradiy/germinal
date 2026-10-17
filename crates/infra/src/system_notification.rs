@@ -45,10 +45,26 @@ impl SystemNotifier {
                     }
                     match notification.show() {
                         Ok(handle) if focus_on_activation => {
+                            let on_activation = Arc::clone(&on_activation);
                             spawn_activation_waiter(
-                                handle,
-                                request.gshell_id,
-                                Arc::clone(&on_activation),
+                                move || {
+                                    #[cfg(windows)]
+                                    if let Err(error) = handle.wait_for_response(
+                                        |response: &notify_rust::NotificationResponse| {
+                                            if !matches!(response, notify_rust::NotificationResponse::Closed(_)) {
+                                                on_activation(request.gshell_id);
+                                            }
+                                        },
+                                    ) {
+                                        warn!(%error, "failed to wait for terminal notification activation");
+                                    }
+                                    #[cfg(not(windows))]
+                                    handle.wait_for_action(|action| {
+                                        if action != "__closed" {
+                                            on_activation(request.gshell_id);
+                                        }
+                                    });
+                                },
                                 Arc::clone(&activation_waiters),
                             );
                         }
@@ -91,13 +107,9 @@ impl SystemNotifier {
     }
 }
 
-fn spawn_activation_waiter<F>(
-    handle: notify_rust::NotificationHandle,
-    gshell_id: GShellId,
-    on_activation: Arc<F>,
-    waiter_count: Arc<AtomicUsize>,
-) where
-    F: Fn(GShellId) + Send + Sync + 'static + ?Sized,
+fn spawn_activation_waiter<F>(wait_for_activation: F, waiter_count: Arc<AtomicUsize>)
+where
+    F: FnOnce() + Send + 'static,
 {
     if waiter_count
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -115,11 +127,7 @@ fn spawn_activation_waiter<F>(
     let worker = thread::Builder::new()
         .name("germinal-notification-activation".to_owned())
         .spawn(move || {
-            handle.wait_for_action(|action| {
-                if action != "__closed" {
-                    on_activation(gshell_id);
-                }
-            });
+            wait_for_activation();
             worker_waiter_count.fetch_sub(1, Ordering::AcqRel);
         });
     if let Err(error) = worker {

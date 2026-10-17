@@ -644,9 +644,25 @@ impl WgpuCrossfontGlyphBackend {
             return glyph;
         }
 
-        let font_key = self.font_key_for_glyph(glyph_key);
-
-        let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
+        // A terminal space has no ink. DirectWrite rejects the empty alpha texture,
+        // which would otherwise send it through the visible replacement-glyph path.
+        let glyph = if glyph_key.character() == Some(' ') {
+            RasterizedTerminalGlyph {
+                key: glyph_key,
+                cell_width: 1,
+                width_px: 0,
+                height_px: 0,
+                left_px: 0,
+                top_px: 0,
+                advance_px: self.average_advance_px as i32,
+                pixels: Arc::new(Vec::new()),
+                is_color: false,
+                direct_draw_offset: None,
+            }
+        } else {
+            let font_key = self.font_key_for_glyph(glyph_key);
+            rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key)
+        };
         self.glyph_cache.insert(glyph.clone());
         glyph
     }
@@ -745,10 +761,10 @@ enum FontCoverage {
 }
 
 impl FontCoverage {
-    fn contains(&self, character: char) -> bool {
+    fn contains(&self, _character: char) -> bool {
         match self {
             #[cfg(not(any(target_os = "macos", windows)))]
-            Self::Fontconfig(charset) => charset.has_char(character),
+            Self::Fontconfig(charset) => charset.has_char(_character),
             Self::All => true,
         }
     }
@@ -2138,6 +2154,7 @@ fn load_font_for_terminal_weight(
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn load_font_with_style_name(
     rasterizer: &mut Rasterizer,
     family: &str,
@@ -2182,6 +2199,20 @@ mod tests {
             is_color: false,
             direct_draw_offset: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directwrite_spaces_do_not_render_replacement_glyphs() {
+        let builder = super::WgpuCrossfontGlyphAtlasBuilder::new("Consolas", 18.0)
+            .expect("load Windows monospace font");
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let key = WgpuTerminalGlyphKey::styled(' ', bold, italic);
+            let atlas = builder.build_for_glyphs([key]);
+            assert!(atlas.has_glyph_key(key), "space must retain an atlas entry");
+            assert_eq!(atlas.non_zero_pixel_count(), 0, "space must stay invisible");
+        }
+        assert!(builder.build_for_chars(['A']).non_zero_pixel_count() > 0);
     }
 
     #[test]
