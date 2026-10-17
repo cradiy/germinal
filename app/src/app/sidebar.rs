@@ -129,9 +129,12 @@ mod tests {
     }
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct UiState {
+    #[cfg(windows)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<germinal_infra::rendering::pty_surface::window_runtime::SavedWindowPlacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sidebar_width: Option<f64>,
 }
@@ -183,6 +186,36 @@ impl UiState {
 }
 
 impl App {
+    #[cfg(windows)]
+    pub(super) fn restore_window_placement(&mut self, window: &winit::window::Window) -> bool {
+        let Some(state) = &self.sidebar_resize.state.window else {
+            return false;
+        };
+        if !state.restore_hidden(window) {
+            return false;
+        }
+        self.config.window.maximized |= state.maximized;
+        true
+    }
+
+    #[cfg(windows)]
+    pub(super) fn save_window_placement(&self) {
+        let Some(path) = &self.sidebar_resize.path else {
+            return;
+        };
+        let Some(window) = self
+            .render_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.saved_window_placement())
+        else {
+            return;
+        };
+        let mut state = self.sidebar_resize.state.clone();
+        state.window = Some(window);
+        if let Err(error) = state.save(path) {
+            warn!(%error, "failed to save window placement");
+        }
+    }
     pub fn restore_ui_state(&mut self, path: PathBuf) {
         match fs::read_to_string(&path) {
             Ok(contents) => match toml::from_str::<UiState>(&contents) {

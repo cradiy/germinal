@@ -40,7 +40,11 @@ mod tab_sidebar;
 mod toolbar;
 #[cfg(windows)]
 mod windows_frame;
+#[cfg(windows)]
+mod windows_placement;
 use tracing::{error, info, warn};
+#[cfg(windows)]
+pub use windows_placement::SavedWindowPlacement;
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     window::{CursorIcon, UserAttentionType, Window, WindowId},
@@ -1237,17 +1241,25 @@ impl WgpuTerminalWindowRuntime {
     }
 
     #[cfg(windows)]
-    pub fn prepare_initial_show(&mut self, maximized: bool) -> TerminalWindowSize {
+    pub fn prepare_initial_show(&mut self, maximized: bool, restored: bool) -> TerminalWindowSize {
         // Prepare a real first frame before allowing Windows to animate the
         // maximize transition. Never maximize a hidden, unpainted HWND.
         windows_frame::cloak_for_startup(&self.window, true);
-        if maximized && let Some(monitor) = self.window.current_monitor() {
+        if maximized
+            && !restored
+            && let Some(monitor) = self.window.current_monitor()
+        {
             self.window.set_outer_position(monitor.position());
         }
         self.window.set_visible(true);
         self.set_window_occluded(false);
         let size = self.window.inner_size();
         TerminalWindowSize::new(size.width.max(1), size.height.max(1))
+    }
+
+    #[cfg(windows)]
+    pub fn saved_window_placement(&self) -> Option<SavedWindowPlacement> {
+        SavedWindowPlacement::capture(&self.window)
     }
 
     #[cfg(windows)]

@@ -7,12 +7,13 @@ with the current defaults. When `XDG_CONFIG_HOME` is set, the path is
 All sections and fields are optional. Omitted values use their defaults.
 If an existing configuration cannot be read, parsed, validated, or its resources resolved,
 Germinal reports a warning and starts with defaults for that session. It leaves the file
-unchanged; correct the file and restart to load your settings. Removed fields are not migrated.
+unchanged; correct the file and restart to load your settings.
 
 ## Window
 
 ```toml
 [window]
+modern = false
 title = "Germinal"
 width_px = 960
 height_px = 540
@@ -22,20 +23,20 @@ titlebar = "custom"
 show_window_controls = true
 ```
 
-- `width_px` and `height_px` are integer logical-pixel values. Use `960`, not `960px`.
-- `maximized = true` starts each Germinal window maximized while keeping the desktop shell and
-  compositor window-management behavior. The default is `false`.
+- `modern = true` enables the fixed modern layout: a custom title bar, left sidebar tabs,
+  fade style, and visible window controls. The saved `titlebar`, `show_window_controls`,
+  `tabs.position`, and `tabs.style` settings apply only when modern mode is off.
+- `width_px` and `height_px` are integer logical-pixel startup dimensions.
+- `maximized = true` always starts the window maximized. On Windows, saved window
+  placement supplies restored dimensions and can also restore a maximized window
+  when this option is `false`.
 - `opacity` accepts values from `0.0` through `1.0`. Compositor support is required for
   transparency.
 - `titlebar` accepts `native` (system title bar), `hidden` (no title bar), or `custom`
-  (the default inline title bar). The compositor may still draw a focus border.
-  Replace the former `toolbar` and `decorations` fields with this single setting.
-- With `titlebar = "custom"`, Germinal draws the title bar and hides native decorations.
-  Top tabs share its row, with inset spacing and a reserved drag area before window controls.
-  Bottom and left tabs retain the application icon in the title bar; top tabs hide it.
-  The ordinary inline title bar has no new-tab or sidebar-toggle button.
-  Modern mode retains both the `+` and sidebar-toggle buttons.
-- `show_window_controls = false` hides the modern title bar's minimize, maximize, and close buttons.
+  (the default inline title bar). With `custom`, top tabs share the title bar row;
+  bottom tabs leave the application icon in the title bar.
+- `show_window_controls = false` hides the custom title bar's minimize, maximize,
+  and close buttons in traditional mode.
 
 ## Rendering
 
@@ -188,19 +189,6 @@ history = 10000
 
 `history` is the maximum scrollback line count.
 
-When the viewport is above the live display, Germinal shows a scrollbar at the right edge of the
-terminal. The thumb can be clicked or dragged to move through scrollback and hides again at the
-live bottom.
-
-## Hyperlinks
-
-Germinal recognizes both OSC 8 terminal hyperlinks and common URI schemes printed as plain text,
-including links that soft-wrap onto another terminal row. Hovering a supported link changes every
-wrapped segment to the configured `url_color` with a curly underline and changes the pointer to a
-hand.
-Hold Control (or Command) and left-click to open it with the operating system's default handler;
-Kitty's Control+Shift+left-click gesture works as well.
-
 ## Bell
 
 ```toml
@@ -228,24 +216,6 @@ Custom mode shows the tab bar even with a single tab. Native and hidden horizont
 `style` accepts `fade` or `powerline`.
 
 ## Keyboard
-
-Files and directories dropped onto the window are inserted into the focused terminal
-as quoted path arguments, separated by spaces, without pressing Enter. Multiple files
-are supported. Drops are ignored while the command palette is open.
-Quoting follows the configured startup shell (or the default shell), supporting
-PowerShell, cmd, Nushell, Bash/Niubash, sh, zsh, dash, and fish. Nested shells and remote
-sessions are not detected, and paths are not converted to WSL or remote paths.
-Paths with terminal control characters are rejected. For cmd, paths containing `%`,
-`!`, or double quotes are rejected because their interpretation depends on expansion
-settings. Unsupported shells or rejected paths produce a log warning.
-
-Open the command palette with `Ctrl+Shift+P`. `Modern mode` and `Window controls`
-are direct On/Off switches. `Adjust title bar` and `Adjust tabs` open submenus.
-Use arrow keys and Enter to choose a setting;
-Esc or the `Back` entry returns to the parent menu. Esc at the root closes the palette.
-Current choices are marked `Current`. Selecting a setting applies it immediately and
-saves the affected fields to `config.toml`, preserving other settings and comments.
-Modern mode always uses its fixed layout; other saved appearance choices apply when it is off.
 
 ```toml
 [[keyboard.bindings]]
@@ -298,8 +268,3 @@ file_level = "info"
 ```
 
 Both fields accept `trace`, `debug`, `info`, `warn`, or `error`.
-
-Modern mode is controlled by `[window] modern = true` or the command palette's
-`Modern mode` switch. It uses a fixed custom title bar, left tabs, fade style, and
-visible window controls. Other appearance choices remain editable and are saved, but
-do not affect the modern layout. Switching modern mode off applies those saved choices.

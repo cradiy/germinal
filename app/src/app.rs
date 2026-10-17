@@ -130,6 +130,8 @@ pub struct App {
     sidebar_close_pressed: Option<GShellId>,
     sidebar_resize: sidebar::SidebarResize,
     modern_sidebar_collapsed: bool,
+    #[cfg(windows)]
+    window_placement_restored: bool,
     pane_navigation_enabled: bool,
     command_palette: Option<command_palette::CommandPalette>,
     palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
@@ -228,6 +230,8 @@ impl App {
         let app = Self {
             sidebar_resize: sidebar::SidebarResize::default(),
             modern_sidebar_collapsed: false,
+            #[cfg(windows)]
+            window_placement_restored: false,
             toolbar_pressed: None,
             toolbar_pointer_consumed: false,
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
@@ -336,6 +340,10 @@ impl App {
                 .map_err(AppError::CreateWindow)?,
         );
         let window_id = window.id();
+        #[cfg(windows)]
+        {
+            self.window_placement_restored = self.restore_window_placement(&window);
+        }
         window.set_ime_purpose(ImePurpose::Terminal);
         window.set_ime_allowed(true);
 
@@ -1522,6 +1530,8 @@ impl App {
     }
 
     fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        self.save_window_placement();
         if let Err(error) = self.persist_workspace() {
             error!(error = %error, "failed to persist workspace");
         }
@@ -1563,7 +1573,7 @@ impl ApplicationHandler<RuntimeEvent> for App {
                 .render_runtime
                 .as_mut()
                 .unwrap()
-                .prepare_initial_show(self.config.window.maximized);
+                .prepare_initial_show(self.config.window.maximized, self.window_placement_restored);
             let size_info = self.resize_window_size_info(size);
             self.resize_workspace_gshells(size_info.window_size());
             self.consume_latest_terminal_snapshot();
