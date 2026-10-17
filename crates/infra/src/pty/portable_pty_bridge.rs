@@ -385,10 +385,23 @@ mod tests {
         worker_rx: mpsc::Receiver<TerminalWorkerInput>,
         reply_input: germinal_ports::pty_host::pty_input::PtyInputSender,
     ) -> thread::JoinHandle<()> {
+        drain_pty_output_with_observer(worker_rx, reply_input, |_| {})
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn drain_pty_output_with_observer(
+        worker_rx: mpsc::Receiver<TerminalWorkerInput>,
+        reply_input: germinal_ports::pty_host::pty_input::PtyInputSender,
+        mut observe: impl FnMut(&[u8]) + Send + 'static,
+    ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let mut output = Vec::new();
             let mut replied = false;
-            while let Ok(TerminalWorkerInput::Bytes(bytes)) = worker_rx.recv() {
+            while let Ok(message) = worker_rx.recv() {
+                let TerminalWorkerInput::Bytes(bytes) = message else {
+                    continue;
+                };
+                observe(&bytes);
                 output.extend(bytes);
                 // portable-pty enables PSEUDOCONSOLE_INHERIT_CURSOR. A real
                 // terminal worker answers this query before ConPTY can proceed.
@@ -400,6 +413,71 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interactive_windows_shells_report_directory_changes() {
+        use crate::pty_host::{NotificationProtocolEvent, TerminalNotificationProtocolDecoder};
+        use germinal_ports::pty_host::pty_input::PtyInput;
+        let root = TestDirectory::new("directory reporting");
+        let destination = root.path().join("changed directory");
+        fs::create_dir(&destination).unwrap();
+        for program in ["powershell.exe", "cmd.exe"] {
+            let (event_tx, event_rx) = mpsc::channel();
+            let (worker_tx, worker_rx) = mpsc::sync_channel(16);
+            let (directory_tx, directory_rx) = mpsc::channel();
+            let input = PtyBridge::spawn(
+                TestDispatcher(event_tx),
+                GShellId::new(1),
+                PtyHostId::new(1),
+                PtySpawnConfig {
+                    shell: Some(PtyShellCommand::new(
+                        program.into(),
+                        if program == "powershell.exe" {
+                            vec!["-NoLogo".into(), "-NoProfile".into()]
+                        } else {
+                            Vec::new()
+                        },
+                    )),
+                    working_directory: Some(root.path().to_path_buf()),
+                    initial_size: TerminalPtySize::new(24, 120, 960, 384),
+                },
+                Vec::new(),
+                worker_tx,
+            );
+            let mut decoder = TerminalNotificationProtocolDecoder::default();
+            let drain = drain_pty_output_with_observer(worker_rx, input.clone(), move |bytes| {
+                for event in decoder.feed(bytes) {
+                    if let NotificationProtocolEvent::WorkingDirectory(path) = event {
+                        let _ = directory_tx.send(path);
+                    }
+                }
+            });
+            let wait_directory = || {
+                directory_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap_or_else(|error| {
+                        input.close();
+                        panic!("{program} did not report its directory: {error}");
+                    })
+            };
+            let initial = wait_directory();
+            assert_eq!(initial, root.path());
+            let change = if program == "powershell.exe" {
+                format!("Set-Location -LiteralPath '{}'\r", destination.display())
+            } else {
+                format!("cd /d \"{}\"\r", destination.display())
+            };
+            input.send(PtyInput::Bytes(change.into_bytes())).unwrap();
+            let changed = wait_directory();
+            input.close();
+            assert_eq!(changed, destination);
+            event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("shell closed");
+            drain.join().unwrap();
+        }
     }
 
     #[cfg(windows)]

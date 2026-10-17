@@ -27,8 +27,9 @@ pub fn command(
         .and_then(OsStr::to_str)
         .unwrap_or_default();
     if !extension.eq_ignore_ascii_case("cmd") && !extension.eq_ignore_ascii_case("bat") {
-        let mut command = CommandBuilder::new(program);
+        let mut command = CommandBuilder::new(&program);
         command.args(args);
+        configure_directory_reporting(&mut command, &program, args);
         return Ok(command);
     }
 
@@ -55,6 +56,34 @@ pub fn command(
     ]);
     command.env(BATCH_COMMAND_ENV, line);
     Ok(command)
+}
+
+const POWERSHELL_DIRECTORY_REPORTING: &str = include_str!("powershell_directory_reporting.ps1");
+
+fn configure_directory_reporting(command: &mut CommandBuilder, program: &Path, args: &[String]) {
+    let name = program
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    if name.eq_ignore_ascii_case("cmd") && args.is_empty() {
+        let prompt = env::var("PROMPT").unwrap_or_else(|_| "$P$G".into());
+        command.env("PROMPT", format!("$E]9;9;$P$E\\{prompt}"));
+    } else if (name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh"))
+        // Only augment known interactive switches; leave command/script modes and
+        // unfamiliar options intact instead of changing their execution semantics.
+        && args.iter().all(|arg| ["-nologo", "-noprofile", "-noexit"].iter().any(|allowed| arg.eq_ignore_ascii_case(allowed)))
+    {
+        use base64::Engine;
+        let script: Vec<u8> = POWERSHELL_DIRECTORY_REPORTING
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        if !args.iter().any(|arg| arg.eq_ignore_ascii_case("-noexit")) {
+            command.arg("-NoExit");
+        }
+        command.arg("-EncodedCommand");
+        command.arg(base64::engine::general_purpose::STANDARD.encode(script));
+    }
 }
 
 fn quote_batch_value(value: &str) -> Result<String, String> {

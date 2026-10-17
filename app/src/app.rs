@@ -581,7 +581,11 @@ impl App {
             .or_else(|| self.config.configured_working_directory());
         let mut command = Command::new(executable);
         if let Some(working_directory) = working_directory.filter(|path| path.is_dir()) {
-            command.current_dir(working_directory);
+            // Pass the directory explicitly: PTY defaults (or config) can override
+            // the new application's inherited process working directory.
+            command
+                .arg(&working_directory)
+                .current_dir(working_directory);
         }
         #[cfg(unix)]
         {

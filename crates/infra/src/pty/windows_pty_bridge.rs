@@ -96,6 +96,12 @@ async fn run_compio_bridge<Dispatch>(
     apply_default_terminal_env(&mut command);
     apply_shell_env(&mut command, &config.shell_env);
 
+    // ConPTY uses the launched executable path as its initial console title.
+    // Let the common worker distinguish it from application-provided titles.
+    let _ = terminal_worker_tx.send(TerminalWorkerInput::SetDefaultTitle(
+        command.get_argv()[0].to_string_lossy().into_owned(),
+    ));
+
     let Ok(mut child) = pair.slave.spawn_command(command) else {
         error!(
             gshell_id = gshell_id.value(),

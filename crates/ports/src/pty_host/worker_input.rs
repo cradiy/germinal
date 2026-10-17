@@ -96,6 +96,8 @@ impl TerminalSelectionPoint {
 }
 
 pub enum TerminalWorkerInput {
+    /// Platform-generated title to treat as unset. Send before terminal bytes.
+    SetDefaultTitle(String),
     Bytes(Vec<u8>),
     SetVisible(bool),
     Resize(TerminalPtySize),
