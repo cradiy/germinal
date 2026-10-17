@@ -102,6 +102,7 @@ impl PtyBridge {
             pty_host_id,
             config,
             terminal_worker_tx,
+            input_tx.clone(),
             input_rx,
         );
 
@@ -201,13 +202,13 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::vo::pty_host_id::PtyHostId};
     use germinal_ports::pty_host::{
         spawn_config::{PtyShellCommand, PtySpawnConfig},
         terminal_size::TerminalPtySize,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     use germinal_ports::{
         event::{
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
@@ -215,21 +216,21 @@ mod tests {
         },
         pty_host::worker_input::TerminalWorkerInput,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     use std::{sync::mpsc, thread, time::Duration};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     use super::PtyBridge;
     use super::{
         ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridgeConfig,
         preferred_terminal_term_name_with_paths, terminfo_exists_in_paths,
     };
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[derive(Clone)]
     struct TestDispatcher(mpsc::Sender<RuntimeEvent>);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     impl IRuntimeEventDispatcher for TestDispatcher {
         fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
             self.0
@@ -283,13 +284,13 @@ mod tests {
         assert_eq!(config.working_directory, Some("/tmp/project".into()));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn closing_pty_input_terminates_the_child_process() {
         const CHILD_TEST: &str = "pty::portable_pty_bridge::tests::pty_child_fixture";
 
         let (event_tx, event_rx) = mpsc::channel();
-        let (worker_tx, _worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let (worker_tx, worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
         let test_executable = std::env::current_exe().expect("locate the current test executable");
         let input = PtyBridge::spawn(
             TestDispatcher(event_tx),
@@ -312,7 +313,8 @@ mod tests {
             worker_tx,
         );
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let drain = drain_pty_output(worker_rx, input.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if input.child_process_id().is_some() {
                 break;
@@ -327,7 +329,7 @@ mod tests {
         input.close();
 
         let event = event_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(5))
             .expect("PTY bridge should report that the shell closed");
         assert_eq!(
             event,
@@ -335,13 +337,69 @@ mod tests {
                 gshell_id: GShellId::new(1)
             })
         );
+        drain.join().expect("PTY output drain");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     #[ignore = "PTY child fixture; spawned by closing_pty_input_terminates_the_child_process"]
     fn pty_child_fixture() {
         thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_exit_closes_bridge_while_input_sender_is_alive() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (worker_tx, worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let input = PtyBridge::spawn(
+            TestDispatcher(event_tx),
+            GShellId::new(1),
+            PtyHostId::new(1),
+            PtySpawnConfig {
+                shell: Some(PtyShellCommand::new(
+                    "cmd.exe".to_owned(),
+                    vec!["/d".into(), "/c".into(), "exit 0".into()],
+                )),
+                working_directory: None,
+                initial_size: TerminalPtySize::new(24, 80, 640, 384),
+            },
+            Vec::new(),
+            worker_tx,
+        );
+        let drain = drain_pty_output(worker_rx, input.clone());
+        let result = event_rx.recv_timeout(Duration::from_secs(5));
+        // Clean up even when exercising the broken implementation.
+        input.close();
+        assert_eq!(
+            result.expect("shell exit must not wait for the application to drop its sender"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::Closed {
+                gshell_id: GShellId::new(1),
+            })
+        );
+        drain.join().expect("PTY output drain");
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn drain_pty_output(
+        worker_rx: mpsc::Receiver<TerminalWorkerInput>,
+        reply_input: germinal_ports::pty_host::pty_input::PtyInputSender,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut replied = false;
+            while let Ok(TerminalWorkerInput::Bytes(bytes)) = worker_rx.recv() {
+                output.extend(bytes);
+                // portable-pty enables PSEUDOCONSOLE_INHERIT_CURSOR. A real
+                // terminal worker answers this query before ConPTY can proceed.
+                if !replied && output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                    let _ = reply_input.send(germinal_ports::pty_host::pty_input::PtyInput::Bytes(
+                        b"\x1b[1;1R".to_vec(),
+                    ));
+                    replied = true;
+                }
+            }
+        })
     }
 
     #[test]

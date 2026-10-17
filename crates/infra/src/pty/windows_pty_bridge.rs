@@ -12,7 +12,7 @@ use germinal_ports::{
         runtime_event_dispatcher::IRuntimeEventDispatcher,
     },
     pty_host::{
-        pty_input::{PtyInput, PtyInputReceiver},
+        pty_input::{PtyInput, PtyInputReceiver, PtyInputSender},
         worker_input::TerminalWorkerInput,
     },
 };
@@ -29,6 +29,7 @@ pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
     _pty_host_id: PtyHostId,
     config: PtyBridgeConfig,
     terminal_worker_tx: SyncSender<TerminalWorkerInput>,
+    shutdown_tx: PtyInputSender,
     input_rx: PtyInputReceiver,
 ) where
     Dispatch: IRuntimeEventDispatcher,
@@ -49,6 +50,7 @@ pub(crate) fn spawn_compio_bridge_thread<Dispatch>(
             gshell_id,
             config,
             terminal_worker_tx,
+            shutdown_tx,
             input_rx,
         ));
     });
@@ -59,6 +61,7 @@ async fn run_compio_bridge<Dispatch>(
     gshell_id: GShellId,
     config: PtyBridgeConfig,
     terminal_worker_tx: SyncSender<TerminalWorkerInput>,
+    shutdown_tx: PtyInputSender,
     input_rx: PtyInputReceiver,
 ) where
     Dispatch: IRuntimeEventDispatcher,
@@ -115,6 +118,16 @@ async fn run_compio_bridge<Dispatch>(
         return;
     };
 
+    // ConPTY can keep its output pipe alive after the shell exits. Waiting for
+    // output EOF before observing child exit would leave the input task asleep.
+    let mut child_killer = child.clone_killer();
+    let child_shutdown_tx = shutdown_tx.clone();
+    let child_task = spawn_blocking(move || {
+        let result = child.wait();
+        child_shutdown_tx.close();
+        result
+    });
+
     let input_task = spawn_blocking(move || {
         while let Some(input) = input_rx.recv_blocking() {
             match input {
@@ -134,15 +147,25 @@ async fn run_compio_bridge<Dispatch>(
                 }
             }
         }
+        // A shell can still be starting (including ConPTY's cursor handshake)
+        // when its tab is closed. Do not rely on console teardown to stop it.
+        let _ = child_killer.kill();
+        drop(writer);
+        // Closing the pseudoconsole terminates its attached clients. Keep the
+        // separate read task draining output while ClosePseudoConsole runs.
+        drop(master);
     });
 
     let read_task = spawn_blocking(move || {
         read_pty_to_terminal_worker(&mut reader, &terminal_worker_tx);
+        shutdown_tx.close();
     });
 
     let _ = read_task.await.resume_unwind();
     let _ = input_task.await.resume_unwind();
-    let _ = child.wait();
+    if let Some(Err(error)) = child_task.await.resume_unwind() {
+        warn!(%error, "failed to wait for pty child");
+    }
     let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed {
         gshell_id,
     }));
