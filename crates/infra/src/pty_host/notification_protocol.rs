@@ -213,12 +213,38 @@ impl TerminalNotificationProtocolDecoder {
         }
 
         if let Some(payload) = data.strip_prefix(b"9;") {
+            if let Some(directory) = payload.strip_prefix(b"9;") {
+                // ConEmu/Windows Terminal directory reports contain a raw path,
+                // optionally quoted, rather than OSC 7's percent-encoded file URL.
+                let directory = std::str::from_utf8(directory).ok().and_then(|path| {
+                    let path = path
+                        .strip_prefix('"')
+                        .and_then(|p| p.strip_suffix('"'))
+                        .unwrap_or(path);
+                    (!path.is_empty() && !path.chars().any(char::is_control))
+                        .then(|| PathBuf::from(path))
+                });
+                return Some(
+                    directory
+                        .map(NotificationProtocolEvent::WorkingDirectory)
+                        .into_iter()
+                        .collect(),
+                );
+            }
             match parse_osc_9_progress_control(payload) {
                 Some(Osc9ProgressControl::Changed(progress)) => {
                     return Some(vec![NotificationProtocolEvent::Progress(progress)]);
                 }
                 Some(Osc9ProgressControl::Ignored) => return Some(Vec::new()),
                 None => {}
+            }
+            // Other ConEmu controls (including 9;12 prompt markers) are not
+            // desktop notifications. Consume unsupported controls quietly.
+            if matches!(
+                payload.split(|b| *b == b';').next(),
+                Some(b"1" | b"2" | b"3" | b"5" | b"6" | b"7" | b"8" | b"9" | b"10" | b"11" | b"12")
+            ) {
+                return Some(Vec::new());
             }
             return Some(self.parse_legacy_notification(payload));
         }
@@ -339,9 +365,13 @@ fn contains_no_osc_sequence(input: &[u8]) -> bool {
 fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
     let file_url = payload.strip_prefix(b"file://")?;
     let path_start = file_url.iter().position(|byte| *byte == b'/')?;
+    let host = std::str::from_utf8(&file_url[..path_start]).ok()?;
     let decoded = percent_decode(&file_url[path_start..])?;
     let path = String::from_utf8(decoded).ok()?;
-    (!path.is_empty() && !path.contains('\0')).then(|| PathBuf::from(platform_file_url_path(path)))
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    platform_file_url_path(host, path).map(PathBuf::from)
 }
 
 fn parse_osc_9_progress_control(payload: &[u8]) -> Option<Osc9ProgressControl> {
@@ -376,17 +406,32 @@ fn parse_osc_9_progress_control(payload: &[u8]) -> Option<Osc9ProgressControl> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn platform_file_url_path(path: String) -> String {
-    path
+fn platform_file_url_path(_host: &str, path: String) -> Option<String> {
+    Some(path)
 }
 
 #[cfg(target_os = "windows")]
-fn platform_file_url_path(path: String) -> String {
+fn platform_file_url_path(host: &str, path: String) -> Option<String> {
+    if matches!(host, "." | "..")
+        || host.contains(['\\', ':', '@', '%', '?', '#'])
+        || host.chars().any(char::is_control)
+    {
+        return None;
+    }
     let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' {
-        path[1..].to_owned()
+    if bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && bytes[3] == b'/'
+    {
+        // Shells may include the local machine name before a drive path.
+        Some(path[1..].to_owned())
+    } else if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        // file://server/share/path represents a UNC path on Windows.
+        Some(format!("\\\\{host}{}", path.replace('/', "\\")))
     } else {
-        path
+        Some(path)
     }
 }
 
@@ -704,14 +749,64 @@ mod tests {
     #[test]
     fn decodes_osc_7_working_directory_urls() {
         let mut decoder = TerminalNotificationProtocolDecoder::default();
+        #[cfg(windows)]
+        let expected = PathBuf::from("\\\\fedora\\home\\user\\My Project");
+        #[cfg(not(windows))]
+        let expected = PathBuf::from("/home/user/My Project");
 
         assert_eq!(
             decoder.feed(b"before\x1b]7;file://fedora/home/user/My%20Project\x1b\\after"),
             vec![
                 NotificationProtocolEvent::Bytes(b"before".to_vec()),
-                NotificationProtocolEvent::WorkingDirectory(PathBuf::from("/home/user/My Project")),
+                NotificationProtocolEvent::WorkingDirectory(expected),
                 NotificationProtocolEvent::Bytes(b"after".to_vec()),
             ]
+        );
+        #[cfg(windows)]
+        for (url, expected) in [
+            ("file:///C:/Users/My%20Project", "C:/Users/My Project"),
+            ("file://localhost/D:/work", "D:/work"),
+            ("file://desktop/D:/work", "D:/work"),
+            (
+                "file://nas/share/%E9%A1%B9%E7%9B%AE%20100%25",
+                "\\\\nas\\share\\项目 100%",
+            ),
+            ("file:////nas/share/project", "//nas/share/project"),
+        ] {
+            let sequence = format!("\x1b]7;{url}\x07");
+            assert_eq!(
+                decoder.feed(sequence.as_bytes()),
+                vec![NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                    expected
+                ))]
+            );
+        }
+    }
+
+    #[test]
+    fn conemu_directory_reports_and_prompt_markers_are_not_notifications() {
+        let sequence =
+            "before\x1b]9;9;\"C:\\Users\\名字;100%\\My Project\"\x1b\\\x1b]9;12\x07after";
+        let expected = vec![
+            NotificationProtocolEvent::Bytes(b"before".to_vec()),
+            NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                "C:\\Users\\名字;100%\\My Project",
+            )),
+            NotificationProtocolEvent::Bytes(b"after".to_vec()),
+        ];
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+        assert_eq!(decoder.feed(sequence.as_bytes()), expected);
+        assert!(decoder.feed(b"\x1b]9;9;C:\\Users\\blue").is_empty());
+        assert_eq!(
+            decoder.feed(b"t\x07"),
+            vec![NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                "C:\\Users\\bluet"
+            ))]
+        );
+        assert!(
+            decoder
+                .feed(b"\x1b]9;9;\x07\x1b]9;9;bad\0path\x07")
+                .is_empty()
         );
     }
 
@@ -725,6 +820,18 @@ mod tests {
                 .is_empty()
         );
         assert!(decoder.feed(b"\x1b]7;file://host/bad%2\x1b\\").is_empty());
+        #[cfg(windows)]
+        for url in [
+            "file://./pipe/test",
+            "file://user@server/share",
+            "file://server:445/share",
+        ] {
+            assert!(
+                decoder
+                    .feed(format!("\x1b]7;{url}\x07").as_bytes())
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
+#[cfg(not(windows))]
+use std::env;
 use std::{
     collections::BTreeMap,
-    env, fs,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -164,7 +166,37 @@ impl GerminalConfig {
         self.terminal.working_directory.as_deref().map(expand_home)
     }
 
+    pub(super) fn effective_tab_position(&self) -> TabBarPosition {
+        if self.window.modern {
+            TabBarPosition::Left
+        } else {
+            self.tabs.position
+        }
+    }
+
+    pub(super) fn effective_titlebar(&self) -> TitlebarMode {
+        if self.window.modern {
+            TitlebarMode::Custom
+        } else {
+            self.window.titlebar
+        }
+    }
+
+    pub(super) fn effective_tab_style(&self) -> TabBarStyle {
+        if self.window.modern {
+            TabBarStyle::Fade
+        } else {
+            self.tabs.style
+        }
+    }
+
     fn validate(&self) -> Result<(), String> {
+        if self.tabs.position == TabBarPosition::Left {
+            return Err(
+                "tabs.position must be top or bottom; use window.modern for the modern layout"
+                    .into(),
+            );
+        }
         if !(1..=32).contains(&self.scrolling.multiplier) {
             return Err("scrolling.multiplier must be between 1 and 32".into());
         }
@@ -216,6 +248,14 @@ impl GerminalConfig {
             if shell.program.trim().is_empty() {
                 return Err("terminal.shell.program must not be empty".to_string());
             }
+            #[cfg(windows)]
+            germinal_infra::pty::windows_shell::command(
+                &shell.program,
+                &shell.args,
+                self.configured_working_directory().as_deref(),
+            )
+            .map_err(|error| format!("terminal.shell.program: {error}"))?;
+            #[cfg(not(windows))]
             if !program_exists(&shell.program) {
                 return Err(format!(
                     "terminal.shell.program was not found or is not executable: {}",
@@ -509,36 +549,45 @@ pub struct TabsConfig {
 impl Default for TabsConfig {
     fn default() -> Self {
         Self {
-            position: TabBarPosition::Bottom,
+            position: TabBarPosition::Top,
             style: TabBarStyle::Fade,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitlebarMode {
+    Native,
+    Hidden,
+    #[default]
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WindowConfig {
-    pub toolbar: bool,
+    pub modern: bool,
+    pub titlebar: TitlebarMode,
     pub show_window_controls: bool,
     pub title: String,
     pub width_px: u32,
     pub height_px: u32,
     pub maximized: bool,
     pub opacity: f32,
-    pub decorations: bool,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            toolbar: false,
+            modern: false,
+            titlebar: TitlebarMode::Custom,
             show_window_controls: true,
             title: "Germinal".to_string(),
             width_px: 960,
             height_px: 540,
             maximized: false,
             opacity: 1.0,
-            decorations: true,
         }
     }
 }
@@ -843,7 +892,8 @@ pub struct KeyboardBinding {
 pub enum KeyboardAction {
     CommandPalette,
     ToggleTabSidebar,
-    ToggleToolbar,
+    #[serde(alias = "ToggleToolbar")]
+    ToggleTitlebar,
     NewWindow,
     ToggleViMode,
     ToggleSearch,
@@ -900,12 +950,93 @@ pub enum LogLevel {
     Error,
 }
 
-pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
+pub(super) fn save_palette_settings(
+    config: &GerminalConfig,
+    fields: &[(&str, &str)],
+) -> Result<(), String> {
+    use std::io::Write;
+    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let path = paths.config_file();
+    let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let updated = update_palette_settings(&source, config, fields)?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(paths.config_dir()).map_err(|error| error.to_string())?;
+    file.as_file()
+        .set_permissions(
+            fs::metadata(path)
+                .map_err(|error| error.to_string())?
+                .permissions(),
+        )
+        .map_err(|error| error.to_string())?;
+    file.write_all(updated.as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    // Avoid replacing edits made while this command was preparing its update.
+    if fs::read_to_string(path).map_err(|error| error.to_string())? != source {
+        return Err("Configuration changed on disk; retry the selection".into());
+    }
+    file.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn update_palette_settings(
+    source: &str,
+    config: &GerminalConfig,
+    fields: &[(&str, &str)],
+) -> Result<String, String> {
+    toml::from_str::<GerminalConfig>(source).map_err(|error| error.to_string())?;
+    let mut document = source
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| error.to_string())?;
+    let values = toml::to_string(config)
+        .map_err(|error| error.to_string())?
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| error.to_string())?;
+    for &(section, key) in fields {
+        if document.get(section).is_none() {
+            document[section] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let mut value = values[section][key].clone();
+        if let (Some(old), Some(new)) = (
+            document[section]
+                .get(key)
+                .and_then(toml_edit::Item::as_value),
+            value.as_value_mut(),
+        ) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        document[section][key] = value;
+    }
+    let result = document.to_string();
+    toml::from_str::<GerminalConfig>(&result).map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths, Option<String>)> {
     let paths = AppPaths::resolve()?;
     if !paths.config_file().exists() {
         write_default_config(&paths)?;
     }
 
+    let (config, warning) = load_config_or_default(&paths);
+    Ok((config, paths, warning))
+}
+
+fn load_config_or_default(paths: &AppPaths) -> (GerminalConfig, Option<String>) {
+    match read_config(paths) {
+        Ok(config) => (config, None),
+        Err(error) => (
+            GerminalConfig::default(),
+            Some(format!(
+                "{error}; using default configuration for this session. The configuration file has not been changed."
+            )),
+        ),
+    }
+}
+
+fn read_config(paths: &AppPaths) -> AppResult<GerminalConfig> {
     let contents =
         fs::read_to_string(paths.config_file()).map_err(|source| AppError::ReadConfig {
             path: paths.config_file().to_path_buf(),
@@ -937,9 +1068,10 @@ pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
             message,
         })?;
 
-    Ok((config, paths))
+    Ok(config)
 }
 
+#[cfg(not(windows))]
 fn program_exists(program: &str) -> bool {
     let path = Path::new(program);
     if path.is_absolute() || path.components().count() > 1 {
@@ -951,6 +1083,7 @@ fn program_exists(program: &str) -> bool {
         .any(|candidate| is_executable_file(&candidate))
 }
 
+#[cfg(not(windows))]
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
@@ -1064,18 +1197,86 @@ mod tests {
     }
 
     #[test]
+    fn modern_layout_overrides_preferences_until_switched_off() {
+        let mut config = GerminalConfig::default();
+        config.window.modern = true;
+        config.window.titlebar = super::TitlebarMode::Hidden;
+        config.tabs.position = TabBarPosition::Bottom;
+        assert_eq!(config.effective_titlebar(), super::TitlebarMode::Custom);
+        assert_eq!(config.effective_tab_position(), TabBarPosition::Left);
+        // Preferences can change while modern mode is active, without changing its layout.
+        config.window.titlebar = super::TitlebarMode::Native;
+        config.tabs.position = TabBarPosition::Top;
+        assert_eq!(config.effective_titlebar(), super::TitlebarMode::Custom);
+        assert_eq!(config.effective_tab_position(), TabBarPosition::Left);
+        config.window.modern = false;
+        assert_eq!(config.effective_titlebar(), super::TitlebarMode::Native);
+        assert_eq!(config.effective_tab_position(), TabBarPosition::Top);
+    }
+
+    #[test]
+    fn invalid_config_falls_back_without_overwriting_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = super::AppPaths {
+            config_dir: directory.path().into(),
+            config_file: directory.path().join("config.toml"),
+            state_dir: directory.path().into(),
+            log_dir: directory.path().into(),
+        };
+        for source in [
+            "[broken",
+            "[window]\ndecorations = true",
+            "[window]\nopacity = 2.0",
+        ] {
+            std::fs::write(paths.config_file(), source).unwrap();
+            let (config, warning) = super::load_config_or_default(&paths);
+            assert!(warning.unwrap().contains("using default configuration"));
+            assert!(config.validate().is_ok());
+            assert_eq!(
+                std::fs::read_to_string(paths.config_file()).unwrap(),
+                source
+            );
+        }
+        std::fs::write(paths.config_file(), "[window]\nopacity = 0.7").unwrap();
+        let (config, warning) = super::load_config_or_default(&paths);
+        assert!(warning.is_none());
+        assert_eq!(config.window.opacity, 0.7);
+    }
+
+    #[test]
     fn parses_window_startup_configuration() {
         let config: GerminalConfig = toml::from_str(
             r#"
             [window]
-            decorations = false
+            titlebar = "hidden"
             maximized = true
             "#,
         )
         .unwrap();
 
-        assert!(!config.window.decorations);
+        assert_eq!(config.window.titlebar, super::TitlebarMode::Hidden);
         assert!(config.window.maximized);
+    }
+
+    #[test]
+    fn palette_save_preserves_unrelated_settings_and_comments() {
+        let source = "# personal settings\n[window]\ntitlebar = 'native' # preferred frame\nopacity = 0.8\n\n[tabs]\nposition = 'bottom'\n";
+        let config = GerminalConfig::default();
+        let updated = super::update_palette_settings(
+            source,
+            &config,
+            &[("window", "titlebar"), ("tabs", "style")],
+        )
+        .unwrap();
+        assert!(updated.contains("# personal settings"));
+        assert!(updated.contains("# preferred frame"));
+        assert!(updated.contains("opacity = 0.8"));
+        assert!(updated.contains("position = 'bottom'"));
+        let parsed: GerminalConfig = toml::from_str(&updated).unwrap();
+        assert_eq!(parsed.window.titlebar, super::TitlebarMode::Custom);
+        assert!(
+            super::update_palette_settings("[broken", &config, &[("window", "titlebar")]).is_err()
+        );
     }
 
     #[test]

@@ -15,6 +15,8 @@ use tracing::{debug, warn};
 const NOTIFICATION_QUEUE_CAPACITY: usize = 64;
 const MAX_ACTIVATION_WAITERS: usize = 64;
 const APPLICATION_NAME: &str = "Germinal";
+#[cfg(windows)]
+const WINDOWS_APP_ID: &str = "io.github.cradiy.Germinal";
 
 struct SystemNotificationRequest {
     gshell_id: GShellId,
@@ -37,7 +39,17 @@ impl SystemNotifier {
         let worker = thread::Builder::new()
             .name("germinal-system-notifications".to_owned())
             .spawn(move || {
+                #[cfg(windows)]
+                let mut identity_ready = false;
                 while let Ok(request) = receiver.recv() {
+                    #[cfg(windows)]
+                    if !identity_ready {
+                        if let Err(error) = register_windows_notification_identity() {
+                            warn!(%error, "failed to register Germinal notification identity");
+                            continue;
+                        }
+                        identity_ready = true;
+                    }
                     let focus_on_activation = request.notification.focus_on_activation;
                     let mut notification = platform_notification(request.notification);
                     if focus_on_activation {
@@ -45,10 +57,26 @@ impl SystemNotifier {
                     }
                     match notification.show() {
                         Ok(handle) if focus_on_activation => {
+                            let on_activation = Arc::clone(&on_activation);
                             spawn_activation_waiter(
-                                handle,
-                                request.gshell_id,
-                                Arc::clone(&on_activation),
+                                move || {
+                                    #[cfg(windows)]
+                                    if let Err(error) = handle.wait_for_response(
+                                        |response: &notify_rust::NotificationResponse| {
+                                            if !matches!(response, notify_rust::NotificationResponse::Closed(_)) {
+                                                on_activation(request.gshell_id);
+                                            }
+                                        },
+                                    ) {
+                                        warn!(%error, "failed to wait for terminal notification activation");
+                                    }
+                                    #[cfg(not(windows))]
+                                    handle.wait_for_action(|action| {
+                                        if action != "__closed" {
+                                            on_activation(request.gshell_id);
+                                        }
+                                    });
+                                },
                                 Arc::clone(&activation_waiters),
                             );
                         }
@@ -91,13 +119,9 @@ impl SystemNotifier {
     }
 }
 
-fn spawn_activation_waiter<F>(
-    handle: notify_rust::NotificationHandle,
-    gshell_id: GShellId,
-    on_activation: Arc<F>,
-    waiter_count: Arc<AtomicUsize>,
-) where
-    F: Fn(GShellId) + Send + Sync + 'static + ?Sized,
+fn spawn_activation_waiter<F>(wait_for_activation: F, waiter_count: Arc<AtomicUsize>)
+where
+    F: FnOnce() + Send + 'static,
 {
     if waiter_count
         .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -115,11 +139,7 @@ fn spawn_activation_waiter<F>(
     let worker = thread::Builder::new()
         .name("germinal-notification-activation".to_owned())
         .spawn(move || {
-            handle.wait_for_action(|action| {
-                if action != "__closed" {
-                    on_activation(gshell_id);
-                }
-            });
+            wait_for_activation();
             worker_waiter_count.fetch_sub(1, Ordering::AcqRel);
         });
     if let Err(error) = worker {
@@ -134,10 +154,47 @@ fn platform_notification(notification: TerminalNotification) -> Notification {
     platform_notification
         .appname(APPLICATION_NAME)
         .summary(&summary);
+    #[cfg(windows)]
+    platform_notification.app_id(WINDOWS_APP_ID);
     if let Some(body) = body {
         platform_notification.body(&body);
     }
     platform_notification
+}
+
+#[cfg(windows)]
+fn register_windows_notification_identity() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, REG_SZ, RegCloseKey, RegCreateKeyW, RegSetValueExW,
+    };
+    // Unpackaged WinRT toast identity, following tauri-winrt-notification's
+    // unpackaged_app example. Only our own per-user application key is written.
+    let path: Vec<u16> = format!("Software\\Classes\\AppUserModelId\\{WINDOWS_APP_ID}\0")
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "DisplayName\0".encode_utf16().collect();
+    let value: Vec<u16> = format!("{APPLICATION_NAME}\0").encode_utf16().collect();
+    let mut key = std::ptr::null_mut();
+    let result = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, path.as_ptr(), &mut key) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    let result = unsafe {
+        let result = RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        );
+        RegCloseKey(key);
+        result
+    };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    Ok(())
 }
 
 fn notification_content(notification: TerminalNotification) -> (String, Option<String>) {

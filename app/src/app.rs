@@ -11,13 +11,14 @@ mod boilerplate;
 mod command_palette;
 mod config;
 mod error;
+mod file_drop;
 mod logging;
 mod paste;
 mod sidebar;
 
 use audible_bell::AudibleBell;
 pub use config::{GerminalConfig, load_or_create_config};
-use config::{KeyboardAction, KeyboardBinding};
+use config::{KeyboardAction, KeyboardBinding, TitlebarMode};
 pub use error::{AppError, AppResult};
 use germinal_application::service::{
     gshell_service::GShellServiceState, layout_service::LayoutServiceState,
@@ -128,12 +129,14 @@ pub struct App {
     tab_pointer_consumed: bool,
     sidebar_close_pressed: Option<GShellId>,
     sidebar_resize: sidebar::SidebarResize,
+    modern_sidebar_collapsed: bool,
+    #[cfg(windows)]
+    window_placement_restored: bool,
     pane_navigation_enabled: bool,
     command_palette: Option<command_palette::CommandPalette>,
     palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
     palette_consumed_buttons: HashSet<MouseButton>,
     config: GerminalConfig,
-    horizontal_tab_position: TabBarPosition,
     toolbar_pressed: Option<germinal_ports::rendering::toolbar::ToolbarAction>,
     toolbar_pointer_consumed: bool,
 }
@@ -226,13 +229,11 @@ impl App {
 
         let app = Self {
             sidebar_resize: sidebar::SidebarResize::default(),
+            modern_sidebar_collapsed: false,
+            #[cfg(windows)]
+            window_placement_restored: false,
             toolbar_pressed: None,
             toolbar_pointer_consumed: false,
-            horizontal_tab_position: if config.tabs.position == TabBarPosition::Left {
-                TabBarPosition::Bottom
-            } else {
-                config.tabs.position
-            },
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
             gshell_service_state: GShellServiceState::new(),
             worker_service_state: WorkerServiceState::new(),
@@ -304,12 +305,22 @@ impl App {
         let window_attributes = winit::window::Window::default_attributes()
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
-            .with_decorations(self.config.window.decorations)
-            .with_maximized(self.config.window.maximized)
+            .with_decorations(self.config.effective_titlebar() == TitlebarMode::Native)
+            .with_maximized(self.config.window.maximized && !cfg!(windows))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
                 f64::from(self.config.window.height_px),
             ));
+        // Keep the native background offscreen while GPU and font resources load.
+        #[cfg(windows)]
+        let window_attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            window_attributes
+                .with_visible(false)
+                // The custom frame supplies its own DWM shadow without winit's
+                // extra top non-client strip above the custom caption.
+                .with_undecorated_shadow(false)
+        };
         #[cfg(target_os = "linux")]
         let window_attributes = {
             use winit::platform::{
@@ -329,13 +340,17 @@ impl App {
                 .map_err(AppError::CreateWindow)?,
         );
         let window_id = window.id();
+        #[cfg(windows)]
+        {
+            self.window_placement_restored = self.restore_window_placement(&window);
+        }
         window.set_ime_purpose(ImePurpose::Terminal);
         window.set_ime_allowed(true);
 
         let runtime = self
             .render_runtime_factory
             .create_window_runtime_with_plugins(
-                window,
+                std::sync::Arc::clone(&window),
                 std::mem::take(&mut self.pending_wgpu_pane_plugins),
             )
             .map_err(AppError::CreateWindowRuntime)?;
@@ -349,7 +364,7 @@ impl App {
     }
 
     fn current_tab_bar_snapshot(&self) -> Option<TabBarSnapshot> {
-        (self.horizontal_tab_bar_visible() || self.config.tabs.position == TabBarPosition::Left)
+        (self.horizontal_tab_bar_visible() || self.layout_tab_position() == TabBarPosition::Left)
             .then(|| TabBarSnapshot {
                 titles: self.tab_titles(),
                 progresses: self.tab_progresses(),
@@ -359,8 +374,8 @@ impl App {
                     .map(|gshell_id| RenderTargetId::new(gshell_id.value()))
                     .collect(),
                 active_tab_index: self.active_tab_index(),
-                position: self.config.tabs.position,
-                style: self.config.tabs.style,
+                position: self.layout_tab_position(),
+                style: self.config.effective_tab_style(),
             })
     }
 
@@ -399,11 +414,13 @@ impl App {
                 window_size.height_px().saturating_sub(toolbar).max(1),
             ),
             self.current_terminal_size_info().cell_size().height_px(),
-            self.horizontal_tab_bar_visible(),
-            self.config.tabs.position,
+            self.horizontal_tab_bar_visible()
+                && !(self.modern_toolbar_visible()
+                    && self.layout_tab_position() == TabBarPosition::Top),
+            self.layout_tab_position(),
         );
         layout.y_px += toolbar;
-        if self.config.tabs.position == TabBarPosition::Left {
+        if self.layout_tab_position() == TabBarPosition::Left {
             layout.x_px = self.sidebar_width(window_size.width_px());
             layout.content_size = TerminalWindowSize::new(
                 window_size.width_px().saturating_sub(layout.x_px).max(1),
@@ -430,13 +447,19 @@ impl App {
         let resizing = self.sidebar_resize.is_dragging() || self.sidebar_edge_at_cursor();
         let toolbar = self.modern_toolbar_visible().then_some(
             germinal_ports::rendering::toolbar::ToolbarConfig {
-                sidebar: self.config.tabs.position == TabBarPosition::Left,
-                window_controls: self.config.window.show_window_controls,
+                modern: self.config.window.modern,
+                inline_tabs: !self.config.window.modern
+                    && self.layout_tab_position() == TabBarPosition::Top,
+                sidebar: self.layout_tab_position() == TabBarPosition::Left,
+                window_controls: self.config.window.modern
+                    || self.config.window.show_window_controls,
             },
         );
         if let Some(runtime) = self.render_runtime.as_mut() {
             runtime.set_sidebar_width(sidebar_width);
             runtime.set_sidebar_resize_cursor(resizing);
+            runtime
+                .set_window_decorations(self.config.effective_titlebar() == TitlebarMode::Native);
             runtime.set_toolbar(toolbar);
         }
         let visible_gshells = placements
@@ -558,7 +581,11 @@ impl App {
             .or_else(|| self.config.configured_working_directory());
         let mut command = Command::new(executable);
         if let Some(working_directory) = working_directory.filter(|path| path.is_dir()) {
-            command.current_dir(working_directory);
+            // Pass the directory explicitly: PTY defaults (or config) can override
+            // the new application's inherited process working directory.
+            command
+                .arg(&working_directory)
+                .current_dir(working_directory);
         }
         #[cfg(unix)]
         {
@@ -776,9 +803,6 @@ impl App {
         let Some(action) = action else {
             return false;
         };
-        if action == KeyboardAction::ToggleTabSidebar && !self.modern_toolbar_visible() {
-            return false;
-        }
         if matches!(
             action,
             KeyboardAction::FocusNextPane
@@ -815,29 +839,25 @@ impl App {
 
     fn execute_keyboard_action(&mut self, event_loop: &ActiveEventLoop, action: KeyboardAction) {
         match action {
-            KeyboardAction::ToggleToolbar => {
+            KeyboardAction::ToggleTitlebar => {
                 if self.finish_sidebar_resize() {
                     self.tab_pointer_consumed = true;
                 }
-                let was_visible = self.modern_toolbar_visible();
-                self.config.window.toolbar = !was_visible;
-                if was_visible && self.config.tabs.position == TabBarPosition::Left {
-                    self.config.tabs.position = self.horizontal_tab_position;
-                }
+                let was_visible = self.config.window.titlebar == TitlebarMode::Custom;
+                self.config.window.titlebar = if was_visible {
+                    TitlebarMode::Native
+                } else {
+                    TitlebarMode::Custom
+                };
                 self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
                 self.update_ime_cursor_area();
             }
             KeyboardAction::ToggleTabSidebar => {
-                if self.finish_sidebar_resize() {
-                    self.tab_pointer_consumed = true;
+                if !self.config.window.modern {
+                    return;
                 }
-                self.config.window.toolbar = true;
-                if self.config.tabs.position == TabBarPosition::Left {
-                    self.config.tabs.position = self.horizontal_tab_position;
-                } else {
-                    self.horizontal_tab_position = self.config.tabs.position;
-                    self.config.tabs.position = TabBarPosition::Left;
-                }
+                self.finish_sidebar_resize();
+                self.modern_sidebar_collapsed = !self.modern_sidebar_collapsed;
                 self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
                 self.update_ime_cursor_area();
             }
@@ -942,12 +962,22 @@ impl App {
         )
     }
 
+    fn layout_tab_position(&self) -> TabBarPosition {
+        if self.config.window.modern && self.modern_sidebar_collapsed {
+            TabBarPosition::Bottom
+        } else {
+            self.config.effective_tab_position()
+        }
+    }
+
     fn modern_toolbar_visible(&self) -> bool {
-        self.config.window.toolbar || self.config.tabs.position == TabBarPosition::Left
+        self.config.effective_titlebar() == TitlebarMode::Custom
     }
 
     fn horizontal_tab_bar_visible(&self) -> bool {
-        !self.modern_toolbar_visible() && self.tab_count() > 1
+        self.layout_tab_position() != TabBarPosition::Left
+            && (self.tab_count() > 1
+                || (!self.config.window.modern && self.modern_toolbar_visible()))
     }
 
     fn handle_toolbar_button(&mut self, event_loop: &ActiveEventLoop, state: ElementState) -> bool {
@@ -959,6 +989,12 @@ impl App {
             .cursor_position
             .and_then(|p| runtime.toolbar_action_at(p.x, p.y));
         if state == ElementState::Pressed {
+            if self
+                .cursor_position
+                .is_some_and(|p| runtime.tab_index_at_position(p.x, p.y).is_some())
+            {
+                return false;
+            }
             if self
                 .cursor_position
                 .is_none_or(|p| !runtime.toolbar_contains(p.x, p.y))
@@ -1494,6 +1530,8 @@ impl App {
     }
 
     fn exit_and_persist(&self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        self.save_window_placement();
         if let Err(error) = self.persist_workspace() {
             error!(error = %error, "failed to persist workspace");
         }
@@ -1514,6 +1552,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        let first_window = self.render_runtime.is_none();
         if let Err(error) = self.ensure_window_runtime(event_loop) {
             error!(error = %error, "failed to initialize Germinal window runtime");
             self.exit_and_persist(event_loop);
@@ -1527,6 +1567,27 @@ impl ApplicationHandler<RuntimeEvent> for App {
             self.route_focus_changed(focused_gshell, true);
         }
         self.prepare_render_backend();
+        #[cfg(windows)]
+        if first_window {
+            let size = self
+                .render_runtime
+                .as_mut()
+                .unwrap()
+                .prepare_initial_show(self.config.window.maximized, self.window_placement_restored);
+            let size_info = self.resize_window_size_info(size);
+            self.resize_workspace_gshells(size_info.window_size());
+            self.consume_latest_terminal_snapshot();
+            let size = self
+                .render_runtime
+                .as_mut()
+                .unwrap()
+                .finish_initial_show(self.config.window.maximized);
+            // Reconfigure and draw the destination immediately rather than
+            // waiting for queued resize events after the native transition.
+            let size_info = self.resize_window_size_info(size);
+            self.resize_workspace_gshells(size_info.window_size());
+            self.render_runtime.as_mut().unwrap().render();
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {
@@ -1732,6 +1793,25 @@ impl ApplicationHandler<RuntimeEvent> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.exit_and_persist(event_loop);
+            }
+            WindowEvent::DroppedFile(path) => {
+                if self.command_palette.is_some() {
+                    return;
+                }
+                let program = self
+                    .config
+                    .pty_shell_command()
+                    .map(|shell| shell.program)
+                    .unwrap_or_else(|| {
+                        germinal_infra::pty::shell_command::default_shell_command().program
+                    });
+                match file_drop::path_argument(&path, &program) {
+                    Ok(text) => self.route_input_to_gshell(GShellInput {
+                        gshell_id: self.focused_gshell(),
+                        event: GShellInputEvent::Paste(text),
+                    }),
+                    Err(reason) => warn!(reason, "could not insert dropped file path"),
+                }
             }
             WindowEvent::Moved(_) => {
                 if let Some(render_runtime) = self.render_runtime.as_mut()

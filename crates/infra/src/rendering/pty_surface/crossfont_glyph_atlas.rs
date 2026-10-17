@@ -644,9 +644,39 @@ impl WgpuCrossfontGlyphBackend {
             return glyph;
         }
 
-        let font_key = self.font_key_for_glyph(glyph_key);
-
-        let glyph = rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key);
+        // A terminal space has no ink. DirectWrite rejects the empty alpha texture,
+        // which would otherwise send it through the visible replacement-glyph path.
+        let glyph = if glyph_key.character() == Some(' ') {
+            RasterizedTerminalGlyph {
+                key: glyph_key,
+                cell_width: 1,
+                width_px: 0,
+                height_px: 0,
+                left_px: 0,
+                top_px: 0,
+                advance_px: self.average_advance_px as i32,
+                pixels: Arc::new(Vec::new()),
+                is_color: false,
+                direct_draw_offset: None,
+            }
+        } else {
+            let font_key = self.font_key_for_glyph(glyph_key);
+            let fallback_keys = self.fallbacks.iter().filter_map(|fallback| {
+                let key = fallback.faces.for_glyph(glyph_key).key;
+                (key != font_key
+                    && glyph_key
+                        .character()
+                        .is_some_and(|c| fallback.coverage.contains(c)))
+                .then_some(key)
+            });
+            rasterize_terminal_glyph(
+                &mut self.rasterizer,
+                font_key,
+                fallback_keys,
+                self.size,
+                glyph_key,
+            )
+        };
         self.glyph_cache.insert(glyph.clone());
         glyph
     }
@@ -745,10 +775,10 @@ enum FontCoverage {
 }
 
 impl FontCoverage {
-    fn contains(&self, character: char) -> bool {
+    fn contains(&self, _character: char) -> bool {
         match self {
             #[cfg(not(any(target_os = "macos", windows)))]
-            Self::Fontconfig(charset) => charset.has_char(character),
+            Self::Fontconfig(charset) => charset.has_char(_character),
             Self::All => true,
         }
     }
@@ -856,6 +886,7 @@ struct CachedRasterizedGlyph {
 fn rasterize_terminal_glyph(
     rasterizer: &mut Rasterizer,
     font_key: FontKey,
+    fallback_keys: impl IntoIterator<Item = FontKey>,
     size: Size,
     key: WgpuTerminalGlyphKey,
 ) -> RasterizedTerminalGlyph {
@@ -869,7 +900,21 @@ fn rasterize_terminal_glyph(
         size,
     };
 
-    let glyph = match rasterizer.get_glyph(glyph_key) {
+    // Coverage is unknown on DirectWrite/CoreText. Probe configured fallbacks
+    // after a rasterization failure instead of immediately drawing a replacement.
+    let mut rasterized = rasterizer.get_glyph(glyph_key);
+    if rasterized.is_err() {
+        for fallback_key in fallback_keys {
+            if let Ok(glyph) = rasterizer.get_glyph(GlyphKey {
+                font_key: fallback_key,
+                ..glyph_key
+            }) {
+                rasterized = Ok(glyph);
+                break;
+            }
+        }
+    }
+    let glyph = match rasterized {
         Ok(glyph) => glyph,
         Err(source) => {
             warn!(
@@ -2138,6 +2183,7 @@ fn load_font_for_terminal_weight(
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
 fn load_font_with_style_name(
     rasterizer: &mut Rasterizer,
     family: &str,

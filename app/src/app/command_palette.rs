@@ -1,5 +1,38 @@
 use super::*;
 use germinal_ports::rendering::command_palette::{CommandPaletteEntry, CommandPaletteSnapshot};
+use germinal_ports::rendering::tab_bar::TabBarStyle;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Titlebar,
+    Tabs,
+    Style,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteAction {
+    Modern(bool),
+    Command(KeyboardAction),
+    Menu(Menu),
+    Back,
+    Titlebar(TitlebarMode),
+    Tabs(TabBarPosition),
+    Style(TabBarStyle),
+    Controls(bool),
+}
+
+type PaletteItem = (PaletteAction, CommandPaletteEntry, String);
+
+fn item(action: PaletteAction, title: &str) -> PaletteItem {
+    (
+        action,
+        CommandPaletteEntry {
+            title: title.into(),
+            shortcut: String::new(),
+        },
+        title.to_lowercase(),
+    )
+}
 
 const COMMANDS: &[(KeyboardAction, &str)] = &[
     (KeyboardAction::NewTab, "New tab"),
@@ -12,8 +45,6 @@ const COMMANDS: &[(KeyboardAction, &str)] = &[
     (KeyboardAction::ToggleViMode, "Toggle Vi mode"),
     (KeyboardAction::Copy, "Copy selection"),
     (KeyboardAction::Paste, "Paste clipboard"),
-    (KeyboardAction::ToggleToolbar, "Toggle modern toolbar"),
-    (KeyboardAction::ToggleTabSidebar, "Toggle tab sidebar"),
     (KeyboardAction::FocusNextPane, "Focus next pane"),
     (KeyboardAction::FocusPreviousPane, "Focus previous pane"),
     (KeyboardAction::FocusPaneLeft, "Focus pane left"),
@@ -38,12 +69,18 @@ pub(super) struct CommandPalette {
     preedit: String,
     preedit_cursor: Option<usize>,
     selected: usize,
-    commands: Vec<(KeyboardAction, CommandPaletteEntry, String)>,
+    commands: Vec<PaletteItem>,
+    parents: Vec<(Vec<PaletteItem>, String, usize)>,
 }
 
 impl CommandPalette {
-    fn new(bindings: &[KeyboardBinding], panes: bool, tabs: bool) -> Self {
-        let commands = COMMANDS
+    fn new(
+        bindings: &[KeyboardBinding],
+        panes: bool,
+        tabs: bool,
+        window: &config::WindowConfig,
+    ) -> Self {
+        let mut commands: Vec<PaletteItem> = COMMANDS
             .iter()
             .filter(|(action, _)| match action {
                 KeyboardAction::FocusNextPane
@@ -80,7 +117,7 @@ impl CommandPalette {
                     })
                     .unwrap_or_default();
                 (
-                    *action,
+                    PaletteAction::Command(*action),
                     CommandPaletteEntry {
                         title: (*title).into(),
                         shortcut,
@@ -89,12 +126,35 @@ impl CommandPalette {
                 )
             })
             .collect();
+        for (menu, title) in [
+            (Menu::Titlebar, "Adjust title bar >"),
+            (Menu::Tabs, "Adjust tabs >"),
+        ] {
+            commands.push(item(PaletteAction::Menu(menu), title));
+        }
+        for (action, title, enabled) in [
+            (
+                PaletteAction::Modern(!window.modern),
+                "Modern mode",
+                window.modern,
+            ),
+            (
+                PaletteAction::Controls(!window.show_window_controls),
+                "Window controls",
+                window.show_window_controls,
+            ),
+        ] {
+            let mut entry = item(action, title);
+            entry.1.shortcut = if enabled { "On" } else { "Off" }.into();
+            commands.push(entry);
+        }
         Self {
             query: String::new(),
             preedit: String::new(),
             preedit_cursor: None,
             selected: 0,
             commands,
+            parents: Vec::new(),
         }
     }
 
@@ -130,10 +190,66 @@ impl CommandPalette {
         }
     }
 
-    fn action(&self) -> Option<KeyboardAction> {
+    fn action(&self) -> Option<PaletteAction> {
         self.matches()
             .get(self.selected)
             .map(|index| self.commands[*index].0)
+    }
+
+    fn enter(&mut self, menu: Menu, config: &GerminalConfig) {
+        use PaletteAction::*;
+        let choices = match menu {
+            self::Menu::Titlebar => vec![
+                (Titlebar(TitlebarMode::Native), "Native"),
+                (Titlebar(TitlebarMode::Hidden), "Hidden"),
+                (Titlebar(TitlebarMode::Custom), "Custom (inline)"),
+            ],
+            self::Menu::Tabs => vec![
+                (Tabs(TabBarPosition::Top), "Top"),
+                (Tabs(TabBarPosition::Bottom), "Bottom"),
+                (Menu(self::Menu::Style), "Tab style >"),
+            ],
+            self::Menu::Style => vec![
+                (Style(TabBarStyle::Fade), "Fade"),
+                (Style(TabBarStyle::Powerline), "Powerline"),
+            ],
+        };
+        let mut entries = vec![item(Back, "Back")];
+        for (action, title) in choices {
+            let active = match action {
+                Modern(enabled) => config.window.modern == enabled,
+                Titlebar(mode) => config.window.titlebar == mode,
+                Tabs(position) => config.tabs.position == position,
+                Style(style) => config.tabs.style == style,
+                Controls(show) => config.window.show_window_controls == show,
+                _ => false,
+            };
+            let mut entry = item(action, title);
+            if active {
+                entry.1.shortcut = "Current".into();
+            }
+            entries.push(entry);
+        }
+        self.parents.push((
+            std::mem::replace(&mut self.commands, entries),
+            std::mem::take(&mut self.query),
+            self.selected,
+        ));
+        self.selected = 1;
+        self.preedit.clear();
+        self.preedit_cursor = None;
+    }
+
+    fn back(&mut self) -> bool {
+        let Some((commands, query, selected)) = self.parents.pop() else {
+            return false;
+        };
+        self.commands = commands;
+        self.query = query;
+        self.selected = selected;
+        self.preedit.clear();
+        self.preedit_cursor = None;
+        true
     }
 
     fn snapshot(&self) -> CommandPaletteSnapshot {
@@ -152,6 +268,73 @@ impl CommandPalette {
 }
 
 impl App {
+    fn activate_palette_action(&mut self, event_loop: &ActiveEventLoop, action: PaletteAction) {
+        match action {
+            PaletteAction::Command(action) => {
+                self.close_command_palette();
+                self.execute_keyboard_action(event_loop, action);
+            }
+            PaletteAction::Menu(menu) => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.enter(menu, &self.config);
+                }
+            }
+            PaletteAction::Back => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    palette.back();
+                }
+            }
+            setting => {
+                let mut config = self.config.clone();
+                let fields = match setting {
+                    PaletteAction::Modern(enabled) => {
+                        config.window.modern = enabled;
+                        vec![("window", "modern")]
+                    }
+                    PaletteAction::Titlebar(mode) => {
+                        config.window.titlebar = mode;
+                        vec![("window", "titlebar")]
+                    }
+                    PaletteAction::Tabs(position) => {
+                        config.tabs.position = position;
+                        vec![("tabs", "position")]
+                    }
+                    PaletteAction::Style(style) => {
+                        config.tabs.style = style;
+                        vec![("tabs", "style")]
+                    }
+                    PaletteAction::Controls(show) => {
+                        config.window.show_window_controls = show;
+                        vec![("window", "show_window_controls")]
+                    }
+                    _ => unreachable!(),
+                };
+                match config::save_palette_settings(&config, &fields) {
+                    Ok(()) => {
+                        self.finish_sidebar_resize();
+                        self.config = config;
+                        self.close_command_palette();
+                        self.resize_workspace_gshells(
+                            self.current_terminal_size_info().window_size(),
+                        );
+                        self.update_ime_cursor_area();
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to save appearance settings");
+                        if let Some(palette) = self.command_palette.as_mut() {
+                            palette.commands.insert(
+                                0,
+                                item(PaletteAction::Back, &format!("Save failed: {error} (Back)")),
+                            );
+                            palette.query.clear();
+                            palette.selected = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) fn open_command_palette(&mut self) {
         if self.finish_sidebar_resize() {
             self.palette_consumed_buttons.insert(MouseButton::Left);
@@ -163,6 +346,7 @@ impl App {
             &self.config.keyboard.bindings,
             self.pane_navigation_enabled,
             self.tab_count() > 1,
+            &self.config.window,
         ));
         if let Some(runtime) = self.render_runtime.as_mut() {
             runtime.set_sidebar_resize_cursor(false);
@@ -246,12 +430,15 @@ impl App {
                     {
                         palette.navigate(matches!(key.to_lowercase().as_str(), "k" | "p"));
                     }
-                    Key::Named(NamedKey::Escape) => self.close_command_palette(),
+                    Key::Named(NamedKey::Escape) => {
+                        if !palette.back() {
+                            self.close_command_palette();
+                        }
+                    }
                     Key::Named(NamedKey::Enter) => {
                         let action = palette.action();
-                        self.close_command_palette();
                         if let Some(action) = action {
-                            self.execute_keyboard_action(event_loop, action);
+                            self.activate_palette_action(event_loop, action);
                         }
                     }
                     Key::Named(NamedKey::ArrowUp) => palette.navigate(true),
@@ -384,10 +571,7 @@ mod tests {
                     self.app.cursor_position = Some(PhysicalPosition::new(x, f64::from(y)));
                     assert!(self.app.try_activate_tab_at_cursor());
                     assert_eq!(self.app.active_tab_index(), 0);
-                    use germinal_ports::rendering::toolbar::{
-                        ToolbarAction, ToolbarConfig, toolbar_buttons, toolbar_height,
-                    };
-                    let h = toolbar_height(
+                    let h = germinal_ports::rendering::toolbar::toolbar_height(
                         self.app
                             .render_runtime
                             .as_ref()
@@ -395,62 +579,33 @@ mod tests {
                             .display_scale_factor(),
                         size.height_px(),
                     );
-                    let buttons = toolbar_buttons(
-                        ToolbarConfig {
-                            sidebar: true,
-                            window_controls: true,
-                        },
-                        size.width_px(),
-                        h,
-                        self.app.sidebar_width(size.width_px()),
-                        self.app
-                            .render_runtime
-                            .as_ref()
-                            .unwrap()
-                            .display_scale_factor(),
-                    );
-                    let toggle = buttons
-                        .iter()
-                        .find(|b| b.action == ToolbarAction::ToggleSidebar)
-                        .unwrap();
-                    let position = PhysicalPosition::new(f64::from(toggle.x + 1), f64::from(h / 2));
-                    self.app.cursor_position = Some(position);
-                    assert!(
-                        self.app
-                            .handle_toolbar_button(event_loop, ElementState::Pressed)
-                    );
-                    self.app.cursor_position =
-                        Some(PhysicalPosition::new(position.x, f64::from(h + 1)));
-                    assert!(
-                        self.app
-                            .handle_toolbar_button(event_loop, ElementState::Released)
-                    );
-                    assert_eq!(self.app.config.tabs.position, TabBarPosition::Left);
-                    self.app.cursor_position = Some(position);
-                    assert!(
-                        self.app
-                            .handle_toolbar_button(event_loop, ElementState::Pressed)
-                    );
-                    assert!(
-                        self.app
-                            .handle_toolbar_button(event_loop, ElementState::Released)
-                    );
+                    self.app
+                        .execute_keyboard_action(event_loop, KeyboardAction::ToggleTabSidebar);
                     assert_eq!(self.app.config.tabs.position, TabBarPosition::Top);
                     assert!(self.app.modern_toolbar_visible());
                     for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
                         self.app.config.tabs.position = position;
                         self.app.resize_workspace_gshells(size);
-                        assert!(self.app.current_tab_bar_snapshot().is_none());
+                        assert!(self.app.current_tab_bar_snapshot().is_some());
                         let layout = self.app.current_workspace_render_layout(size);
                         assert_eq!(layout[0].y_px, h);
-                        assert_eq!(layout[0].height_px, size.height_px() - h);
+                        assert_eq!(
+                            layout[0].height_px,
+                            size.height_px()
+                                - h
+                                - if position == TabBarPosition::Bottom {
+                                    cell.height_px()
+                                } else {
+                                    0
+                                }
+                        );
                         assert!(
                             self.app
                                 .tab_index_at_position(5.0, f64::from(size.height_px() - 2))
                                 .is_none()
                         );
                         self.app
-                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleToolbar);
+                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleTitlebar);
                         assert!(self.app.current_tab_bar_snapshot().is_some());
                         self.app.window_input_modifiers =
                             WindowInputModifiers::new(true, true, false, false);
@@ -471,7 +626,7 @@ mod tests {
                             size.height_px() - cell.height_px()
                         );
                         self.app
-                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleToolbar);
+                            .execute_keyboard_action(event_loop, KeyboardAction::ToggleTitlebar);
                         for expected in [TabBarPosition::Left, position] {
                             assert!(self.app.try_handle_keyboard_binding(
                                 event_loop,
@@ -603,15 +758,39 @@ mod tests {
     }
 
     #[test]
+    fn submenu_back_restores_search_and_nested_selection() {
+        let mut palette = CommandPalette::new(&[], true, true, &config::WindowConfig::default());
+        let config = GerminalConfig::default();
+        palette.insert("adjust tabs");
+        assert_eq!(palette.action(), Some(PaletteAction::Menu(Menu::Tabs)));
+        palette.enter(Menu::Tabs, &config);
+        palette.insert("style");
+        assert_eq!(palette.action(), Some(PaletteAction::Menu(Menu::Style)));
+        palette.enter(Menu::Style, &config);
+        assert!(palette.back());
+        assert_eq!(palette.query, "style");
+        assert!(palette.back());
+        assert_eq!(palette.query, "adjust tabs");
+        assert_eq!(palette.action(), Some(PaletteAction::Menu(Menu::Tabs)));
+        assert!(!palette.back());
+    }
+
+    #[test]
     fn filtering_navigation_and_commit_select_the_same_command() {
-        let mut palette = CommandPalette::new(&[], true, true);
+        let mut palette = CommandPalette::new(&[], true, true, &config::WindowConfig::default());
         palette.insert("split");
         assert_eq!(palette.matches().len(), 2);
         palette.navigate(true);
-        assert_eq!(palette.action(), Some(KeyboardAction::SplitVertical));
+        assert_eq!(
+            palette.action(),
+            Some(PaletteAction::Command(KeyboardAction::SplitVertical))
+        );
         palette.query.clear();
         palette.insert("TAB new");
-        assert_eq!(palette.action(), Some(KeyboardAction::NewTab));
+        assert_eq!(
+            palette.action(),
+            Some(PaletteAction::Command(KeyboardAction::NewTab))
+        );
         palette.insert(" missing");
         palette.navigate(false);
         assert_eq!(palette.action(), None);
@@ -627,10 +806,11 @@ mod tests {
             }],
             false,
             false,
+            &config::WindowConfig::default(),
         );
         assert!(!palette.commands.iter().any(|(action, _, _)| matches!(
             action,
-            KeyboardAction::MoveTabLeft | KeyboardAction::FocusPaneLeft
+            PaletteAction::Command(KeyboardAction::MoveTabLeft | KeyboardAction::FocusPaneLeft)
         )));
         assert_eq!(palette.snapshot().entries[0].shortcut, "Alt+t");
     }

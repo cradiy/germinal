@@ -80,7 +80,9 @@ pub(super) fn encode_paste(modes: TerminalInputModes, text: &str) -> Option<Vec<
         return None;
     }
     if !modes.bracketed_paste() {
-        return Some(text.as_bytes().to_vec());
+        // Without paste delimiters, line breaks are interpreted as key input.
+        // Match Enter (CR), and avoid sending two inputs for Windows CRLF.
+        return Some(text.replace("\r\n", "\r").replace('\n', "\r").into_bytes());
     }
 
     let mut bytes =
@@ -1249,9 +1251,22 @@ mod tests {
     #[test]
     fn bracketed_paste_wraps_text_and_removes_escape_bytes() {
         assert_eq!(
-            encode_paste(modes(false, true, false, false, false, false), "a\x1bb"),
-            Some(b"\x1b[200~ab\x1b[201~".to_vec())
+            encode_paste(
+                modes(false, true, false, false, false, false),
+                "a\x1bb\r\nc\nd\r"
+            ),
+            Some(b"\x1b[200~ab\r\nc\nd\r\x1b[201~".to_vec())
         );
+    }
+
+    #[test]
+    fn ordinary_paste_sends_one_enter_per_line_break() {
+        let mode = modes(false, false, false, false, false, false);
+        assert_eq!(
+            encode_paste(mode, "第一行\r\n\r\nsecond\nthird\rfourth"),
+            Some("第一行\r\rsecond\rthird\rfourth".as_bytes().to_vec())
+        );
+        assert_eq!(encode_paste(mode, ""), None);
     }
 
     #[test]

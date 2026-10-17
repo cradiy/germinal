@@ -29,6 +29,10 @@ pub struct SvgIcon {
 }
 
 impl SvgIcon {
+    #[cfg(windows)]
+    pub(super) fn window_icon(&self) -> Result<winit::window::Icon, winit::window::BadIcon> {
+        winit::window::Icon::from_rgba(self.rgba.to_vec(), self.size, self.size)
+    }
     pub fn placement(&self, id: &str, x_px: u32, y_px: u32) -> RenderSurfaceImageSnapshot {
         RenderSurfaceImageSnapshot {
             id: id.into(),

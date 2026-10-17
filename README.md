@@ -34,13 +34,27 @@ supported option.
 
 ## Building
 
+Install Nushell and optionally `just`. Run `just` to list the build commands:
+
+```text
+just build                # Optimized native executable
+just build-windows        # Windows installer and portable ZIP
+just build-windows-zip    # Portable ZIP only
+just build-windows-setup  # Installer only
+just build-linux-all      # All existing Linux package formats
+```
+
+Windows packaging requires the x64 MSVC Rust toolchain, Visual Studio C++ Build Tools
+and Windows SDK. ZIP packaging needs `7z`; installers need Inno Setup 6.3 or later.
+See [Windows packaging](packaging/windows/README.md) for prerequisites and options.
+
 Germinal provides Nushell build scripts. Run the command from the repository root:
 
 ```nu
 ./scripts/build-release.nu
 ```
 
-The optimized executable is written to `target/product/germinal`.
+The optimized executable is written to `target/product/germinal` (`germinal.exe` on Windows).
 
 Use `--target` to build for a specific Rust target:
 

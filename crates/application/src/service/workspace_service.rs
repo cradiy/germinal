@@ -168,7 +168,7 @@ impl WorkspaceServiceState {
             .map(|gshell_id| {
                 titles
                     .get(&gshell_id)
-                    .cloned()
+                    .map(|title| pretty_title(title, self.home_dir.as_deref()))
                     .or_else(|| commands.get(&gshell_id).cloned())
                     .or_else(|| {
                         working_directories
@@ -445,6 +445,46 @@ fn preferred_tab_progress(
     }
 }
 
+fn pretty_title(title: &str, home_dir: Option<&Path>) -> String {
+    if cfg!(windows) && Path::new(title).is_absolute() {
+        pretty_path(Path::new(title), home_dir)
+    } else {
+        title.to_owned()
+    }
+}
+
+#[cfg(windows)]
+fn pretty_path(path: &Path, home_dir: Option<&Path>) -> String {
+    fn display_path(path: &Path) -> String {
+        let text = path.to_string_lossy().replace('\\', "/");
+        if let Some(unc) = text.strip_prefix("//?/UNC/") {
+            format!("//{unc}")
+        } else if let Some(drive) = text.strip_prefix("//?/")
+            && drive.as_bytes().get(1) == Some(&b':')
+        {
+            drive.to_owned()
+        } else {
+            text
+        }
+    }
+
+    let display = display_path(path);
+    if let Some(home) = home_dir.map(display_path) {
+        let home = home.trim_end_matches('/');
+        if display
+            .get(..home.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(home))
+        {
+            let suffix = &display[home.len()..];
+            if suffix.is_empty() || suffix.starts_with('/') {
+                return format!("~{suffix}");
+            }
+        }
+    }
+    display
+}
+
+#[cfg(not(windows))]
 fn pretty_path(path: &Path, home_dir: Option<&Path>) -> String {
     if let Some(home_dir) = home_dir
         && let Ok(relative) = path.strip_prefix(home_dir)
@@ -893,6 +933,34 @@ mod tests {
         state.update_gshell_command(second, None);
         assert_eq!(state.tab_titles(), vec!["nvim", "/tmp/project"]);
         assert!(!state.tab_titles().iter().any(|title| title == "Shell"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_titles_hide_verbatim_prefix_and_abbreviate_home() {
+        let state = WorkspaceServiceState::with_workspace_environment(
+            Workspace::main(),
+            ".".into(),
+            Some(r"C:\Users\Example".into()),
+        );
+        let shell = state.focused_gshell();
+        state.update_gshell_working_directory(
+            shell,
+            r"\\?\C:\Users\Example\AppData\Roaming\germinal".into(),
+        );
+        assert_eq!(state.tab_titles(), ["~/AppData/Roaming/germinal"]);
+        for (title, expected) in [
+            (r"\\?\c:\users\example\project", "~/project"),
+            (
+                r"\\?\C:\Users\Example-other\project",
+                "C:/Users/Example-other/project",
+            ),
+            (r"\\?\UNC\server\share\project", "//server/share/project"),
+            ("nvim | project", "nvim | project"),
+        ] {
+            state.update_gshell_title(shell, Some(title.into()));
+            assert_eq!(state.tab_titles(), [expected]);
+        }
     }
 
     #[test]

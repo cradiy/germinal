@@ -12,6 +12,7 @@ pub enum TabBarPosition {
 }
 
 pub const SIDEBAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX - 2);
+pub const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
 
 pub fn sidebar_width_px(window_width: u32, cell_height: u32) -> u32 {
     cell_height.saturating_mul(10).min(window_width / 3)

@@ -1,0 +1,5 @@
+# Use Unix line endings for all text files, including Windows checkouts.
+* text=auto eol=lf
+
+# Terminal recordings contain meaningful CR/LF control bytes.
+*.recording -text

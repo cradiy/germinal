@@ -199,6 +199,8 @@ impl WgpuTerminalSurfaceFramePresenter {
                         != germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID
                     && surface.surface_snapshot.target_id
                         != germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID
+                    && surface.surface_snapshot.target_id
+                        != germinal_ports::rendering::tab_bar::TAB_BAR_RENDER_TARGET_ID
             })
             .map(|surface| {
                 let render_target_plan =
@@ -274,10 +276,14 @@ impl WgpuTerminalSurfaceFramePresenter {
                     == germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID
                 || surface.surface_snapshot.target_id
                     == germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID
+                || surface.surface_snapshot.target_id
+                    == germinal_ports::rendering::tab_bar::TAB_BAR_RENDER_TARGET_ID
         }) {
             let toolbar = surface.surface_snapshot.target_id
                 == germinal_ports::rendering::toolbar::TOOLBAR_TARGET_ID;
-            if !toolbar {
+            let tabs = surface.surface_snapshot.target_id
+                == germinal_ports::rendering::tab_bar::TAB_BAR_RENDER_TARGET_ID;
+            if !toolbar && !tabs {
                 self.palette_chrome
                     .borrow_mut()
                     .get_or_insert_with(|| {
@@ -292,7 +298,7 @@ impl WgpuTerminalSurfaceFramePresenter {
                     );
             }
             render_results.push(
-                (if toolbar {
+                (if toolbar || tabs {
                     &self.frame_renderer
                 } else if surface.surface_snapshot.target_id
                     == germinal_ports::rendering::tab_bar::SIDEBAR_RENDER_TARGET_ID

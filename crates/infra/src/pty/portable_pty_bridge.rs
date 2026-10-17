@@ -102,6 +102,7 @@ impl PtyBridge {
             pty_host_id,
             config,
             terminal_worker_tx,
+            input_tx.clone(),
             input_rx,
         );
 
@@ -199,32 +200,37 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
-        sync::mpsc,
-        thread,
-        time::Duration,
     };
 
+    #[cfg(any(target_os = "linux", windows))]
     use germinal_domain::{gshell::vo::gshell_id::GShellId, pty_host::vo::pty_host_id::PtyHostId};
+    use germinal_ports::pty_host::{
+        spawn_config::{PtyShellCommand, PtySpawnConfig},
+        terminal_size::TerminalPtySize,
+    };
+    #[cfg(any(target_os = "linux", windows))]
     use germinal_ports::{
         event::{
             runtime_event::{GShellRuntimeEvent, RuntimeEvent},
             runtime_event_dispatcher::{IRuntimeEventDispatcher, RuntimeEventDispatchError},
         },
-        pty_host::{
-            spawn_config::{PtyShellCommand, PtySpawnConfig},
-            terminal_size::TerminalPtySize,
-            worker_input::TerminalWorkerInput,
-        },
+        pty_host::worker_input::TerminalWorkerInput,
     };
+    #[cfg(any(target_os = "linux", windows))]
+    use std::{sync::mpsc, thread, time::Duration};
 
+    #[cfg(any(target_os = "linux", windows))]
+    use super::PtyBridge;
     use super::{
-        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridge, PtyBridgeConfig,
+        ALACRITTY_TERMINFO, FALLBACK_TERMINFO, PtyBridgeConfig,
         preferred_terminal_term_name_with_paths, terminfo_exists_in_paths,
     };
 
+    #[cfg(any(target_os = "linux", windows))]
     #[derive(Clone)]
     struct TestDispatcher(mpsc::Sender<RuntimeEvent>);
 
+    #[cfg(any(target_os = "linux", windows))]
     impl IRuntimeEventDispatcher for TestDispatcher {
         fn dispatch(&self, event: RuntimeEvent) -> Result<(), RuntimeEventDispatchError> {
             self.0
@@ -278,13 +284,13 @@ mod tests {
         assert_eq!(config.working_directory, Some("/tmp/project".into()));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn closing_pty_input_terminates_the_child_process() {
         const CHILD_TEST: &str = "pty::portable_pty_bridge::tests::pty_child_fixture";
 
         let (event_tx, event_rx) = mpsc::channel();
-        let (worker_tx, _worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let (worker_tx, worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
         let test_executable = std::env::current_exe().expect("locate the current test executable");
         let input = PtyBridge::spawn(
             TestDispatcher(event_tx),
@@ -307,7 +313,8 @@ mod tests {
             worker_tx,
         );
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let drain = drain_pty_output(worker_rx, input.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             if input.child_process_id().is_some() {
                 break;
@@ -322,7 +329,7 @@ mod tests {
         input.close();
 
         let event = event_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(5))
             .expect("PTY bridge should report that the shell closed");
         assert_eq!(
             event,
@@ -330,12 +337,217 @@ mod tests {
                 gshell_id: GShellId::new(1)
             })
         );
+        drain.join().expect("PTY output drain");
     }
 
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     #[ignore = "PTY child fixture; spawned by closing_pty_input_terminates_the_child_process"]
     fn pty_child_fixture() {
         thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_exit_closes_bridge_while_input_sender_is_alive() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (worker_tx, worker_rx) = mpsc::sync_channel::<TerminalWorkerInput>(16);
+        let input = PtyBridge::spawn(
+            TestDispatcher(event_tx),
+            GShellId::new(1),
+            PtyHostId::new(1),
+            PtySpawnConfig {
+                shell: Some(PtyShellCommand::new(
+                    "cmd".to_owned(),
+                    vec!["/d".into(), "/c".into(), "exit 0".into()],
+                )),
+                working_directory: None,
+                initial_size: TerminalPtySize::new(24, 80, 640, 384),
+            },
+            Vec::new(),
+            worker_tx,
+        );
+        let drain = drain_pty_output(worker_rx, input.clone());
+        let result = event_rx.recv_timeout(Duration::from_secs(5));
+        // Clean up even when exercising the broken implementation.
+        input.close();
+        assert_eq!(
+            result.expect("shell exit must not wait for the application to drop its sender"),
+            RuntimeEvent::GShell(GShellRuntimeEvent::Closed {
+                gshell_id: GShellId::new(1),
+            })
+        );
+        drain.join().expect("PTY output drain");
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn drain_pty_output(
+        worker_rx: mpsc::Receiver<TerminalWorkerInput>,
+        reply_input: germinal_ports::pty_host::pty_input::PtyInputSender,
+    ) -> thread::JoinHandle<()> {
+        drain_pty_output_with_observer(worker_rx, reply_input, |_| {})
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    fn drain_pty_output_with_observer(
+        worker_rx: mpsc::Receiver<TerminalWorkerInput>,
+        reply_input: germinal_ports::pty_host::pty_input::PtyInputSender,
+        mut observe: impl FnMut(&[u8]) + Send + 'static,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut replied = false;
+            while let Ok(message) = worker_rx.recv() {
+                let TerminalWorkerInput::Bytes(bytes) = message else {
+                    continue;
+                };
+                observe(&bytes);
+                output.extend(bytes);
+                // portable-pty enables PSEUDOCONSOLE_INHERIT_CURSOR. A real
+                // terminal worker answers this query before ConPTY can proceed.
+                if !replied && output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                    let _ = reply_input.send(germinal_ports::pty_host::pty_input::PtyInput::Bytes(
+                        b"\x1b[1;1R".to_vec(),
+                    ));
+                    replied = true;
+                }
+            }
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interactive_windows_shells_report_directory_changes() {
+        use crate::pty_host::{NotificationProtocolEvent, TerminalNotificationProtocolDecoder};
+        use germinal_ports::pty_host::pty_input::PtyInput;
+        let root = TestDirectory::new("directory reporting");
+        let destination = root.path().join("changed directory");
+        fs::create_dir(&destination).unwrap();
+        for program in ["powershell.exe", "cmd.exe"] {
+            let (event_tx, event_rx) = mpsc::channel();
+            let (worker_tx, worker_rx) = mpsc::sync_channel(16);
+            let (directory_tx, directory_rx) = mpsc::channel();
+            let input = PtyBridge::spawn(
+                TestDispatcher(event_tx),
+                GShellId::new(1),
+                PtyHostId::new(1),
+                PtySpawnConfig {
+                    shell: Some(PtyShellCommand::new(
+                        program.into(),
+                        if program == "powershell.exe" {
+                            vec!["-NoLogo".into(), "-NoProfile".into()]
+                        } else {
+                            Vec::new()
+                        },
+                    )),
+                    working_directory: Some(root.path().to_path_buf()),
+                    initial_size: TerminalPtySize::new(24, 120, 960, 384),
+                },
+                Vec::new(),
+                worker_tx,
+            );
+            let mut decoder = TerminalNotificationProtocolDecoder::default();
+            let drain = drain_pty_output_with_observer(worker_rx, input.clone(), move |bytes| {
+                for event in decoder.feed(bytes) {
+                    if let NotificationProtocolEvent::WorkingDirectory(path) = event {
+                        let _ = directory_tx.send(path);
+                    }
+                }
+            });
+            let wait_directory = || {
+                directory_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap_or_else(|error| {
+                        input.close();
+                        panic!("{program} did not report its directory: {error}");
+                    })
+            };
+            let initial = wait_directory();
+            assert_eq!(initial, root.path());
+            let change = if program == "powershell.exe" {
+                format!("Set-Location -LiteralPath '{}'\r", destination.display())
+            } else {
+                format!("cd /d \"{}\"\r", destination.display())
+            };
+            input.send(PtyInput::Bytes(change.into_bytes())).unwrap();
+            let changed = wait_directory();
+            input.close();
+            assert_eq!(changed, destination);
+            event_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("shell closed");
+            drain.join().unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_resolution_respects_extensions_and_search_order() {
+        use super::super::windows_shell::resolve;
+        let root = TestDirectory::new("shell-path");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(first.join("shell.cmd"), []).unwrap();
+        fs::write(first.join("shell.exe"), []).unwrap();
+        fs::write(second.join("shell.exe"), []).unwrap();
+        fs::create_dir(first.join("directory.exe")).unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        let find = |program, extensions| resolve(program, root.path(), &path, extensions);
+        assert_eq!(find("shell", ".CMD;.EXE"), Some(first.join("shell.CMD")));
+        assert_eq!(find("shell", ".EXE;.CMD"), Some(first.join("shell.EXE")));
+        assert_eq!(find("shell.exe", ".CMD"), Some(first.join("shell.exe")));
+        assert_eq!(find("shell.missing", ".EXE"), None);
+        assert_eq!(find("directory", ".EXE"), None);
+        assert_eq!(find("first/shell", ".EXE"), Some(first.join("shell.EXE")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_shells_launch_in_conpty_with_literal_arguments() {
+        let root = TestDirectory::new("batch shell & paths");
+        for extension in ["cmd", "bat"] {
+            let name = format!("shell-{extension}");
+            fs::write(root.path().join(format!("{name}.{extension}")),
+                "@echo off\r\n> \"%~dp0result.txt\" echo %1\r\n>> \"%~dp0result.txt\" echo %2\r\n>> \"%~dp0result.txt\" echo %3\r\n>> \"%~dp0result.txt\" echo %4\r\n").unwrap();
+            let args = vec![
+                "hello world".to_owned(),
+                "literal & | < > ^ %PATH% !bang!".into(),
+                String::new(),
+                "C:\\trailing\\".into(),
+            ];
+            let program = root.path().join(name).to_string_lossy().into_owned();
+            let (event_tx, event_rx) = mpsc::channel();
+            let (worker_tx, worker_rx) = mpsc::sync_channel(16);
+            let input = PtyBridge::spawn(
+                TestDispatcher(event_tx),
+                GShellId::new(1),
+                PtyHostId::new(1),
+                PtySpawnConfig {
+                    shell: Some(PtyShellCommand::new(program.clone(), args)),
+                    working_directory: Some(root.path().to_path_buf()),
+                    initial_size: TerminalPtySize::new(24, 80, 640, 384),
+                },
+                Vec::new(),
+                worker_tx,
+            );
+            let drain = drain_pty_output(worker_rx, input.clone());
+            let result = event_rx.recv_timeout(Duration::from_secs(5));
+            input.close();
+            result.expect("batch shell should exit");
+            drain.join().unwrap();
+            assert_eq!(
+                fs::read_to_string(root.path().join("result.txt")).unwrap(),
+                "\"hello world\"\n\"literal & | < > ^ %PATH% !bang!\"\n\"\"\n\"C:\\trailing\\\"\n"
+                    .replace('\n', "\r\n")
+            );
+            fs::remove_file(root.path().join("result.txt")).unwrap();
+            assert!(
+                super::super::windows_shell::command(&program, &["embedded\"quote".into()], None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

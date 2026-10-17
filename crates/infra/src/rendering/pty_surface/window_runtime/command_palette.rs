@@ -410,6 +410,8 @@ mod tests {
         if sidebar {
             let mut toolbar = super::super::toolbar::Toolbar::default();
             toolbar.config = Some(germinal_ports::rendering::toolbar::ToolbarConfig {
+                modern: false,
+                inline_tabs: false,
                 sidebar: true,
                 window_controls: true,
             });

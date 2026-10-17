@@ -326,6 +326,7 @@ struct TerminalWorkerRuntime<Dispatch> {
     gnative_enter_decoder: GNativeEnterControlSequenceDecoder,
     compatibility_decoder: TerminalCompatibilityProtocolDecoder,
     notification_decoder: TerminalNotificationProtocolDecoder,
+    default_title: Option<String>,
 }
 
 impl<Dispatch> TerminalWorkerRuntime<Dispatch>
@@ -377,6 +378,7 @@ where
                 preferred_terminal_term_name(),
             ),
             notification_decoder: TerminalNotificationProtocolDecoder::default(),
+            default_title: None,
         }
     }
 
@@ -514,6 +516,9 @@ where
                 self.publish_input_modes();
                 self.flush_pending_pty_writes();
             }
+            TerminalWorkerInput::SetDefaultTitle(title) => {
+                self.default_title = Some(title);
+            }
         }
     }
 
@@ -622,6 +627,13 @@ where
         }
         self.publish_input_modes();
         if let Some(title) = self.terminal_store.take_title_change(self.target_id) {
+            let title = title.filter(|title| {
+                !self.default_title.as_ref().is_some_and(|default| {
+                    title
+                        .replace('/', "\\")
+                        .eq_ignore_ascii_case(&default.replace('/', "\\"))
+                })
+            });
             let _ = self
                 .proxy
                 .dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged {
@@ -1363,6 +1375,57 @@ mod tests {
     };
 
     const TEST_SCROLLBACK_HISTORY: usize = 10_000;
+
+    #[test]
+    fn platform_default_title_yields_to_directory_but_preserves_application_titles() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (snapshot_tx, _snapshot_rx) = surface_snapshot_mailbox();
+        let gshell_id = GShellId::new(5);
+        let mut runtime = TerminalWorkerRuntime::new(TerminalWorkerConfig {
+            proxy: TestDispatcher { tx: event_tx },
+            gshell_id,
+            initial_size: TerminalPtySize::new(24, 80, 640, 384),
+            scrollback_history: TEST_SCROLLBACK_HISTORY,
+            cursor_style: TerminalCursorStyle::default(),
+            color_theme: TerminalColorTheme::default(),
+            osc52_mode: TerminalOsc52Mode::default(),
+            surface_snapshot_tx: snapshot_tx,
+            snapshot_wake_pending: Arc::new(AtomicBool::new(false)),
+        });
+        runtime.collect_input(TerminalWorkerInput::SetDefaultTitle(
+            "C:\\Tools\\custom-shell.exe".into(),
+        ));
+        // Exercise the actual parser and event boundary, including a restored
+        // default title after an application exits and a similar custom title.
+        for (sequence, expected) in [
+            ("\x1b]0;c:/tools/custom-shell.exe\x07", None),
+            ("\x1b]2;my project\x07", Some("my project")),
+            ("\x1b]0;C:\\Tools\\custom-shell.exe\x07", None),
+            (
+                "\x1b]2;C:\\Tools\\custom-shell.exe - editor\x07",
+                Some("C:\\Tools\\custom-shell.exe - editor"),
+            ),
+            ("\x1b]2;\x07", None),
+        ] {
+            runtime.apply_byte_chunks(&[sequence.as_bytes().to_vec()]);
+            let titles: Vec<_> = event_rx
+                .try_iter()
+                .filter_map(|event| match event {
+                    RuntimeEvent::GShell(GShellRuntimeEvent::TitleChanged { title, .. }) => {
+                        Some(title)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(titles, vec![expected.map(str::to_owned)]);
+        }
+        runtime.apply_byte_chunks(&[b"\x1b]9;9;C:\\Projects\\demo\x07".to_vec()]);
+        assert!(event_rx.try_iter().any(|event| event
+            == RuntimeEvent::GShell(GShellRuntimeEvent::WorkingDirectoryChanged {
+                gshell_id,
+                working_directory: "C:\\Projects\\demo".into(),
+            })));
+    }
 
     #[test]
     fn vi_scroll_routes_only_live_unselected_mouse_navigation() {
@@ -2148,7 +2211,11 @@ mod tests {
             vec![
                 RuntimeEvent::GShell(GShellRuntimeEvent::WorkingDirectoryChanged {
                     gshell_id: GShellId::new(12),
-                    working_directory: std::path::PathBuf::from("/home/user/project"),
+                    working_directory: std::path::PathBuf::from(if cfg!(windows) {
+                        "\\\\host\\home\\user\\project"
+                    } else {
+                        "/home/user/project"
+                    }),
                 }),
                 RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged {
                     gshell_id: GShellId::new(12),

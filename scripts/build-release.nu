@@ -78,10 +78,12 @@ def main [
 
     let configured_target_dir = ($env.CARGO_TARGET_DIR? | default ($repo_root | path join "target"))
     let target_dir = ($configured_target_dir | path expand)
+    let effective_target = ($selected_target | default (rust-host-target))
+    let executable = if ($effective_target | str contains "-windows-") { "germinal.exe" } else { "germinal" }
     let binary = if $selected_target == null {
-        $target_dir | path join "product" "germinal"
+        $target_dir | path join "product" $executable
     } else {
-        $target_dir | path join $selected_target "product" "germinal"
+        $target_dir | path join $selected_target "product" $executable
     }
 
     if not ($binary | path exists) {

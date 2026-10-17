@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 
 use clap::{Parser, builder::TypedValueParser};
@@ -40,12 +42,18 @@ fn run() -> eros::Result<()> {
     let cli = Cli::parse();
     app::prepare_crash_reporting();
 
-    let (mut config, paths) =
+    let (mut config, paths, config_warning) =
         app::load_or_create_config().context("failed to load Germinal config")?;
+    if let Some(warning) = &config_warning {
+        eprintln!("Germinal configuration warning: {warning}");
+    }
     if let Some(directory) = cli.directory {
         config.terminal.working_directory = Some(directory);
     }
     app::init_logging(&config.logging, &paths).context("failed to initialize Germinal logging")?;
+    if let Some(warning) = config_warning {
+        tracing::warn!("{warning}");
+    }
 
     let event_loop = EventLoop::<RuntimeEvent>::with_user_event()
         .build()
