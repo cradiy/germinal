@@ -301,7 +301,7 @@ impl App {
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
             .with_decorations(self.config.effective_titlebar() == TitlebarMode::Native)
-            .with_maximized(self.config.window.maximized)
+            .with_maximized(self.config.window.maximized && !cfg!(windows))
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
                 f64::from(self.config.window.height_px),
@@ -345,18 +345,6 @@ impl App {
                 std::mem::take(&mut self.pending_wgpu_pane_plugins),
             )
             .map_err(AppError::CreateWindowRuntime)?;
-        #[cfg(windows)]
-        let runtime = {
-            let mut runtime = runtime;
-            // Prime the surface before showing it. Some backends report hidden surfaces
-            // as occluded, so showing the window must not depend on a successful present.
-            runtime.render();
-            window.set_visible(true);
-            runtime.set_window_occluded(false);
-            runtime.schedule_redraw();
-            window.request_redraw();
-            runtime
-        };
         self.render_runtime = Some(runtime);
         self.render_window_id = Some(window_id);
         Ok(())
@@ -1553,6 +1541,8 @@ impl ApplicationHandler<RuntimeEvent> for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        let first_window = self.render_runtime.is_none();
         if let Err(error) = self.ensure_window_runtime(event_loop) {
             error!(error = %error, "failed to initialize Germinal window runtime");
             self.exit_and_persist(event_loop);
@@ -1566,6 +1556,27 @@ impl ApplicationHandler<RuntimeEvent> for App {
             self.route_focus_changed(focused_gshell, true);
         }
         self.prepare_render_backend();
+        #[cfg(windows)]
+        if first_window {
+            let size = self
+                .render_runtime
+                .as_mut()
+                .unwrap()
+                .prepare_initial_show(self.config.window.maximized);
+            let size_info = self.resize_window_size_info(size);
+            self.resize_workspace_gshells(size_info.window_size());
+            self.consume_latest_terminal_snapshot();
+            let size = self
+                .render_runtime
+                .as_mut()
+                .unwrap()
+                .finish_initial_show(self.config.window.maximized);
+            // Reconfigure and draw the destination immediately rather than
+            // waiting for queued resize events after the native transition.
+            let size_info = self.resize_window_size_info(size);
+            self.resize_workspace_gshells(size_info.window_size());
+            self.render_runtime.as_mut().unwrap().render();
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: RuntimeEvent) {

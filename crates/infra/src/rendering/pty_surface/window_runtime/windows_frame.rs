@@ -31,6 +31,28 @@ use winit::{
 
 const SUBCLASS_ID: usize = 0x4745524d;
 
+pub(super) fn cloak_for_startup(window: &Window, cloaked: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let value = i32::from(cloaked);
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            handle.hwnd.get() as HWND,
+            DWMWA_CLOAK as u32,
+            (&value as *const i32).cast(),
+            std::mem::size_of_val(&value) as u32,
+        )
+    };
+    if result < 0 {
+        tracing::warn!(result, "failed to update startup window cloak");
+    }
+}
+
 #[derive(Default)]
 struct FrameState {
     config: Cell<Option<FrameConfig>>,

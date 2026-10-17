@@ -1218,6 +1218,36 @@ impl WgpuTerminalWindowRuntime {
         }
     }
 
+    #[cfg(windows)]
+    pub fn prepare_initial_show(&mut self, maximized: bool) -> TerminalWindowSize {
+        // Prepare a real first frame before allowing Windows to animate the
+        // maximize transition. Never maximize a hidden, unpainted HWND.
+        windows_frame::cloak_for_startup(&self.window, true);
+        if maximized && let Some(monitor) = self.window.current_monitor() {
+            self.window.set_outer_position(monitor.position());
+        }
+        self.window.set_visible(true);
+        self.set_window_occluded(false);
+        let size = self.window.inner_size();
+        TerminalWindowSize::new(size.width.max(1), size.height.max(1))
+    }
+
+    #[cfg(windows)]
+    pub fn finish_initial_show(&mut self, maximized: bool) -> TerminalWindowSize {
+        self.render();
+        // Always release the cloak, including when presentation was unavailable.
+        windows_frame::cloak_for_startup(&self.window, false);
+        // Let DWM animate from the prepared top-left window to the work area.
+        // This respects the user's system animation preference.
+        if maximized {
+            self.window.set_maximized(true);
+        }
+        self.schedule_redraw();
+        self.window.request_redraw();
+        let size = self.window.inner_size();
+        TerminalWindowSize::new(size.width.max(1), size.height.max(1))
+    }
+
     pub fn set_toolbar(
         &mut self,
         config: Option<germinal_ports::rendering::toolbar::ToolbarConfig>,
