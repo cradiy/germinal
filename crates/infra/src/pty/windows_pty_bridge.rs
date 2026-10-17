@@ -16,7 +16,7 @@ use germinal_ports::{
         worker_input::TerminalWorkerInput,
     },
 };
-use portable_pty::{CommandBuilder, native_pty_system};
+use portable_pty::native_pty_system;
 use tracing::{error, warn};
 
 use crate::pty::portable_pty_bridge::{
@@ -76,10 +76,20 @@ async fn run_compio_bridge<Dispatch>(
         return;
     };
 
-    let mut command = CommandBuilder::new(&config.shell.program);
-    for arg in &config.shell.args {
-        command.arg(arg);
-    }
+    let mut command = match super::windows_shell::command(
+        &config.shell.program,
+        &config.shell.args,
+        config.working_directory.as_deref(),
+    ) {
+        Ok(command) => command,
+        Err(error) => {
+            error!(%error, "failed to resolve pty shell");
+            let _ = proxy.dispatch(RuntimeEvent::GShell(GShellRuntimeEvent::Closed {
+                gshell_id,
+            }));
+            return;
+        }
+    };
     if let Some(working_directory) = &config.working_directory {
         command.cwd(working_directory);
     }

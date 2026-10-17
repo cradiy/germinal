@@ -9,6 +9,8 @@ mod unix_pty_bridge;
 pub mod windows_pty_backend;
 #[cfg(windows)]
 mod windows_pty_bridge;
+#[cfg(windows)]
+pub mod windows_shell;
 
 #[cfg(unix)]
 pub use unix_pty_backend::PlatformPtyBackend;

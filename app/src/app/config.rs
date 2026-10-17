@@ -1,6 +1,8 @@
+#[cfg(not(windows))]
+use std::env;
 use std::{
     collections::BTreeMap,
-    env, fs,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -216,6 +218,14 @@ impl GerminalConfig {
             if shell.program.trim().is_empty() {
                 return Err("terminal.shell.program must not be empty".to_string());
             }
+            #[cfg(windows)]
+            germinal_infra::pty::windows_shell::command(
+                &shell.program,
+                &shell.args,
+                self.configured_working_directory().as_deref(),
+            )
+            .map_err(|error| format!("terminal.shell.program: {error}"))?;
+            #[cfg(not(windows))]
             if !program_exists(&shell.program) {
                 return Err(format!(
                     "terminal.shell.program was not found or is not executable: {}",
@@ -940,6 +950,7 @@ pub fn load_or_create_config() -> AppResult<(GerminalConfig, AppPaths)> {
     Ok((config, paths))
 }
 
+#[cfg(not(windows))]
 fn program_exists(program: &str) -> bool {
     let path = Path::new(program);
     if path.is_absolute() || path.components().count() > 1 {
@@ -951,6 +962,7 @@ fn program_exists(program: &str) -> bool {
         .any(|candidate| is_executable_file(&candidate))
 }
 
+#[cfg(not(windows))]
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;

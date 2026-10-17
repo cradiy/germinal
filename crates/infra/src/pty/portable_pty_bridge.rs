@@ -358,7 +358,7 @@ mod tests {
             PtyHostId::new(1),
             PtySpawnConfig {
                 shell: Some(PtyShellCommand::new(
-                    "cmd.exe".to_owned(),
+                    "cmd".to_owned(),
                     vec!["/d".into(), "/c".into(), "exit 0".into()],
                 )),
                 working_directory: None,
@@ -400,6 +400,76 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_resolution_respects_extensions_and_search_order() {
+        use super::super::windows_shell::resolve;
+        let root = TestDirectory::new("shell-path");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(first.join("shell.cmd"), []).unwrap();
+        fs::write(first.join("shell.exe"), []).unwrap();
+        fs::write(second.join("shell.exe"), []).unwrap();
+        fs::create_dir(first.join("directory.exe")).unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        let find = |program, extensions| resolve(program, root.path(), &path, extensions);
+        assert_eq!(find("shell", ".CMD;.EXE"), Some(first.join("shell.CMD")));
+        assert_eq!(find("shell", ".EXE;.CMD"), Some(first.join("shell.EXE")));
+        assert_eq!(find("shell.exe", ".CMD"), Some(first.join("shell.exe")));
+        assert_eq!(find("shell.missing", ".EXE"), None);
+        assert_eq!(find("directory", ".EXE"), None);
+        assert_eq!(find("first/shell", ".EXE"), Some(first.join("shell.EXE")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_shells_launch_in_conpty_with_literal_arguments() {
+        let root = TestDirectory::new("batch shell & paths");
+        for extension in ["cmd", "bat"] {
+            let name = format!("shell-{extension}");
+            fs::write(root.path().join(format!("{name}.{extension}")),
+                "@echo off\r\n> \"%~dp0result.txt\" echo %1\r\n>> \"%~dp0result.txt\" echo %2\r\n>> \"%~dp0result.txt\" echo %3\r\n>> \"%~dp0result.txt\" echo %4\r\n").unwrap();
+            let args = vec![
+                "hello world".to_owned(),
+                "literal & | < > ^ %PATH% !bang!".into(),
+                String::new(),
+                "C:\\trailing\\".into(),
+            ];
+            let program = root.path().join(name).to_string_lossy().into_owned();
+            let (event_tx, event_rx) = mpsc::channel();
+            let (worker_tx, worker_rx) = mpsc::sync_channel(16);
+            let input = PtyBridge::spawn(
+                TestDispatcher(event_tx),
+                GShellId::new(1),
+                PtyHostId::new(1),
+                PtySpawnConfig {
+                    shell: Some(PtyShellCommand::new(program.clone(), args)),
+                    working_directory: Some(root.path().to_path_buf()),
+                    initial_size: TerminalPtySize::new(24, 80, 640, 384),
+                },
+                Vec::new(),
+                worker_tx,
+            );
+            let drain = drain_pty_output(worker_rx, input.clone());
+            let result = event_rx.recv_timeout(Duration::from_secs(5));
+            input.close();
+            result.expect("batch shell should exit");
+            drain.join().unwrap();
+            assert_eq!(
+                fs::read_to_string(root.path().join("result.txt")).unwrap(),
+                "\"hello world\"\n\"literal & | < > ^ %PATH% !bang!\"\n\"\"\n\"C:\\trailing\\\"\n"
+                    .replace('\n', "\r\n")
+            );
+            fs::remove_file(root.path().join("result.txt")).unwrap();
+            assert!(
+                super::super::windows_shell::command(&program, &["embedded\"quote".into()], None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
