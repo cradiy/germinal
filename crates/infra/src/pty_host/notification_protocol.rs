@@ -213,12 +213,38 @@ impl TerminalNotificationProtocolDecoder {
         }
 
         if let Some(payload) = data.strip_prefix(b"9;") {
+            if let Some(directory) = payload.strip_prefix(b"9;") {
+                // ConEmu/Windows Terminal directory reports contain a raw path,
+                // optionally quoted, rather than OSC 7's percent-encoded file URL.
+                let directory = std::str::from_utf8(directory).ok().and_then(|path| {
+                    let path = path
+                        .strip_prefix('"')
+                        .and_then(|p| p.strip_suffix('"'))
+                        .unwrap_or(path);
+                    (!path.is_empty() && !path.chars().any(char::is_control))
+                        .then(|| PathBuf::from(path))
+                });
+                return Some(
+                    directory
+                        .map(NotificationProtocolEvent::WorkingDirectory)
+                        .into_iter()
+                        .collect(),
+                );
+            }
             match parse_osc_9_progress_control(payload) {
                 Some(Osc9ProgressControl::Changed(progress)) => {
                     return Some(vec![NotificationProtocolEvent::Progress(progress)]);
                 }
                 Some(Osc9ProgressControl::Ignored) => return Some(Vec::new()),
                 None => {}
+            }
+            // Other ConEmu controls (including 9;12 prompt markers) are not
+            // desktop notifications. Consume unsupported controls quietly.
+            if matches!(
+                payload.split(|b| *b == b';').next(),
+                Some(b"1" | b"2" | b"3" | b"5" | b"6" | b"7" | b"8" | b"9" | b"10" | b"11" | b"12")
+            ) {
+                return Some(Vec::new());
             }
             return Some(self.parse_legacy_notification(payload));
         }
@@ -712,6 +738,33 @@ mod tests {
                 NotificationProtocolEvent::WorkingDirectory(PathBuf::from("/home/user/My Project")),
                 NotificationProtocolEvent::Bytes(b"after".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn conemu_directory_reports_and_prompt_markers_are_not_notifications() {
+        let sequence =
+            "before\x1b]9;9;\"C:\\Users\\名字;100%\\My Project\"\x1b\\\x1b]9;12\x07after";
+        let expected = vec![
+            NotificationProtocolEvent::Bytes(b"before".to_vec()),
+            NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                "C:\\Users\\名字;100%\\My Project",
+            )),
+            NotificationProtocolEvent::Bytes(b"after".to_vec()),
+        ];
+        let mut decoder = TerminalNotificationProtocolDecoder::default();
+        assert_eq!(decoder.feed(sequence.as_bytes()), expected);
+        assert!(decoder.feed(b"\x1b]9;9;C:\\Users\\blue").is_empty());
+        assert_eq!(
+            decoder.feed(b"t\x07"),
+            vec![NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                "C:\\Users\\bluet"
+            ))]
+        );
+        assert!(
+            decoder
+                .feed(b"\x1b]9;9;\x07\x1b]9;9;bad\0path\x07")
+                .is_empty()
         );
     }
 

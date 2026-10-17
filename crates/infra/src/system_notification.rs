@@ -15,6 +15,8 @@ use tracing::{debug, warn};
 const NOTIFICATION_QUEUE_CAPACITY: usize = 64;
 const MAX_ACTIVATION_WAITERS: usize = 64;
 const APPLICATION_NAME: &str = "Germinal";
+#[cfg(windows)]
+const WINDOWS_APP_ID: &str = "io.github.cradiy.Germinal";
 
 struct SystemNotificationRequest {
     gshell_id: GShellId,
@@ -37,7 +39,17 @@ impl SystemNotifier {
         let worker = thread::Builder::new()
             .name("germinal-system-notifications".to_owned())
             .spawn(move || {
+                #[cfg(windows)]
+                let mut identity_ready = false;
                 while let Ok(request) = receiver.recv() {
+                    #[cfg(windows)]
+                    if !identity_ready {
+                        if let Err(error) = register_windows_notification_identity() {
+                            warn!(%error, "failed to register Germinal notification identity");
+                            continue;
+                        }
+                        identity_ready = true;
+                    }
                     let focus_on_activation = request.notification.focus_on_activation;
                     let mut notification = platform_notification(request.notification);
                     if focus_on_activation {
@@ -142,10 +154,47 @@ fn platform_notification(notification: TerminalNotification) -> Notification {
     platform_notification
         .appname(APPLICATION_NAME)
         .summary(&summary);
+    #[cfg(windows)]
+    platform_notification.app_id(WINDOWS_APP_ID);
     if let Some(body) = body {
         platform_notification.body(&body);
     }
     platform_notification
+}
+
+#[cfg(windows)]
+fn register_windows_notification_identity() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, REG_SZ, RegCloseKey, RegCreateKeyW, RegSetValueExW,
+    };
+    // Unpackaged WinRT toast identity, following tauri-winrt-notification's
+    // unpackaged_app example. Only our own per-user application key is written.
+    let path: Vec<u16> = format!("Software\\Classes\\AppUserModelId\\{WINDOWS_APP_ID}\0")
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "DisplayName\0".encode_utf16().collect();
+    let value: Vec<u16> = format!("{APPLICATION_NAME}\0").encode_utf16().collect();
+    let mut key = std::ptr::null_mut();
+    let result = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, path.as_ptr(), &mut key) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    let result = unsafe {
+        let result = RegSetValueExW(
+            key,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        );
+        RegCloseKey(key);
+        result
+    };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    Ok(())
 }
 
 fn notification_content(notification: TerminalNotification) -> (String, Option<String>) {
