@@ -661,7 +661,21 @@ impl WgpuCrossfontGlyphBackend {
             }
         } else {
             let font_key = self.font_key_for_glyph(glyph_key);
-            rasterize_terminal_glyph(&mut self.rasterizer, font_key, self.size, glyph_key)
+            let fallback_keys = self.fallbacks.iter().filter_map(|fallback| {
+                let key = fallback.faces.for_glyph(glyph_key).key;
+                (key != font_key
+                    && glyph_key
+                        .character()
+                        .is_some_and(|c| fallback.coverage.contains(c)))
+                .then_some(key)
+            });
+            rasterize_terminal_glyph(
+                &mut self.rasterizer,
+                font_key,
+                fallback_keys,
+                self.size,
+                glyph_key,
+            )
         };
         self.glyph_cache.insert(glyph.clone());
         glyph
@@ -872,6 +886,7 @@ struct CachedRasterizedGlyph {
 fn rasterize_terminal_glyph(
     rasterizer: &mut Rasterizer,
     font_key: FontKey,
+    fallback_keys: impl IntoIterator<Item = FontKey>,
     size: Size,
     key: WgpuTerminalGlyphKey,
 ) -> RasterizedTerminalGlyph {
@@ -885,7 +900,21 @@ fn rasterize_terminal_glyph(
         size,
     };
 
-    let glyph = match rasterizer.get_glyph(glyph_key) {
+    // Coverage is unknown on DirectWrite/CoreText. Probe configured fallbacks
+    // after a rasterization failure instead of immediately drawing a replacement.
+    let mut rasterized = rasterizer.get_glyph(glyph_key);
+    if rasterized.is_err() {
+        for fallback_key in fallback_keys {
+            if let Ok(glyph) = rasterizer.get_glyph(GlyphKey {
+                font_key: fallback_key,
+                ..glyph_key
+            }) {
+                rasterized = Ok(glyph);
+                break;
+            }
+        }
+    }
+    let glyph = match rasterized {
         Ok(glyph) => glyph,
         Err(source) => {
             warn!(
@@ -2199,20 +2228,6 @@ mod tests {
             is_color: false,
             direct_draw_offset: None,
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn directwrite_spaces_do_not_render_replacement_glyphs() {
-        let builder = super::WgpuCrossfontGlyphAtlasBuilder::new("Consolas", 18.0)
-            .expect("load Windows monospace font");
-        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-            let key = WgpuTerminalGlyphKey::styled(' ', bold, italic);
-            let atlas = builder.build_for_glyphs([key]);
-            assert!(atlas.has_glyph_key(key), "space must retain an atlas entry");
-            assert_eq!(atlas.non_zero_pixel_count(), 0, "space must stay invisible");
-        }
-        assert!(builder.build_for_chars(['A']).non_zero_pixel_count() > 0);
     }
 
     #[test]

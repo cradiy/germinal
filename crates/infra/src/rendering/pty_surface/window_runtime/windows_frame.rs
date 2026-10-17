@@ -1,5 +1,8 @@
 //! Native non-client hit testing for the custom Windows toolbar.
-use std::{cell::Cell, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 
 use germinal_ports::{
     pty_host::scale_factor::TerminalScaleFactor,
@@ -33,6 +36,8 @@ struct FrameState {
     config: Cell<Option<FrameConfig>>,
     hover: Cell<Option<ToolbarAction>>,
     hover_changed: Cell<bool>,
+    pressed_caption: Cell<Option<u32>>,
+    tab_regions: RefCell<Vec<RECT>>,
 }
 
 impl FrameState {
@@ -62,6 +67,26 @@ pub(super) struct WindowsFrame {
 }
 
 impl WindowsFrame {
+    pub(super) fn update_tab_regions(&self, surface: Option<&super::WgpuTabBarSurface>) {
+        let mut regions = self.state.tab_regions.borrow_mut();
+        regions.clear();
+        if let Some(surface) = surface {
+            regions.extend(surface.hit_regions.iter().map(|region| {
+                RECT {
+                    left: (surface.placement.x_px + region.start_column * surface.cell_width_px)
+                        as i32,
+                    right: (surface.placement.x_px + region.end_column * surface.cell_width_px)
+                        .min(surface.placement.x_px + surface.placement.width_px)
+                        as i32,
+                    top: (surface.placement.y_px + region.top_px) as i32,
+                    bottom: (surface.placement.y_px + region.bottom_px)
+                        .min(surface.placement.y_px + surface.placement.height_px)
+                        as i32,
+                }
+            }));
+        }
+    }
+
     pub(super) fn install(window: Arc<Window>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
@@ -162,29 +187,28 @@ unsafe extern "system" fn frame_proc(
                     let resizable =
                         unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32 & WS_THICKFRAME != 0;
                     let maximized = unsafe { IsZoomed(hwnd) } != 0;
-                    return hit_test(
+                    let hit = hit_test(
                         config,
                         rect.right,
                         rect.bottom,
                         point,
                         scale,
                         if resizable && !maximized { border } else { 0 },
-                    ) as LRESULT;
+                    );
+                    // Only rendered tabs consume caption input. Unused space in
+                    // the inline viewport is a real native caption, including
+                    // double-click maximize/restore and the system menu.
+                    if hit == HTCLIENT
+                        && config.toolbar.inline_tabs
+                        && point.y < toolbar_height(scale, rect.bottom as u32) as i32
+                        && !self::point_in_tab_regions(point, &state.tab_regions.borrow())
+                    {
+                        return HTCAPTION as LRESULT;
+                    }
+                    return hit as LRESULT;
                 }
             }
             WM_NCMOUSEMOVE => {
-                if wparam as u32 == HTMAXBUTTON
-                    && state.hover.get() != Some(ToolbarAction::Maximize)
-                {
-                    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
-                    tracing::info!(
-                        hwnd = hwnd as usize,
-                        style = format_args!("{style:#010x}"),
-                        maximizable = style & WS_MAXIMIZEBOX != 0,
-                        resizable = style & WS_THICKFRAME != 0,
-                        "native maximize hover: forwarding to DefWindowProc"
-                    );
-                }
                 state.set_hover(
                     hwnd,
                     match wparam as u32 {
@@ -210,10 +234,37 @@ unsafe extern "system" fn frame_proc(
                 return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
             }
             WM_NCMOUSEHOVER => {
-                tracing::info!(hit = wparam, "native non-client hover timer fired");
                 return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
             }
-            WM_NCMOUSELEAVE => state.set_hover(hwnd, None),
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK
+                if matches!(wparam as u32, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) =>
+            {
+                state.pressed_caption.set(Some(wparam as u32));
+                return 0;
+            }
+            WM_NCLBUTTONUP => {
+                if let Some(pressed) = state.pressed_caption.take() {
+                    if pressed == wparam as u32 {
+                        let command = match pressed {
+                            HTMINBUTTON => SC_MINIMIZE,
+                            HTMAXBUTTON if unsafe { IsZoomed(hwnd) } != 0 => SC_RESTORE,
+                            HTMAXBUTTON => SC_MAXIMIZE,
+                            _ => SC_CLOSE,
+                        };
+                        // The native caption tracker uses system button rectangles,
+                        // which differ from our custom layout. Dispatch its command
+                        // only after a matching press/release in our hit regions.
+                        unsafe {
+                            PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0);
+                        }
+                    }
+                    return 0;
+                }
+            }
+            WM_NCMOUSELEAVE => {
+                state.pressed_caption.set(None);
+                state.set_hover(hwnd, None);
+            }
             _ => {}
         }
         // DWM must see non-client hover/leave messages for native caption behavior.
@@ -231,6 +282,12 @@ unsafe extern "system" fn frame_proc(
     // DefWindowProc (through winit) implements drag/restore, double-click maximize,
     // the system menu, resize cursors, and the Windows 11 maximize-button flyout.
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+fn point_in_tab_regions(point: POINT, regions: &[RECT]) -> bool {
+    regions.iter().any(|rect| {
+        point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+    })
 }
 
 fn screen_point(lparam: LPARAM) -> POINT {
@@ -286,7 +343,25 @@ fn hit_test(
         Some(ToolbarAction::Maximize) => HTMAXBUTTON,
         Some(ToolbarAction::Close) => HTCLOSE,
         Some(_) => HTCLIENT,
-        None => HTCAPTION,
+        None => {
+            let (left, top, tab_width, tab_height) =
+                germinal_ports::rendering::toolbar::inline_tab_bounds(
+                    config.toolbar,
+                    width as u32,
+                    toolbar_height,
+                    scale,
+                );
+            if config.toolbar.inline_tabs
+                && x >= left as i32
+                && x < (left + tab_width) as i32
+                && y >= top as i32
+                && y < (top + tab_height) as i32
+            {
+                HTCLIENT
+            } else {
+                HTCAPTION
+            }
+        }
     }
 }
 
@@ -332,6 +407,8 @@ mod tests {
                 let normal_hit = send_hit(450, 20);
                 frame.update(
                     Some(ToolbarConfig {
+                        modern: false,
+                        inline_tabs: false,
                         sidebar: false,
                         window_controls: true,
                     }),
@@ -386,6 +463,25 @@ mod tests {
                     SendMessageW(hwnd, WM_NCMOUSELEAVE, 0, 0);
                 }
                 assert_eq!(frame.take_hover_change(), Some(None));
+                frame.update(
+                    Some(ToolbarConfig {
+                        modern: false,
+                        inline_tabs: true,
+                        sidebar: false,
+                        window_controls: true,
+                    }),
+                    0,
+                );
+                frame.state.tab_regions.borrow_mut().push(RECT {
+                    left: h,
+                    right: h * 3,
+                    top: h / 4,
+                    bottom: h * 3 / 4,
+                });
+                assert_eq!(send_hit(h * 2, h / 2), HTCLIENT as isize);
+                assert_eq!(send_hit(h * 4, h / 2), HTCAPTION as isize);
+                frame.update_tab_regions(None);
+                assert_eq!(send_hit(h * 2, h / 2), HTCAPTION as isize);
                 frame.update(None, 0);
                 assert_eq!(send_hit(450, 20), normal_hit);
                 // Keep the HWND alive while proving Drop removed the callback and its state.
@@ -412,6 +508,8 @@ mod tests {
     fn native_hit_regions_follow_drawn_controls_and_preserve_resize_edges() {
         let config = FrameConfig {
             toolbar: ToolbarConfig {
+                modern: false,
+                inline_tabs: false,
                 sidebar: false,
                 window_controls: true,
             },
@@ -430,6 +528,46 @@ mod tests {
             // Maximized windows have no resize band, even at the top screen edge.
             assert_eq!(at(500, 0, 0), HTCAPTION);
             assert_eq!(at(1200 - h * 3 / 2, 0, 0), HTMAXBUTTON);
+            let inline = FrameConfig {
+                toolbar: ToolbarConfig {
+                    modern: false,
+                    inline_tabs: true,
+                    ..config.toolbar
+                },
+                ..config
+            };
+            assert_eq!(
+                hit_test(inline, 1200, 800, POINT { x: 100, y: h / 2 }, scale, 8),
+                HTCLIENT
+            );
+            assert_eq!(
+                hit_test(
+                    inline,
+                    1200,
+                    800,
+                    POINT {
+                        x: 1200 - h * 3 - 12,
+                        y: h / 2
+                    },
+                    scale,
+                    8
+                ),
+                HTCAPTION
+            );
+            assert_eq!(
+                hit_test(
+                    inline,
+                    1200,
+                    800,
+                    POINT {
+                        x: 1200 - h * 3 / 2,
+                        y: h / 2
+                    },
+                    scale,
+                    8
+                ),
+                HTMAXBUTTON
+            );
         }
         let hidden_controls = FrameConfig {
             toolbar: ToolbarConfig {

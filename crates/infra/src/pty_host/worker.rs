@@ -2211,7 +2211,11 @@ mod tests {
             vec![
                 RuntimeEvent::GShell(GShellRuntimeEvent::WorkingDirectoryChanged {
                     gshell_id: GShellId::new(12),
-                    working_directory: std::path::PathBuf::from("/home/user/project"),
+                    working_directory: std::path::PathBuf::from(if cfg!(windows) {
+                        "\\\\host\\home\\user\\project"
+                    } else {
+                        "/home/user/project"
+                    }),
                 }),
                 RuntimeEvent::GShell(GShellRuntimeEvent::CommandChanged {
                     gshell_id: GShellId::new(12),

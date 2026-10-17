@@ -5,6 +5,9 @@ with the current defaults. When `XDG_CONFIG_HOME` is set, the path is
 `$XDG_CONFIG_HOME/germinal/config.toml`.
 
 All sections and fields are optional. Omitted values use their defaults.
+If an existing configuration cannot be read, parsed, validated, or its resources resolved,
+Germinal reports a warning and starts with defaults for that session. It leaves the file
+unchanged; correct the file and restart to load your settings. Removed fields are not migrated.
 
 ## Window
 
@@ -15,7 +18,8 @@ width_px = 960
 height_px = 540
 maximized = false
 opacity = 1.0
-decorations = true
+titlebar = "custom"
+show_window_controls = true
 ```
 
 - `width_px` and `height_px` are integer logical-pixel values. Use `960`, not `960px`.
@@ -23,7 +27,15 @@ decorations = true
   compositor window-management behavior. The default is `false`.
 - `opacity` accepts values from `0.0` through `1.0`. Compositor support is required for
   transparency.
-- `decorations = false` requests a frameless window. The compositor may still draw a focus border.
+- `titlebar` accepts `native` (system title bar), `hidden` (no title bar), or `custom`
+  (the default inline title bar). The compositor may still draw a focus border.
+  Replace the former `toolbar` and `decorations` fields with this single setting.
+- With `titlebar = "custom"`, Germinal draws the title bar and hides native decorations.
+  Top tabs share its row, with inset spacing and a reserved drag area before window controls.
+  Bottom and left tabs retain the application icon in the title bar; top tabs hide it.
+  The ordinary inline title bar has no new-tab or sidebar-toggle button.
+  Modern mode retains both the `+` and sidebar-toggle buttons.
+- `show_window_controls = false` hides the modern title bar's minimize, maximize, and close buttons.
 
 ## Rendering
 
@@ -207,14 +219,23 @@ args = ["--id", "bell"]
 
 ```toml
 [tabs]
-position = "bottom"
+position = "top"
 style = "fade"
 ```
 
-`position` accepts `top` or `bottom`.
+`position` accepts `top` (default) or `bottom`. Left tabs belong to modern mode.
+Custom mode shows the tab bar even with a single tab. Native and hidden horizontal tabs appear with two or more tabs.
 `style` accepts `fade` or `powerline`.
 
 ## Keyboard
+
+Open the command palette with `Ctrl+Shift+P`. `Modern mode` and `Window controls`
+are direct On/Off switches. `Adjust title bar` and `Adjust tabs` open submenus.
+Use arrow keys and Enter to choose a setting;
+Esc or the `Back` entry returns to the parent menu. Esc at the root closes the palette.
+Current choices are marked `Current`. Selecting a setting applies it immediately and
+saves the affected fields to `config.toml`, preserving other settings and comments.
+Modern mode always uses its fixed layout; other saved appearance choices apply when it is off.
 
 ```toml
 [[keyboard.bindings]]
@@ -267,3 +288,8 @@ file_level = "info"
 ```
 
 Both fields accept `trace`, `debug`, `info`, `warn`, or `error`.
+
+Modern mode is controlled by `[window] modern = true` or the command palette's
+`Modern mode` switch. It uses a fixed custom title bar, left tabs, fade style, and
+visible window controls. Other appearance choices remain editable and are saved, but
+do not affect the modern layout. Switching modern mode off applies those saved choices.

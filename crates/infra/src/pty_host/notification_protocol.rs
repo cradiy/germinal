@@ -365,9 +365,13 @@ fn contains_no_osc_sequence(input: &[u8]) -> bool {
 fn parse_working_directory(payload: &[u8]) -> Option<PathBuf> {
     let file_url = payload.strip_prefix(b"file://")?;
     let path_start = file_url.iter().position(|byte| *byte == b'/')?;
+    let host = std::str::from_utf8(&file_url[..path_start]).ok()?;
     let decoded = percent_decode(&file_url[path_start..])?;
     let path = String::from_utf8(decoded).ok()?;
-    (!path.is_empty() && !path.contains('\0')).then(|| PathBuf::from(platform_file_url_path(path)))
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    platform_file_url_path(host, path).map(PathBuf::from)
 }
 
 fn parse_osc_9_progress_control(payload: &[u8]) -> Option<Osc9ProgressControl> {
@@ -402,17 +406,32 @@ fn parse_osc_9_progress_control(payload: &[u8]) -> Option<Osc9ProgressControl> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn platform_file_url_path(path: String) -> String {
-    path
+fn platform_file_url_path(_host: &str, path: String) -> Option<String> {
+    Some(path)
 }
 
 #[cfg(target_os = "windows")]
-fn platform_file_url_path(path: String) -> String {
+fn platform_file_url_path(host: &str, path: String) -> Option<String> {
+    if matches!(host, "." | "..")
+        || host.contains(['\\', ':', '@', '%', '?', '#'])
+        || host.chars().any(char::is_control)
+    {
+        return None;
+    }
     let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[2] == b':' {
-        path[1..].to_owned()
+    if bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && bytes[3] == b'/'
+    {
+        // Shells may include the local machine name before a drive path.
+        Some(path[1..].to_owned())
+    } else if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        // file://server/share/path represents a UNC path on Windows.
+        Some(format!("\\\\{host}{}", path.replace('/', "\\")))
     } else {
-        path
+        Some(path)
     }
 }
 
@@ -730,15 +749,38 @@ mod tests {
     #[test]
     fn decodes_osc_7_working_directory_urls() {
         let mut decoder = TerminalNotificationProtocolDecoder::default();
+        #[cfg(windows)]
+        let expected = PathBuf::from("\\\\fedora\\home\\user\\My Project");
+        #[cfg(not(windows))]
+        let expected = PathBuf::from("/home/user/My Project");
 
         assert_eq!(
             decoder.feed(b"before\x1b]7;file://fedora/home/user/My%20Project\x1b\\after"),
             vec![
                 NotificationProtocolEvent::Bytes(b"before".to_vec()),
-                NotificationProtocolEvent::WorkingDirectory(PathBuf::from("/home/user/My Project")),
+                NotificationProtocolEvent::WorkingDirectory(expected),
                 NotificationProtocolEvent::Bytes(b"after".to_vec()),
             ]
         );
+        #[cfg(windows)]
+        for (url, expected) in [
+            ("file:///C:/Users/My%20Project", "C:/Users/My Project"),
+            ("file://localhost/D:/work", "D:/work"),
+            ("file://desktop/D:/work", "D:/work"),
+            (
+                "file://nas/share/%E9%A1%B9%E7%9B%AE%20100%25",
+                "\\\\nas\\share\\项目 100%",
+            ),
+            ("file:////nas/share/project", "//nas/share/project"),
+        ] {
+            let sequence = format!("\x1b]7;{url}\x07");
+            assert_eq!(
+                decoder.feed(sequence.as_bytes()),
+                vec![NotificationProtocolEvent::WorkingDirectory(PathBuf::from(
+                    expected
+                ))]
+            );
+        }
     }
 
     #[test]
@@ -778,6 +820,18 @@ mod tests {
                 .is_empty()
         );
         assert!(decoder.feed(b"\x1b]7;file://host/bad%2\x1b\\").is_empty());
+        #[cfg(windows)]
+        for url in [
+            "file://./pipe/test",
+            "file://user@server/share",
+            "file://server:445/share",
+        ] {
+            assert!(
+                decoder
+                    .feed(format!("\x1b]7;{url}\x07").as_bytes())
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

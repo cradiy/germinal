@@ -17,7 +17,7 @@ mod sidebar;
 
 use audible_bell::AudibleBell;
 pub use config::{GerminalConfig, load_or_create_config};
-use config::{KeyboardAction, KeyboardBinding};
+use config::{KeyboardAction, KeyboardBinding, TitlebarMode};
 pub use error::{AppError, AppResult};
 use germinal_application::service::{
     gshell_service::GShellServiceState, layout_service::LayoutServiceState,
@@ -128,12 +128,12 @@ pub struct App {
     tab_pointer_consumed: bool,
     sidebar_close_pressed: Option<GShellId>,
     sidebar_resize: sidebar::SidebarResize,
+    modern_sidebar_collapsed: bool,
     pane_navigation_enabled: bool,
     command_palette: Option<command_palette::CommandPalette>,
     palette_consumed_keys: HashSet<winit::keyboard::PhysicalKey>,
     palette_consumed_buttons: HashSet<MouseButton>,
     config: GerminalConfig,
-    horizontal_tab_position: TabBarPosition,
     toolbar_pressed: Option<germinal_ports::rendering::toolbar::ToolbarAction>,
     toolbar_pointer_consumed: bool,
 }
@@ -226,13 +226,9 @@ impl App {
 
         let app = Self {
             sidebar_resize: sidebar::SidebarResize::default(),
+            modern_sidebar_collapsed: false,
             toolbar_pressed: None,
             toolbar_pointer_consumed: false,
-            horizontal_tab_position: if config.tabs.position == TabBarPosition::Left {
-                TabBarPosition::Bottom
-            } else {
-                config.tabs.position
-            },
             workspace_service_state: WorkspaceServiceState::with_workspace(workspace),
             gshell_service_state: GShellServiceState::new(),
             worker_service_state: WorkerServiceState::new(),
@@ -304,7 +300,7 @@ impl App {
         let window_attributes = winit::window::Window::default_attributes()
             .with_title(self.config.window.title.as_str())
             .with_transparent(self.config.window.opacity < 1.0)
-            .with_decorations(self.config.window.decorations && !self.modern_toolbar_visible())
+            .with_decorations(self.config.effective_titlebar() == TitlebarMode::Native)
             .with_maximized(self.config.window.maximized)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 f64::from(self.config.window.width_px),
@@ -371,7 +367,7 @@ impl App {
     }
 
     fn current_tab_bar_snapshot(&self) -> Option<TabBarSnapshot> {
-        (self.horizontal_tab_bar_visible() || self.config.tabs.position == TabBarPosition::Left)
+        (self.horizontal_tab_bar_visible() || self.layout_tab_position() == TabBarPosition::Left)
             .then(|| TabBarSnapshot {
                 titles: self.tab_titles(),
                 progresses: self.tab_progresses(),
@@ -381,8 +377,8 @@ impl App {
                     .map(|gshell_id| RenderTargetId::new(gshell_id.value()))
                     .collect(),
                 active_tab_index: self.active_tab_index(),
-                position: self.config.tabs.position,
-                style: self.config.tabs.style,
+                position: self.layout_tab_position(),
+                style: self.config.effective_tab_style(),
             })
     }
 
@@ -421,11 +417,13 @@ impl App {
                 window_size.height_px().saturating_sub(toolbar).max(1),
             ),
             self.current_terminal_size_info().cell_size().height_px(),
-            self.horizontal_tab_bar_visible(),
-            self.config.tabs.position,
+            self.horizontal_tab_bar_visible()
+                && !(self.modern_toolbar_visible()
+                    && self.layout_tab_position() == TabBarPosition::Top),
+            self.layout_tab_position(),
         );
         layout.y_px += toolbar;
-        if self.config.tabs.position == TabBarPosition::Left {
+        if self.layout_tab_position() == TabBarPosition::Left {
             layout.x_px = self.sidebar_width(window_size.width_px());
             layout.content_size = TerminalWindowSize::new(
                 window_size.width_px().saturating_sub(layout.x_px).max(1),
@@ -452,14 +450,19 @@ impl App {
         let resizing = self.sidebar_resize.is_dragging() || self.sidebar_edge_at_cursor();
         let toolbar = self.modern_toolbar_visible().then_some(
             germinal_ports::rendering::toolbar::ToolbarConfig {
-                sidebar: self.config.tabs.position == TabBarPosition::Left,
-                window_controls: self.config.window.show_window_controls,
+                modern: self.config.window.modern,
+                inline_tabs: !self.config.window.modern
+                    && self.layout_tab_position() == TabBarPosition::Top,
+                sidebar: self.layout_tab_position() == TabBarPosition::Left,
+                window_controls: self.config.window.modern
+                    || self.config.window.show_window_controls,
             },
         );
         if let Some(runtime) = self.render_runtime.as_mut() {
             runtime.set_sidebar_width(sidebar_width);
             runtime.set_sidebar_resize_cursor(resizing);
-            runtime.set_window_decorations(self.config.window.decorations && toolbar.is_none());
+            runtime
+                .set_window_decorations(self.config.effective_titlebar() == TitlebarMode::Native);
             runtime.set_toolbar(toolbar);
         }
         let visible_gshells = placements
@@ -803,9 +806,6 @@ impl App {
         let Some(action) = action else {
             return false;
         };
-        if action == KeyboardAction::ToggleTabSidebar && !self.modern_toolbar_visible() {
-            return false;
-        }
         if matches!(
             action,
             KeyboardAction::FocusNextPane
@@ -842,29 +842,25 @@ impl App {
 
     fn execute_keyboard_action(&mut self, event_loop: &ActiveEventLoop, action: KeyboardAction) {
         match action {
-            KeyboardAction::ToggleToolbar => {
+            KeyboardAction::ToggleTitlebar => {
                 if self.finish_sidebar_resize() {
                     self.tab_pointer_consumed = true;
                 }
-                let was_visible = self.modern_toolbar_visible();
-                self.config.window.toolbar = !was_visible;
-                if was_visible && self.config.tabs.position == TabBarPosition::Left {
-                    self.config.tabs.position = self.horizontal_tab_position;
-                }
+                let was_visible = self.config.window.titlebar == TitlebarMode::Custom;
+                self.config.window.titlebar = if was_visible {
+                    TitlebarMode::Native
+                } else {
+                    TitlebarMode::Custom
+                };
                 self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
                 self.update_ime_cursor_area();
             }
             KeyboardAction::ToggleTabSidebar => {
-                if self.finish_sidebar_resize() {
-                    self.tab_pointer_consumed = true;
+                if !self.config.window.modern {
+                    return;
                 }
-                self.config.window.toolbar = true;
-                if self.config.tabs.position == TabBarPosition::Left {
-                    self.config.tabs.position = self.horizontal_tab_position;
-                } else {
-                    self.horizontal_tab_position = self.config.tabs.position;
-                    self.config.tabs.position = TabBarPosition::Left;
-                }
+                self.finish_sidebar_resize();
+                self.modern_sidebar_collapsed = !self.modern_sidebar_collapsed;
                 self.resize_workspace_gshells(self.current_terminal_size_info().window_size());
                 self.update_ime_cursor_area();
             }
@@ -969,12 +965,22 @@ impl App {
         )
     }
 
+    fn layout_tab_position(&self) -> TabBarPosition {
+        if self.config.window.modern && self.modern_sidebar_collapsed {
+            TabBarPosition::Bottom
+        } else {
+            self.config.effective_tab_position()
+        }
+    }
+
     fn modern_toolbar_visible(&self) -> bool {
-        self.config.window.toolbar || self.config.tabs.position == TabBarPosition::Left
+        self.config.effective_titlebar() == TitlebarMode::Custom
     }
 
     fn horizontal_tab_bar_visible(&self) -> bool {
-        !self.modern_toolbar_visible() && self.tab_count() > 1
+        self.layout_tab_position() != TabBarPosition::Left
+            && (self.tab_count() > 1
+                || (!self.config.window.modern && self.modern_toolbar_visible()))
     }
 
     fn handle_toolbar_button(&mut self, event_loop: &ActiveEventLoop, state: ElementState) -> bool {
@@ -986,6 +992,12 @@ impl App {
             .cursor_position
             .and_then(|p| runtime.toolbar_action_at(p.x, p.y));
         if state == ElementState::Pressed {
+            if self
+                .cursor_position
+                .is_some_and(|p| runtime.tab_index_at_position(p.x, p.y).is_some())
+            {
+                return false;
+            }
             if self
                 .cursor_position
                 .is_none_or(|p| !runtime.toolbar_contains(p.x, p.y))

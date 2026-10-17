@@ -177,6 +177,8 @@ mod tests {
     fn font_changes_preserve_toolbar_geometry_and_dpi_rescales_icons() {
         let mut toolbar = Toolbar {
             config: Some(ToolbarConfig {
+                modern: false,
+                inline_tabs: false,
                 sidebar: false,
                 window_controls: true,
             }),

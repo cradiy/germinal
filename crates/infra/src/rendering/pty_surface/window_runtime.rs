@@ -1236,6 +1236,7 @@ impl WgpuTerminalWindowRuntime {
         }
         self.toolbar.config = config;
         self.toolbar.hovered = None;
+        self.rebuild_tab_bar_surface();
         self.schedule_redraw();
     }
 
@@ -1351,15 +1352,45 @@ impl WgpuTerminalWindowRuntime {
     fn rebuild_tab_bar_surface(&mut self) {
         self.tab_bar_generation = self.tab_bar_generation.wrapping_add(1).max(1);
         self.tab_bar_surface = self.tab_bar.as_ref().and_then(|tab_bar| {
-            let mut surface = if tab_bar.position == TabBarPosition::Left {
+            let inline = self
+                .toolbar
+                .config
+                .filter(|config| config.inline_tabs && tab_bar.position == TabBarPosition::Top);
+            let mut surface = if let Some(config) = inline {
+                let height = germinal_ports::rendering::toolbar::toolbar_height(
+                    self.scale_factor,
+                    self.size_info.window_size().height_px(),
+                );
+                let (x, y, width, available_height) =
+                    germinal_ports::rendering::toolbar::inline_tab_bounds(
+                        config,
+                        self.size_info.window_size().width_px(),
+                        height,
+                        self.scale_factor,
+                    );
+                if width == 0 || available_height == 0 {
+                    return None;
+                }
+                let size = TerminalSizeInfo::zero_padding(
+                    TerminalWindowSize::new(width, available_height + 1),
+                    self.size_info.cell_size(),
+                );
+                let mut surface = build_tab_bar_surface(tab_bar, size, self.color_theme, false)?;
+                surface.placement.x_px = x;
+                surface.placement.y_px =
+                    y + available_height.saturating_sub(surface.placement.height_px) / 2;
+                Some(surface)
+            } else if tab_bar.position == TabBarPosition::Left {
                 self.tab_sidebar.build(
                     tab_bar,
                     self.size_info,
                     self.sidebar_cell_size.unwrap_or(self.size_info.cell_size()),
-                    germinal_ports::rendering::toolbar::toolbar_height(
-                        self.scale_factor,
-                        self.size_info.window_size().height_px(),
-                    ),
+                    self.toolbar.config.map_or(0, |_| {
+                        germinal_ports::rendering::toolbar::toolbar_height(
+                            self.scale_factor,
+                            self.size_info.window_size().height_px(),
+                        )
+                    }),
                     self.color_theme,
                 )
             } else {
@@ -1370,7 +1401,10 @@ impl WgpuTerminalWindowRuntime {
                     self.background_shader_enabled && tab_bar.style == TabBarStyle::Fade,
                 )
             }?;
-            if tab_bar.position != TabBarPosition::Left && self.toolbar.config.is_some() {
+            if inline.is_none()
+                && tab_bar.position != TabBarPosition::Left
+                && self.toolbar.config.is_some()
+            {
                 let height = germinal_ports::rendering::toolbar::toolbar_height(
                     self.scale_factor,
                     self.size_info.window_size().height_px(),
@@ -1382,6 +1416,10 @@ impl WgpuTerminalWindowRuntime {
             surface.snapshot.latest_seq = Seq::new(self.tab_bar_generation);
             Some(surface)
         });
+        #[cfg(windows)]
+        if let Some(frame) = &self.windows_frame {
+            frame.update_tab_regions(self.tab_bar_surface.as_ref());
+        }
     }
 
     pub fn scroll_tab_sidebar(&mut self, x: f64, y: f64, delta: f64) -> bool {
@@ -1779,6 +1817,14 @@ impl WgpuTerminalWindowRuntime {
                 hyperlink_highlights: &[],
             });
         }
+        // Paint the caption background before the tabs sharing that same row.
+        if toolbar_surface.is_some()
+            && self.tab_bar_surface.is_some()
+            && self.toolbar.config.is_some_and(|config| config.inline_tabs)
+        {
+            let count = surfaces.len();
+            surfaces.swap(count - 1, count - 2);
+        }
         let palette_size = self.command_palette_size_info();
         let palette_surface = self.command_palette.as_ref().and_then(|palette| {
             command_palette::build(
@@ -2053,7 +2099,7 @@ fn cursor_blink_phase(epoch: Instant, now: Instant, interval: Duration) -> (bool
     (phase.is_multiple_of(2), now + remaining)
 }
 
-const TAB_BAR_RENDER_TARGET_ID: RenderTargetId = RenderTargetId::new(u64::MAX);
+use germinal_ports::rendering::tab_bar::TAB_BAR_RENDER_TARGET_ID;
 const TAB_BAR_POWERLINE_EDGE: &str = "";
 const TAB_BAR_OUTER_MARGIN: u32 = 0;
 const TAB_BAR_MIN_WIDTH: u32 = 8;
@@ -2151,7 +2197,7 @@ fn build_tab_bar_surface(
     color_theme: TerminalColorTheme,
     transparent_background: bool,
 ) -> Option<WgpuTabBarSurface> {
-    if tab_bar.titles.len() < 2 || tab_bar.active_tab_index >= tab_bar.titles.len() {
+    if tab_bar.titles.is_empty() || tab_bar.active_tab_index >= tab_bar.titles.len() {
         return None;
     }
 

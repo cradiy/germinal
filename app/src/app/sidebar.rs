@@ -104,7 +104,7 @@ mod tests {
             .build()
             .unwrap();
         let mut config = GerminalConfig::default();
-        config.tabs.position = TabBarPosition::Left;
+        config.window.modern = true;
         config.window.title = "Germinal sidebar resize check".into();
         config.window.width_px = 960;
         config.window.height_px = 640;
@@ -225,7 +225,7 @@ impl App {
     }
 
     pub(super) fn sidebar_edge_at_cursor(&self) -> bool {
-        if self.config.tabs.position != TabBarPosition::Left || self.pointer_capture.is_some() {
+        if self.layout_tab_position() != TabBarPosition::Left || self.pointer_capture.is_some() {
             return false;
         }
         let Some(position) = self.cursor_position else {
