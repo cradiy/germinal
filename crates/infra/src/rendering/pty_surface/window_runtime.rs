@@ -635,6 +635,24 @@ impl WgpuTerminalWindowRuntime {
         window: Arc<Window>,
         options: WgpuTerminalWindowRuntimeOptions,
     ) -> Result<Self, WindowRuntimeError> {
+        #[cfg(windows)]
+        {
+            let mut icons = super::svg_icon::SvgIconCache::default();
+            match icons.rasterize(
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../packaging/linux/io.github.cradiy.Germinal.svg"
+                )),
+                64,
+                None,
+            ) {
+                Ok(icon) => match icon.window_icon() {
+                    Ok(icon) => window.set_window_icon(Some(icon)),
+                    Err(error) => warn!(%error, "failed to create native window icon"),
+                },
+                Err(error) => warn!(%error, "failed to rasterize native window icon"),
+            }
+        }
         let WgpuTerminalWindowRuntimeOptions {
             profile,
             base_title,

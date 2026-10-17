@@ -24,6 +24,11 @@ toml.workspace = true
 toml_edit = "0.25.13"
 tempfile = "3"
 
+[build-dependencies]
+resvg.workspace = true
+png.workspace = true
+winresource = "0.1"
+
 [dev-dependencies]
 base64.workspace = true
 png.workspace = true
