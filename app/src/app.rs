@@ -11,6 +11,7 @@ mod boilerplate;
 mod command_palette;
 mod config;
 mod error;
+mod file_drop;
 mod logging;
 mod paste;
 mod sidebar;
@@ -1782,6 +1783,25 @@ impl ApplicationHandler<RuntimeEvent> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.exit_and_persist(event_loop);
+            }
+            WindowEvent::DroppedFile(path) => {
+                if self.command_palette.is_some() {
+                    return;
+                }
+                let program = self
+                    .config
+                    .pty_shell_command()
+                    .map(|shell| shell.program)
+                    .unwrap_or_else(|| {
+                        germinal_infra::pty::shell_command::default_shell_command().program
+                    });
+                match file_drop::path_argument(&path, &program) {
+                    Ok(text) => self.route_input_to_gshell(GShellInput {
+                        gshell_id: self.focused_gshell(),
+                        event: GShellInputEvent::Paste(text),
+                    }),
+                    Err(reason) => warn!(reason, "could not insert dropped file path"),
+                }
             }
             WindowEvent::Moved(_) => {
                 if let Some(render_runtime) = self.render_runtime.as_mut()

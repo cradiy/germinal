@@ -229,6 +229,16 @@ Custom mode shows the tab bar even with a single tab. Native and hidden horizont
 
 ## Keyboard
 
+Files and directories dropped onto the window are inserted into the focused terminal
+as quoted path arguments, separated by spaces, without pressing Enter. Multiple files
+are supported. Drops are ignored while the command palette is open.
+Quoting follows the configured startup shell (or the default shell), supporting
+PowerShell, cmd, Nushell, Bash/Niubash, sh, zsh, dash, and fish. Nested shells and remote
+sessions are not detected, and paths are not converted to WSL or remote paths.
+Paths with terminal control characters are rejected. For cmd, paths containing `%`,
+`!`, or double quotes are rejected because their interpretation depends on expansion
+settings. Unsupported shells or rejected paths produce a log warning.
+
 Open the command palette with `Ctrl+Shift+P`. `Modern mode` and `Window controls`
 are direct On/Off switches. `Adjust title bar` and `Adjust tabs` open submenus.
 Use arrow keys and Enter to choose a setting;
